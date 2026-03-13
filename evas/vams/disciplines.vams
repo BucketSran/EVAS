@@ -1,0 +1,40 @@
+// Verilog-AMS disciplines
+
+nature Voltage
+  units = "V";
+  access = V;
+  idt_nature = Flux;
+  abstol = 1e-6;
+endnature
+
+nature Current
+  units = "A";
+  access = I;
+  idt_nature = Charge;
+  abstol = 1e-12;
+endnature
+
+nature Flux
+  units = "Wb";
+  access = Phi;
+  abstol = 1e-9;
+endnature
+
+nature Charge
+  units = "C";
+  access = Q;
+  abstol = 1e-14;
+endnature
+
+discipline electrical
+  potential Voltage;
+  flow Current;
+enddiscipline
+
+discipline voltage
+  potential Voltage;
+enddiscipline
+
+discipline current
+  flow Current;
+enddiscipline

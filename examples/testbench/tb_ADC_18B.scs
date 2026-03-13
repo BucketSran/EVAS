@@ -1,0 +1,22 @@
+// ADC_18B: 18-bit SAR ADC
+simulator lang=spectre
+global 0
+
+ahdl_include "../veriloga/ADC_18B.va"
+
+// Conversion clock: 20ns period
+Vclks (clks 0) vsource type=pulse val0=0 val1=0.9 period=20n \
+        rise=100p fall=100p
+
+// Input: step from 0.45V to 0.75V at 25ns
+Vvin (vin 0) vsource type=pwl wave=[0 0.45 24e-9 0.45 25e-9 0.75 100e-9 0.75]
+
+// DUT (port order: VIN CLKS DOUT[17] DOUT[16] ... DOUT[0])
+XDUT (vin clks \
+        dout_17 dout_16 dout_15 dout_14 dout_13 dout_12 \
+        dout_11 dout_10 dout_9 dout_8 dout_7 dout_6 \
+        dout_5 dout_4 dout_3 dout_2 dout_1 dout_0) \
+        ADC_18B vdd=0.9
+
+tran tran stop=80n maxstep=100p
+save vin clks dout_17 dout_16 dout_15 dout_14 dout_0

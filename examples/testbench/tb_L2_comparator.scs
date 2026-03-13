@@ -1,0 +1,23 @@
+// L2_comparator: Clocked Comparator
+simulator lang=spectre
+global 0
+
+ahdl_include "../veriloga/L2_comparator.va"
+
+// Power supplies
+Vvdd (vdd 0) vsource dc=0.9 type=dc
+Vgnd (gnd 0) vsource dc=0.0 type=dc
+
+// Clock: 1GHz (1ns period), delayed 0.5ns
+Vclk (clk 0) vsource type=pulse val0=0 val1=0.9 period=1n delay=0.5n \
+        rise=20p fall=20p
+
+// Differential input: VINP constant, VINN steps at 5ns
+Vvinp (vinp 0) vsource dc=0.5 type=dc
+Vvinn (vinn 0) vsource type=pwl wave=[0 0.3 4.9e-9 0.3 5e-9 0.7 10e-9 0.7]
+
+// DUT (port order: DCMPN DCMPP GND VDD CLK VINN VINP)
+XDUT (out_n out_p gnd vdd clk vinn vinp) L2_comparator
+
+tran tran stop=10n maxstep=5p
+save clk vinp vinn out_p out_n

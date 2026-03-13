@@ -1,0 +1,49 @@
+`include "constants.vams"
+`include "disciplines.vams"
+
+`define NUM_ADC_BITS 18
+
+module ADC_18B(input electrical VIN, input electrical CLKS, output electrical [17:0] DOUT);
+
+parameter real vdd = 0.9;
+real vsampled, vth_cmp;
+integer dout [`NUM_ADC_BITS:1];
+genvar i;
+
+analog begin
+	// reset digital output
+	@(initial_step) begin
+		for (i = `NUM_ADC_BITS; i >= 1; i = i - 1) begin
+			dout[i] = 0;
+		end
+	end
+		
+	// track phase (sampling)
+	if (V(CLKS) > vdd/2) begin
+		vsampled = V(VIN);
+	end
+
+	// conversion phase
+	@(cross(V(CLKS)-vdd/2,+1)) begin
+		vth_cmp = vdd / 2;
+
+		// start successive approximation conversion (binary search)
+		for (i=1; i<=`NUM_ADC_BITS; i=i+1) begin
+			if (vsampled > vth_cmp) begin
+				dout[`NUM_ADC_BITS-i+1] = 1;
+				vth_cmp = vth_cmp + vdd/(pow(2.0,i+1));
+			end else begin
+				dout[`NUM_ADC_BITS-i+1] = 0;
+				vth_cmp = vth_cmp - vdd/(pow(2.0,i+1));
+			end
+
+		end
+	end
+	
+	// output assignment
+	for (i = `NUM_ADC_BITS; i >= 1 ; i = i - 1) begin
+		V(DOUT[i-1]) <+ transition(dout[i]);
+	end
+end	
+	
+endmodule

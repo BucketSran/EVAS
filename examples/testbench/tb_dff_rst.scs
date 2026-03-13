@@ -1,0 +1,23 @@
+// dff_rst: D Flip-Flop with Reset
+simulator lang=spectre
+global 0
+
+ahdl_include "../veriloga/dff_rst.va"
+
+// Clock: 100us period, delayed 10us
+Vclk (clk 0) vsource type=pulse val0=0 val1=5.0 period=100u delay=10u \
+        rise=1u fall=1u
+
+// Data: HIGH from 5us, LOW from 350us, HIGH again from 650us
+Vdata (data 0) vsource type=pwl \
+        wave=[0 0 4e-6 0 5e-6 5.0 345e-6 5.0 350e-6 0 645e-6 0 650e-6 5.0 1000e-6 5.0]
+
+// Reset: pulse at 500us
+Vrst (reset 0) vsource type=pwl \
+        wave=[0 0 495e-6 0 500e-6 5.0 520e-6 5.0 525e-6 0 1000e-6 0]
+
+// DUT (port order: vin_d vclk rst vout_q vout_qbar)
+XDUT (data clk reset q qbar) dff_rst
+
+tran tran stop=1000u maxstep=1u
+save clk data reset q qbar
