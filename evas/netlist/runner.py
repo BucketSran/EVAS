@@ -1,35 +1,33 @@
 """
-runner.py — EVAS runner: parse .scs → compile VA → simulate → log + CSV + plot.
-
-Produces a streamlined Spectre-like log, CSV waveform data, and PNG plot.
+runner.py -- EVAS runner: parse .scs, compile VA, simulate, produce log + CSV.
 """
-import sys
-import os
-import time
+
 import csv
+import re as _re
+import sys
+import time
+
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, TextIO
-from datetime import datetime
+
+from evas.compiler.parser import parse as parse_va
+from evas.compiler.preprocessor import preprocess
+from evas.simulator.backend import compile_module
+from evas.simulator.engine import Simulator, pulse, dc, sine, pwl, SimResult
 
 from .spectre_parser import (
     SpectreNetlist, SpectreSource, SpectreInstance, parse_spectre,
     evaluate_expr, _parse_suffix_number, has_transistors,
 )
 
-from evas.simulator.engine import Simulator, pulse, dc, sine, pwl, SimResult
-from evas.simulator.backend import CompiledModel, compile_module
-from evas.compiler.preprocessor import preprocess
-from evas.compiler.parser import parse as parse_va
-
 VERSION = '0.1.0'
 
 
 # ---------------------------------------------------------------------------
-# VA model compilation (returns class + port info)
+# VA model compilation
 # ---------------------------------------------------------------------------
 
 def _compile_va(va_path: str, source_dir: str = None):
@@ -60,24 +58,19 @@ def _build_node_map(instance, module) -> Dict[str, str]:
     array element in order from high index to low index.
     """
     decl_by_name = {pd.name: pd for pd in module.port_decls}
-
     node_map = {}
-    netlist_nodes = list(instance.nodes)
     ni = 0
+    netlist_nodes = list(instance.nodes)
 
     for port_name in module.ports:
         pd = decl_by_name.get(port_name)
         if pd and pd.is_array:
             hi = pd.array_hi if pd.array_hi is not None else 0
             lo = pd.array_lo if pd.array_lo is not None else 0
-            if hi >= lo:
-                indices = range(hi, lo - 1, -1)
-            else:
-                indices = range(hi, lo + 1)
+            indices = range(hi, lo - 1, -1) if hi >= lo else range(hi, lo + 1)
             for idx in indices:
-                port_key = f'{pd.name}[{idx}]'
                 if ni < len(netlist_nodes):
-                    node_map[port_key] = netlist_nodes[ni]
+                    node_map[f'{pd.name}[{idx}]'] = netlist_nodes[ni]
                     ni += 1
         else:
             if ni < len(netlist_nodes):
@@ -88,18 +81,17 @@ def _build_node_map(instance, module) -> Dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Source conversion: Spectre params → simulator waveform
+# Source conversion: Spectre params -> simulator waveform
 # ---------------------------------------------------------------------------
 
-def _add_spectre_source(sim: Simulator, src: SpectreSource, ground: str):
+def _add_spectre_source(sim: Simulator, src: SpectreSource, ground: str) -> None:
     """Convert a SpectreSource to a simulator waveform and add it."""
     node = src.node_pos if src.node_neg == ground else src.node_pos
     params = src.params
     stype = src.source_type
 
-    if stype == 'dc' or stype == '':
-        voltage = float(params.get('dc', 0.0))
-        sim.add_source(node, dc(voltage))
+    if stype in ('dc', ''):
+        sim.add_source(node, dc(float(params.get('dc', 0.0))))
 
     elif stype == 'pulse':
         v0 = float(params.get('val0', 0.0))
@@ -109,10 +101,7 @@ def _add_spectre_source(sim: Simulator, src: SpectreSource, ground: str):
         rise = float(params.get('rise', 1e-12))
         fall = float(params.get('fall', 1e-12))
         width = params.get('width', None)
-        if width is not None:
-            duty = float(width) / period if period > 0 else 0.5
-        else:
-            duty = 0.5
+        duty = float(width) / period if width is not None and period > 0 else 0.5
 
         sim.add_source(node, pulse(
             v_lo=v0, v_hi=v1, period=period, duty=duty,
@@ -121,16 +110,12 @@ def _add_spectre_source(sim: Simulator, src: SpectreSource, ground: str):
 
     elif stype == 'pwl':
         wave = params.get('wave', '')
-        if isinstance(wave, str) and wave:
-            tokens = wave.split()
-            vals = [float(t) for t in tokens]
-        else:
-            vals = []
-        times = [vals[i] for i in range(0, len(vals), 2)]
-        values = [vals[i] for i in range(1, len(vals), 2)]
+        vals = [float(t) for t in wave.split()] if isinstance(wave, str) and wave else []
+        times = vals[0::2]
+        values = vals[1::2]
         sim.add_source(node, pwl(times, values))
 
-    elif stype == 'sin' or stype == 'sine':
+    elif stype in ('sin', 'sine'):
         offset = float(params.get('sinedc', params.get('dc', 0.0)))
         ampl = float(params.get('ampl', 1.0))
         freq = float(params.get('freq', 1e6))
@@ -141,19 +126,20 @@ def _add_spectre_source(sim: Simulator, src: SpectreSource, ground: str):
 # Engineering number formatting
 # ---------------------------------------------------------------------------
 
+_ENG_PREFIXES = [
+    (1e12, 'T'), (1e9, 'G'), (1e6, 'M'), (1e3, 'k'),
+    (1, ''), (1e-3, 'm'), (1e-6, 'u'), (1e-9, 'n'),
+    (1e-12, 'p'), (1e-15, 'f'),
+]
+
+
 def _eng_format(val: float, unit: str = '') -> str:
     """Format a number in engineering notation with unit."""
     if val == 0:
         return f"0 {unit}".strip()
 
     abs_val = abs(val)
-    prefixes = [
-        (1e12, 'T'), (1e9, 'G'), (1e6, 'M'), (1e3, 'k'),
-        (1, ''), (1e-3, 'm'), (1e-6, 'u'), (1e-9, 'n'),
-        (1e-12, 'p'), (1e-15, 'f'),
-    ]
-
-    for scale, prefix in prefixes:
+    for scale, prefix in _ENG_PREFIXES:
         if abs_val >= scale * 0.999:
             scaled = val / scale
             if scaled == int(scaled):
@@ -174,32 +160,141 @@ class _Logger:
         self.log_file = log_file
         self.quiet = quiet
 
-    def write(self, msg: str = ''):
+    def write(self, msg: str = '') -> None:
         if not self.quiet:
             print(msg)
         if self.log_file:
             self.log_file.write(msg + '\n')
 
-    def flush(self):
+    def flush(self) -> None:
         if self.log_file:
             self.log_file.flush()
+
+
+# ---------------------------------------------------------------------------
+# Bus detection and derived signals
+# ---------------------------------------------------------------------------
+
+def _find_buses(result: SimResult) -> Dict[str, Dict[int, str]]:
+    """Find bus-like signal groups (name_N, name_N-1, ..., name_0).
+
+    Returns {prefix: {index: signal_name}} for contiguous buses starting at 0.
+    """
+    groups: Dict[str, Dict[int, str]] = {}
+    for name in result.signals:
+        m = _re.match(r'^(.+?)_(\d+)$', name)
+        if m:
+            prefix, idx = m.group(1), int(m.group(2))
+            groups.setdefault(prefix, {})[idx] = name
+
+    buses: Dict[str, Dict[int, str]] = {}
+    for prefix, bits in groups.items():
+        indices = sorted(bits.keys())
+        if len(indices) < 2:
+            continue
+        if indices[0] != 0 or indices != list(range(len(indices))):
+            continue
+        buses[prefix] = bits
+    return buses
+
+
+def _derive_bus_signals(result: SimResult) -> Dict[str, np.ndarray]:
+    """Compute combined integer-valued code signals for detected buses."""
+    derived: Dict[str, np.ndarray] = {}
+    for prefix, bits in _find_buses(result).items():
+        indices = sorted(bits.keys())
+        vdd = max(float(np.max(result.signals[bits[idx]])) for idx in indices)
+        if vdd == 0:
+            continue
+        combined = np.zeros_like(result.time)
+        for idx in indices:
+            combined += (result.signals[bits[idx]] / vdd) * (2 ** idx)
+        derived[f'{prefix}_code'] = combined
+    return derived
+
+
+# ---------------------------------------------------------------------------
+# CSV output
+# ---------------------------------------------------------------------------
+
+def _is_digital_signal(data: np.ndarray) -> bool:
+    """Return True if a signal only takes two distinct levels (0 and VDD)."""
+    unique = np.unique(np.round(data, decimals=6))
+    return len(unique) <= 2
+
+
+def _write_csv(csv_path: Path, result: SimResult, save_signals: List[str]) -> None:
+    """Write simulation results to CSV file."""
+    signal_names = save_signals if save_signals else sorted(result.signals.keys())
+    valid_signals = [s for s in signal_names if s in result.signals]
+
+    is_int: Dict[str, bool] = {}
+    for sig in valid_signals:
+        if sig.endswith('_code'):
+            is_int[sig] = True
+        else:
+            is_int[sig] = _is_digital_signal(result.signals[sig])
+
+    vdd_map: Dict[str, float] = {}
+    for sig in valid_signals:
+        if is_int[sig] and not sig.endswith('_code'):
+            peak = float(np.max(result.signals[sig]))
+            vdd_map[sig] = peak if peak > 0 else 1.0
+
+    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['time'] + valid_signals)
+        for i in range(len(result.time)):
+            row = [f"{result.time[i]:.6e}"]
+            for sig in valid_signals:
+                v = result.signals[sig][i]
+                if not is_int[sig]:
+                    row.append(f"{v:.6e}")
+                elif sig.endswith('_code'):
+                    row.append(str(int(round(v))))
+                elif vdd_map[sig] > 0:
+                    row.append(str(int(round(v / vdd_map[sig]))))
+                else:
+                    row.append('0')
+            writer.writerow(row)
+
+
+# ---------------------------------------------------------------------------
+# Collect all nodes from the netlist
+# ---------------------------------------------------------------------------
+
+def _collect_nodes(netlist: SpectreNetlist) -> set:
+    """Gather all non-ground nodes from sources and instances."""
+    nodes = set()
+    for src in netlist.sources:
+        nodes.add(src.node_pos)
+        nodes.add(src.node_neg)
+    for inst in netlist.instances:
+        nodes.update(inst.nodes)
+    nodes.discard(netlist.ground)
+    return nodes
 
 
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def run_spectre(scs_file: str, log_path: Optional[str] = None,
-                output_dir: str = './output') -> bool:
-    """Run a Spectre .scs netlist. Returns True on success."""
+def evas_simulate(scs_file: str, log_path: Optional[str] = None,
+                output_dir: str = './output',
+                strobe_log_path: Optional[str] = None) -> bool:
+    """Run an EVAS .scs netlist. Returns True on success.
+
+    Args:
+        scs_file:        Path to the .scs netlist file.
+        log_path:        Optional path for the simulation log. If None, log goes to stdout.
+        output_dir:      Directory for output files (CSV, strobe log).
+        strobe_log_path: Path for $strobe/$display output. Defaults to <output_dir>/strobe.txt.
+    """
     scs_path = Path(scs_file).resolve()
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    log_file = None
-    if log_path:
-        log_file = open(log_path, 'w', encoding='utf-8')
-
+    log_file = open(log_path, 'w', encoding='utf-8') if log_path else None
     log = _Logger(log_file, quiet=(log_path is not None))
     errors = 0
     warnings = 0
@@ -209,14 +304,12 @@ def run_spectre(scs_file: str, log_path: Optional[str] = None,
     # Banner
     now = datetime.now()
     timestamp = now.strftime("%I:%M:%S %p, %a %b %d, %Y").lstrip('0')
-
-    log.write("EVAS — Event-driven Verilog-A Simulator")
-    log.write(f"Version {VERSION} — {now.strftime('%b %Y')}")
+    log.write("EVAS -- Event-driven Verilog-A Simulator")
+    log.write(f"Version {VERSION} -- {now.strftime('%b %Y')}")
     log.write("")
     log.write(f"Simulating `{scs_path.name}' at {timestamp}.")
     log.write("Command line:")
-    cmd = ' '.join(sys.argv)
-    log.write(f"    {cmd}")
+    log.write(f"    {' '.join(sys.argv)}")
     log.write("")
 
     # 1. Parse netlist
@@ -229,7 +322,6 @@ def run_spectre(scs_file: str, log_path: Optional[str] = None,
             log_file.close()
         return False
 
-    # Check for transistors — EVAS doesn't support them
     if has_transistors(netlist):
         log.write("ERROR: Netlist contains transistor-level devices.")
         log.write("       EVAS only supports behavioral Verilog-A models.")
@@ -245,7 +337,6 @@ def run_spectre(scs_file: str, log_path: Optional[str] = None,
             log.write(f"ERROR: Cannot find VA file: {inc.path}")
             errors += 1
             continue
-
         cls, module = _compile_va(str(va_path))
         models_by_name[module.name] = (cls, module)
         log.write(f"Compiled Verilog-A module: {module.name}")
@@ -259,14 +350,11 @@ def run_spectre(scs_file: str, log_path: Optional[str] = None,
     # 3. Build simulator
     sim = Simulator()
 
-    # Add voltage sources
-    source_count = 0
     for src in netlist.sources:
         _add_spectre_source(sim, src, netlist.ground)
-        source_count += 1
 
     # 4. Instantiate models
-    instance_counts = {}
+    instance_counts: Dict[str, int] = {}
     for inst in netlist.instances:
         if inst.model_name not in models_by_name:
             log.write(f"ERROR: Model {inst.model_name} not found "
@@ -277,46 +365,27 @@ def run_spectre(scs_file: str, log_path: Optional[str] = None,
         cls, module = models_by_name[inst.model_name]
         model = cls()
         model.node_map = _build_node_map(inst, module)
-
-        for k, v in inst.params.items():
-            model.params[k] = v
-
+        model.params.update(inst.params)
         sim.add_model(model)
         instance_counts[inst.model_name] = instance_counts.get(inst.model_name, 0) + 1
 
     # Circuit inventory
+    all_nodes = _collect_nodes(netlist)
     log.write("")
     log.write("Circuit inventory:")
-
-    all_nodes = set()
-    for src in netlist.sources:
-        all_nodes.add(src.node_pos)
-        all_nodes.add(src.node_neg)
-    for inst in netlist.instances:
-        for n in inst.nodes:
-            all_nodes.add(n)
-    all_nodes.discard(netlist.ground)
-    node_count = len(all_nodes)
-
-    log.write(f"{'nodes':>20s} {node_count}")
+    log.write(f"{'nodes':>20s} {len(all_nodes)}")
     for mname, cnt in instance_counts.items():
         log.write(f"{mname:>20s} {cnt}")
-    log.write(f"{'vsource':>20s} {source_count}")
+    log.write(f"{'vsource':>20s} {len(netlist.sources)}")
 
     # 5. Record signals
-    record_nodes = set()
-    for sig in netlist.save_signals:
-        record_nodes.add(sig)
-    if not record_nodes:
-        record_nodes = all_nodes
-
+    record_nodes = set(netlist.save_signals) if netlist.save_signals else all_nodes
     if record_nodes:
         sim.record(*sorted(record_nodes))
 
     # 6. Run simulation
     if netlist.tran is None:
         log.write("ERROR: No transient analysis found")
-        errors += 1
         if log_file:
             log_file.close()
         return False
@@ -336,17 +405,13 @@ def run_spectre(scs_file: str, log_path: Optional[str] = None,
     log.write("")
 
     t_sim_start = time.time()
-
     result = sim.run(tstop, tstep=tstep)
 
-    # Progress lines
     for pct in range(10, 101, 10):
         t_at = tstop * pct / 100.0
         log.write(f"    tran: time = {_eng_format(t_at, 's'):12s} ({pct:3d} %)")
 
-    t_sim_end = time.time()
-    sim_cpu = (t_sim_end - t_sim_start) * 1000
-
+    sim_elapsed_ms = (time.time() - t_sim_start) * 1000
     n_steps = len(result.time) - 1
     log.write(f"Number of accepted tran steps = {n_steps}")
 
@@ -364,98 +429,42 @@ def run_spectre(scs_file: str, log_path: Optional[str] = None,
         log.write(f"    V: V({max_v_name}) = {_eng_format(max_v, 'V')}")
 
     log.write("")
-    log.write(f"Tran analysis time: CPU = {sim_cpu:.1f} ms, "
-              f"elapsed = {sim_cpu:.1f} ms.")
+    log.write(f"Tran analysis time: CPU = {sim_elapsed_ms:.1f} ms, "
+              f"elapsed = {sim_elapsed_ms:.1f} ms.")
+
+    # 6b. Derive combined bus signals (e.g. dout_3..dout_0 -> dout_code)
+    derived = _derive_bus_signals(result)
+    result.signals.update(derived)
 
     # 7. Write CSV
     csv_path = out_dir / 'tran.csv'
-    _write_csv(csv_path, result, netlist.save_signals)
+    save_with_derived = list(netlist.save_signals) + list(derived.keys())
+    _write_csv(csv_path, result, save_with_derived)
 
-    signal_names = netlist.save_signals if netlist.save_signals else sorted(result.signals.keys())
+    signal_names = save_with_derived if save_with_derived else sorted(result.signals.keys())
     log.write("")
     log.write(f"Writing CSV: {csv_path} "
               f"(signals: {', '.join(signal_names)})")
 
-    # 8. Generate plot
-    plot_path = out_dir / 'tran.png'
-    _generate_plot(result, signal_names, scs_path.stem, plot_path)
-    log.write(f"Writing plot: {plot_path}")
+    # 8. Collect $strobe / $display output
+    strobe_lines = []
+    for model in sim.models:
+        strobe_lines.extend(model._strobe_log)
+
+    if strobe_lines:
+        s_path = Path(strobe_log_path) if strobe_log_path else out_dir / 'strobe.txt'
+        s_path.write_text('\n'.join(strobe_lines) + '\n', encoding='utf-8')
+        log.write(f"Writing strobe log: {s_path} ({len(strobe_lines)} lines)")
+        print('\n'.join(strobe_lines))
 
     # Final summary
-    t_total_end = time.time()
-    total_cpu = t_total_end - t_total_start
-
+    total_elapsed = time.time() - t_total_start
     log.write("")
     log.write(f"evas completes with {errors} errors, {warnings} warnings.")
-    log.write(f"Total time: CPU = {total_cpu:.1f} s, "
-              f"elapsed = {total_cpu:.1f} s.")
+    log.write(f"Total time: CPU = {total_elapsed:.1f} s, "
+              f"elapsed = {total_elapsed:.1f} s.")
 
     if log_file:
         log_file.close()
 
     return errors == 0
-
-
-# ---------------------------------------------------------------------------
-# Plot generation
-# ---------------------------------------------------------------------------
-
-def _generate_plot(result: SimResult, signal_names: List[str],
-                   title: str, plot_path: Path):
-    """Generate a multi-panel waveform plot as PNG."""
-    valid_signals = [s for s in signal_names if s in result.signals]
-    if not valid_signals:
-        valid_signals = [n for n in result.signals if n != '__time__']
-
-    n_plots = len(valid_signals) + 1
-    fig, axes = plt.subplots(n_plots, 1, figsize=(12, 3 * n_plots), sharex=True)
-    if n_plots == 1:
-        axes = [axes]
-
-    tstop = result.time[-1]
-    if tstop < 1e-6:
-        t_scale, t_unit = 1e9, 'ns'
-    elif tstop < 1e-3:
-        t_scale, t_unit = 1e6, 'us'
-    else:
-        t_scale, t_unit = 1e3, 'ms'
-
-    t_plot = result.time * t_scale
-
-    for i, node in enumerate(valid_signals):
-        axes[i].plot(t_plot, result.signals[node], linewidth=0.8)
-        axes[i].set_ylabel(f'{node} (V)')
-        axes[i].grid(True, alpha=0.3)
-        if i == 0:
-            axes[i].set_title(title)
-
-    if result.step_sizes is not None and len(result.step_sizes) > 1:
-        ax = axes[-1]
-        dt = result.step_sizes * t_scale
-        ax.semilogy(t_plot[1:], dt[1:], 'k-', linewidth=0.5, alpha=0.7)
-        ax.set_ylabel(f'Step size ({t_unit})')
-        ax.set_xlabel(f'Time ({t_unit})')
-        ax.grid(True, alpha=0.3)
-        ax.set_title('Adaptive Step Size')
-
-    fig.savefig(str(plot_path), dpi=150, bbox_inches='tight')
-    plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# CSV output
-# ---------------------------------------------------------------------------
-
-def _write_csv(csv_path: Path, result: SimResult, save_signals: List[str]):
-    """Write simulation results to CSV file."""
-    signal_names = save_signals if save_signals else sorted(result.signals.keys())
-    valid_signals = [s for s in signal_names if s in result.signals]
-
-    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['time'] + valid_signals)
-        for i in range(len(result.time)):
-            row = [f"{result.time[i]:.6e}"]
-            for sig in valid_signals:
-                row.append(f"{result.signals[sig][i]:.6e}")
-            writer.writerow(row)

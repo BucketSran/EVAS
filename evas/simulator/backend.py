@@ -34,6 +34,7 @@ class CompiledModel:
         self.node_map: Dict[str, str] = {}  # port_name -> external_node
         self.default_transition: float = 1e-12
         self._initial_step_done: bool = False
+        self._strobe_log: List[str] = []
 
     def initial_step(self, node_voltages: Dict[str, float], time: float):
         pass
@@ -94,6 +95,13 @@ class CompiledModel:
         if name not in self.arrays:
             self.arrays[name] = {}
         self.arrays[name][idx] = val
+
+    def _strobe(self, time: float, fmt: str, *args):
+        try:
+            msg = (fmt % args) if args else fmt
+        except Exception as e:
+            msg = f"{fmt}  [format error: {e}]"
+        self._strobe_log.append(f"t={time:.6e}  {msg}")
 
 
 def compile_module(module: Module, default_transition: float = None) -> type:
@@ -276,10 +284,17 @@ class _ModuleCompiler:
             lines.extend(self._compile_for(stmt, indent))
 
         elif isinstance(stmt, SystemTask):
-            # $strobe, $display → Python print
+            # $strobe, $display → collect output
             if stmt.name in ('$strobe', '$display'):
-                args = ', '.join(self._compile_expr(a) for a in stmt.args)
-                lines.append(f"{prefix}# {stmt.name}({args})")
+                if stmt.args:
+                    fmt_expr = self._compile_expr(stmt.args[0])
+                    rest = ', '.join(self._compile_expr(a) for a in stmt.args[1:])
+                    if rest:
+                        lines.append(f"{prefix}self._strobe(time, {fmt_expr}, {rest})")
+                    else:
+                        lines.append(f"{prefix}self._strobe(time, {fmt_expr})")
+                else:
+                    lines.append(f"{prefix}self._strobe(time, '')")
 
         return lines
 

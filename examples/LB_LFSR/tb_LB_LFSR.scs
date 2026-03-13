@@ -2,7 +2,7 @@
 simulator lang=spectre
 global 0
 
-ahdl_include "../veriloga/LB_LFSR.va"
+ahdl_include "LB_LFSR.va"
 
 // Power supplies
 Vvdd (vdd 0) vsource dc=0.9 type=dc

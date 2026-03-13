@@ -1,8 +1,8 @@
-// _VA_DAC_11B: Weighted DAC
+// DAC_11B: Weighted DAC
 simulator lang=spectre
 global 0
 
-ahdl_include "../veriloga/_VA_DAC_11B.va"
+ahdl_include "DAC_11B.va"
 
 // RDY clock: 20ns period, delayed 5ns
 Vrdy (rdy 0) vsource type=pulse val0=0 val1=0.9 period=20n delay=5n \

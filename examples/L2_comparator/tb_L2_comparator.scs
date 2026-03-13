@@ -2,7 +2,7 @@
 simulator lang=spectre
 global 0
 
-ahdl_include "../veriloga/L2_comparator.va"
+ahdl_include "L2_comparator.va"
 
 // Power supplies
 Vvdd (vdd 0) vsource dc=0.9 type=dc

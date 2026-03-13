@@ -2,7 +2,7 @@
 simulator lang=spectre
 global 0
 
-ahdl_include "../veriloga/dff_rst.va"
+ahdl_include "dff_rst.va"
 
 // Clock: 100us period, delayed 10us
 Vclk (clk 0) vsource type=pulse val0=0 val1=5.0 period=100u delay=10u \

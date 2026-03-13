@@ -2,7 +2,7 @@
 simulator lang=spectre
 global 0
 
-ahdl_include "../veriloga/ADC_18B.va"
+ahdl_include "ADC_18B.va"
 
 // Conversion clock: 20ns period
 Vclks (clks 0) vsource type=pulse val0=0 val1=0.9 period=20n \
