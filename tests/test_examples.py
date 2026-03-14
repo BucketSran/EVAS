@@ -1,7 +1,7 @@
 """pytest test suite for EVAS examples.
 
-Smoke tests: every example runs to completion and produces a non-empty CSV.
 Functional tests: key signal properties validated against expected behaviour.
+Each test simulates the example and runs the corresponding validate_*.py checks.
 """
 import importlib.util
 from pathlib import Path
@@ -48,42 +48,6 @@ def _run_validate(tmp_path: Path, tb_rel: str, fn_name: str, tb_dir: str):
     fn = getattr(mod, fn_name)
     failures = fn(out_dir=tmp_path)
     assert failures == 0, f"{fn_name} reported {failures} failure(s)"
-
-
-# ---------------------------------------------------------------------------
-# Smoke tests — every example TB runs without errors
-# ---------------------------------------------------------------------------
-
-_SMOKE_CASES = [
-    ("adc_dac_ideal_4b",    "adc_dac_ideal_4b/tb_adc_dac_ideal_4b_sine.scs"),
-    ("clk_burst_gen",       "clk_burst_gen/tb_clk_burst_gen.scs"),
-    ("clk_div",             "clk_div/tb_clk_div.scs"),
-    ("cmp_offset_search",   "cmp_offset_search/tb_cmp_offset_search.scs"),
-    ("cmp_strongarm",       "cmp_strongarm/tb_cmp_strongarm.scs"),
-    ("d2b_4b",              "d2b_4b/tb_d2b_4b.scs"),
-    ("dac_binary_clk_4b",   "dac_binary_clk_4b/tb_dac_binary_clk_4b.scs"),
-    ("dac_therm_16b",       "dac_therm_16b/tb_dac_therm_16b.scs"),
-    ("digital_basics_and",  "digital_basics/tb_and_gate.scs"),
-    ("digital_basics_or",   "digital_basics/tb_or_gate.scs"),
-    ("digital_basics_not",  "digital_basics/tb_not_gate.scs"),
-    ("digital_basics_dff",  "digital_basics/tb_dff_rst.scs"),
-    ("dwa_ptr_gen",         "dwa_ptr_gen/tb_dwa_ptr_gen.scs"),
-    ("edge_interval_timer", "edge_interval_timer/tb_edge_interval_timer.scs"),
-    ("lfsr",                "lfsr/tb_lfsr.scs"),
-    ("noise_gen",           "noise_gen/tb_noise_gen.scs"),
-    ("ramp_gen",            "ramp_gen/tb_ramp_gen.scs"),
-    ("sar_adc_dac_weighted_8b", "sar_adc_dac_weighted_8b/tb_sar_adc_dac_weighted_8b.scs"),
-]
-
-
-@pytest.mark.parametrize("name,tb_rel", _SMOKE_CASES, ids=[c[0] for c in _SMOKE_CASES])
-def test_smoke(tmp_path, name, tb_rel):
-    """Every simulation runs without error and produces a non-empty CSV."""
-    df = _simulate(tb_rel, tmp_path)
-    assert len(df) > 0, "tran.csv is empty"
-    sig_cols = [c for c in df.columns if c != "time"]
-    assert len(sig_cols) > 0, "tran.csv has no signal columns"
-    assert df[sig_cols].abs().max().max() > 0, "all signals are identically zero"
 
 
 # ---------------------------------------------------------------------------

@@ -1,153 +1,196 @@
 /* ============================================================
-   EVAS Docs — Apple-inspired theme
+   EVAS Docs — Teal Engineering Theme
    ============================================================ */
 
-/* ---------- Fonts ---------- */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+/* ---------- Base font ---------- */
 body {
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display",
-                 "Helvetica Neue", Arial, sans-serif;
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
     -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
 }
 
 /* ---------- Light mode ---------- */
 :root, [data-theme="light"] {
-    --color-brand-primary:        #0071e3;
-    --color-brand-content:        #0071e3;
+    --color-brand-primary:        #0f766e;
+    --color-brand-content:        #0f766e;
     --color-background-primary:   #ffffff;
-    --color-background-secondary: #f5f5f7;
-    --color-background-hover:     #e8e8ed;
-    --color-foreground-primary:   #1d1d1f;
-    --color-foreground-secondary: #6e6e73;
-    --color-sidebar-background:   #f5f5f7;
-    --color-sidebar-link-text:    #1d1d1f;
-    --color-api-name:             #0071e3;
-    --color-api-pre-name:         #0071e3;
-    --color-highlight-on-target:  rgba(0, 113, 227, 0.08);
+    --color-background-secondary: #f0fdfb;
+    --color-background-hover:     #ccfbf1;
+    --color-foreground-primary:   #1c1917;
+    --color-foreground-secondary: #6b7280;
+    --color-sidebar-background:   #f8fffe;
+    --color-sidebar-link-text:    #1c1917;
+    --color-api-name:             #0f766e;
+    --color-api-pre-name:         #7c3aed;
+    --color-highlight-on-target:  rgba(15, 118, 110, 0.08);
+    --color-announcement-background: #0f766e;
+    --color-announcement-text:    #ffffff;
+
+    --evas-accent:       #0f766e;
+    --evas-accent-mid:   #14b8a6;
+    --evas-accent-pale:  #f0fdfb;
+    --evas-border:       rgba(20, 184, 166, 0.25);
+    --evas-shadow:       0 1px 3px rgba(0,0,0,0.07), 0 4px 16px rgba(0,0,0,0.04);
 }
 
 /* ---------- Dark mode ---------- */
 [data-theme="dark"] {
-    --color-brand-primary:        #2997ff;
-    --color-brand-content:        #2997ff;
-    --color-background-primary:   #000000;
-    --color-background-secondary: #1c1c1e;
-    --color-background-hover:     #2c2c2e;
-    --color-foreground-primary:   #f5f5f7;
-    --color-foreground-secondary: #a1a1a6;
-    --color-sidebar-background:   #1c1c1e;
-    --color-sidebar-link-text:    #f5f5f7;
-    --color-api-name:             #2997ff;
-    --color-api-pre-name:         #2997ff;
-    --color-highlight-on-target:  rgba(41, 151, 255, 0.12);
+    --color-brand-primary:        #2dd4bf;
+    --color-brand-content:        #2dd4bf;
+    --color-background-primary:   #0c1117;
+    --color-background-secondary: #161f2c;
+    --color-background-hover:     #1a2d3d;
+    --color-foreground-primary:   #e2e8f0;
+    --color-foreground-secondary: #94a3b8;
+    --color-sidebar-background:   #111827;
+    --color-sidebar-link-text:    #e2e8f0;
+    --color-api-name:             #2dd4bf;
+    --color-api-pre-name:         #c084fc;
+    --color-highlight-on-target:  rgba(45, 212, 191, 0.1);
+    --color-announcement-background: #134e4a;
+    --color-announcement-text:    #ccfbf1;
+
+    --evas-accent:       #2dd4bf;
+    --evas-accent-mid:   #5eead4;
+    --evas-accent-pale:  rgba(45, 212, 191, 0.08);
+    --evas-border:       rgba(45, 212, 191, 0.18);
+    --evas-shadow:       0 1px 4px rgba(0,0,0,0.35), 0 4px 20px rgba(0,0,0,0.25);
 }
 
 /* ---------- Typography ---------- */
 h1, h2, h3, h4, h5 {
     font-weight: 700;
-    letter-spacing: -0.02em;
-    line-height: 1.15;
+    letter-spacing: -0.025em;
+    line-height: 1.2;
 }
-h1 { font-size: 2.4rem; }
-h2 { font-size: 1.7rem; }
-h3 { font-size: 1.3rem; }
-p, li { line-height: 1.7; }
-a { color: var(--color-brand-primary); text-decoration: none; }
-a:hover { opacity: 0.75; }
+h1 {
+    font-size: 2.5rem;
+    font-weight: 800;
+    background: linear-gradient(130deg, var(--evas-accent) 0%, var(--evas-accent-mid) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+h2 {
+    font-size: 1.7rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 2px solid var(--evas-border);
+}
+h3 { font-size: 1.25rem; }
+p, li { line-height: 1.8; }
+
+a {
+    color: var(--evas-accent);
+    text-decoration: none;
+    transition: opacity 0.15s;
+}
+a:hover { opacity: 0.75; text-decoration: underline; }
 
 /* ---------- Sidebar ---------- */
-.sidebar-brand { font-weight: 700; letter-spacing: -0.01em; }
-.sidebar-tree .reference { border-radius: 6px; }
-.sidebar-tree .current-page > .reference {
-    background: rgba(0, 113, 227, 0.1);
-    color: var(--color-brand-primary);
-    font-weight: 600;
+.sidebar-brand {
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    color: var(--evas-accent) !important;
+    font-size: 1.15rem;
 }
+.sidebar-tree .reference {
+    border-radius: 7px;
+    padding: 0.3rem 0.75rem;
+    transition: background 0.12s;
+}
+.sidebar-tree .current-page > .reference {
+    background: var(--evas-accent-pale);
+    color: var(--evas-accent);
+    font-weight: 600;
+    border-left: 3px solid var(--evas-accent);
+    padding-left: calc(0.75rem - 3px);
+}
+.sidebar-tree .reference:hover { background: var(--color-background-hover); }
 
 /* ---------- Code ---------- */
 pre, code {
-    font-family: "SF Mono", "JetBrains Mono", "Fira Code", ui-monospace, monospace;
-    font-size: 0.88em;
+    font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+    font-size: 0.875em;
 }
 pre {
-    border-radius: 12px;
-    padding: 1.2rem 1.4rem;
-    border: 1px solid rgba(0,0,0,0.07);
-    box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-}
-[data-theme="dark"] pre {
-    border-color: rgba(255,255,255,0.08);
-    box-shadow: 0 2px 10px rgba(0,0,0,0.4);
+    border-radius: 10px;
+    padding: 1.2rem 1.5rem;
+    border: 1px solid var(--evas-border);
+    border-left: 3px solid var(--evas-accent);
+    box-shadow: var(--evas-shadow);
 }
 code.literal {
-    background: var(--color-background-secondary);
+    background: var(--evas-accent-pale);
+    color: var(--evas-accent);
     border-radius: 5px;
-    padding: 0.1em 0.4em;
+    padding: 0.15em 0.45em;
+    font-weight: 500;
 }
 
 /* ---------- Tables ---------- */
 table {
     border-collapse: collapse;
-    border-radius: 12px;
+    border-radius: 10px;
     overflow: hidden;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+    border: 1px solid var(--evas-border);
+    box-shadow: var(--evas-shadow);
     font-size: 0.93rem;
     width: 100%;
 }
-thead tr { background: var(--color-background-secondary); }
+thead tr { background: var(--evas-accent-pale); }
 th {
-    font-weight: 600;
-    padding: 0.7rem 1rem;
-    font-size: 0.82rem;
+    font-weight: 700;
+    padding: 0.75rem 1rem;
+    font-size: 0.78rem;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--color-foreground-secondary);
+    letter-spacing: 0.07em;
+    color: var(--evas-accent);
 }
-td {
-    padding: 0.65rem 1rem;
-    border-bottom: 1px solid var(--color-background-secondary);
-}
+td { padding: 0.65rem 1rem; border-bottom: 1px solid var(--evas-border); }
 tr:last-child td { border-bottom: none; }
-tr:hover td { background: var(--color-background-secondary); }
+tr:hover td { background: var(--evas-accent-pale); transition: background 0.1s; }
 
 /* ---------- Admonitions ---------- */
 .admonition {
-    border-radius: 12px;
+    border-radius: 10px;
     border: none;
-    padding: 1rem 1.2rem;
-    box-shadow: 0 1px 6px rgba(0,0,0,0.06);
+    border-left: 4px solid var(--evas-accent);
+    padding: 1rem 1.25rem;
+    background: var(--evas-accent-pale);
 }
 .admonition-title {
     font-weight: 700;
-    font-size: 0.88rem;
+    font-size: 0.82rem;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.07em;
+    color: var(--evas-accent);
 }
 
-/* ---------- Announcement ---------- */
+/* ---------- Announcement bar ---------- */
+.announcement a { color: #ccfbf1; font-weight: 700; border-bottom: 1px solid rgba(255,255,255,0.4); }
+.announcement a:hover { opacity: 0.9; text-decoration: none; }
 .announcement { font-size: 0.85rem; font-weight: 500; }
-.announcement a { font-weight: 600; border-bottom: 1px solid currentColor; }
 
 /* ---------- Scrollbar ---------- */
-::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.18); border-radius: 3px; }
-[data-theme="dark"] ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.18); }
+::-webkit-scrollbar-thumb { background: var(--evas-accent); border-radius: 3px; opacity: 0.6; }
 
 /* ---------- Selection ---------- */
-::selection { background: rgba(0, 113, 227, 0.18); }
+::selection { background: rgba(15, 118, 110, 0.2); }
+[data-theme="dark"] ::selection { background: rgba(45, 212, 191, 0.2); }
 
 /* ---------- Language switcher ---------- */
 .lang-switch {
     display: inline-block;
-    padding: 3px 12px;
-    border: 1px solid currentColor;
+    padding: 4px 14px;
+    border: 1.5px solid currentColor;
     border-radius: 20px;
-    font-size: 0.83em;
-    font-weight: 500;
+    font-size: 0.82em;
+    font-weight: 600;
     text-decoration: none;
-    opacity: 0.8;
+    transition: background 0.15s;
 }
-.lang-switch:hover { opacity: 1; }
-
-/* ⚠️ TEMP TEST — remove after confirming deploy works */
-body { background-color: #ff4444 !important; }
+.lang-switch:hover { background: rgba(255,255,255,0.2); text-decoration: none; opacity: 1; }

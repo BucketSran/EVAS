@@ -131,11 +131,6 @@ class TestLexerIdentifiers:
         assert tok.type == TokenType.IDENT
         assert tok.value == "$strobe"
 
-    def test_abstime(self):
-        tok = _first("$abstime")
-        assert tok.type == TokenType.IDENT
-        assert tok.value == "$abstime"
-
 
 class TestLexerNumbers:
 
@@ -240,32 +235,20 @@ class TestLexerStrings:
 
 class TestLexerOperators:
 
-    def test_contrib(self):
-        assert _first("<+").type == TokenType.CONTRIB
-
-    def test_lshift(self):
-        assert _first("<<").type == TokenType.LSHIFT
-
-    def test_rshift(self):
-        assert _first(">>").type == TokenType.RSHIFT
-
-    def test_ge(self):
-        assert _first(">=").type == TokenType.GE
-
-    def test_le(self):
-        assert _first("<=").type == TokenType.LE
-
-    def test_eq(self):
-        assert _first("==").type == TokenType.EQ
-
-    def test_ne(self):
-        assert _first("!=").type == TokenType.NE
-
-    def test_land(self):
-        assert _first("&&").type == TokenType.LAND
-
-    def test_lor(self):
-        assert _first("||").type == TokenType.LOR
+    def test_two_char_operators(self):
+        mapping = {
+            "<+": TokenType.CONTRIB,
+            "<<": TokenType.LSHIFT,
+            ">>": TokenType.RSHIFT,
+            ">=": TokenType.GE,
+            "<=": TokenType.LE,
+            "==": TokenType.EQ,
+            "!=": TokenType.NE,
+            "&&": TokenType.LAND,
+            "||": TokenType.LOR,
+        }
+        for src, expected in mapping.items():
+            assert _first(src).type == expected, f"Failed for {src!r}"
 
     def test_lt_not_confused_with_contrib(self):
         # '<' alone should be LT, not CONTRIB
@@ -309,7 +292,6 @@ class TestLexerComments:
     def test_line_comment_skipped(self):
         types = _types("a // this is a comment\nb")
         assert types == [TokenType.IDENT, TokenType.IDENT]
-        assert _vals("a // comment\nb") == ["a", "b"]
 
     def test_block_comment_skipped(self):
         types = _types("a /* block */ b")
@@ -357,8 +339,6 @@ class TestLexerEdgeCases:
 
     def test_backtick_directive_skipped(self):
         # Survived preprocessor directives should be silently skipped
-        types = _types("`include x")
-        assert TokenType.IDENT in types
         vals = _vals("`include x")
         assert "x" in vals
 

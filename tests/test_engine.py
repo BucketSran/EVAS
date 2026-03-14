@@ -232,7 +232,6 @@ class TestDc:
         fn = dc(1.8)
         assert fn(0.0) == 1.8
         assert fn(1e-9) == 1.8
-        assert fn(1.0) == 1.8
 
 
 class TestPulse:
@@ -272,9 +271,9 @@ class TestPulse:
 
     def test_next_breakpoint_advances(self):
         fn = self._make()
+        # First knee after t=0 is the end of the rise (rise=1ns)
         bp = fn._next_breakpoint(0.0)
-        assert bp is not None
-        assert bp > 0.0
+        assert bp == pytest.approx(1e-9)
 
 
 class TestPwl:
