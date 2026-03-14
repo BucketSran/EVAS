@@ -4,6 +4,7 @@ Truth-table checks for gates; clocked-sequence checks for DFF.
 All four circuits are validated against pre-computed expected values.
 """
 from pathlib import Path
+
 import pandas as pd
 
 BASE = Path(__file__).parent.parent.parent / 'output' / 'digital_basics'

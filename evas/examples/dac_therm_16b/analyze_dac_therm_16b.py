@@ -1,8 +1,10 @@
 """Analyze dac_therm_16b: 16-bit thermometer DAC (vstep=1.0V)."""
 from pathlib import Path
-import pandas as pd
-import numpy as np
+
 import matplotlib
+import numpy as np
+import pandas as pd
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 

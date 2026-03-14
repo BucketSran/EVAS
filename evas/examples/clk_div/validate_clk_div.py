@@ -1,7 +1,8 @@
 """Validate clk_div behavior from CSV output."""
 from pathlib import Path
-import pandas as pd
+
 import numpy as np
+import pandas as pd
 
 OUT = Path(__file__).parent.parent.parent / 'output' / 'clk_div'
 

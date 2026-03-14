@@ -8,8 +8,9 @@ Checkpoints (ones count -> vout):
   t=1000ns: 16 ones -> vout = 16.0V
 """
 from pathlib import Path
-import pandas as pd
+
 import numpy as np
+import pandas as pd
 
 OUT = Path(__file__).parent.parent.parent / 'output' / 'dac_therm_16b'
 

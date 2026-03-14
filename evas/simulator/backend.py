@@ -6,14 +6,15 @@ the behavioral model with proper event handling, transition operators,
 and state variable management.
 """
 import math
-import os
 import random
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
 
 from evas.compiler.ast_nodes import *
 from evas.simulator.engine import (
-    TransitionState, CrossDetector, AboveDetector, Simulator
+    AboveDetector,
+    CrossDetector,
+    TransitionState,
 )
 
 
@@ -136,11 +137,7 @@ class _ModuleCompiler:
         # Build the class dynamically
         mod = self.module
 
-        # Collect info
-        output_ports = [p.name for p in mod.port_decls if p.direction == Direction.OUTPUT]
-        input_ports = [p.name for p in mod.port_decls if p.direction == Direction.INPUT]
-        inout_ports = [p.name for p in mod.port_decls if p.direction == Direction.INOUT]
-        all_ports = [p.name for p in mod.port_decls]
+        # Collect info (port lists reserved for future use)
 
         # Build arrays info
         array_vars = {}
@@ -159,8 +156,8 @@ class _ModuleCompiler:
         # Generate code for the class
         lines = []
         lines.append(f"class {mod.name}_Model(CompiledModel):")
-        lines.append(f"    def __init__(self):")
-        lines.append(f"        super().__init__()")
+        lines.append("    def __init__(self):")
+        lines.append("        super().__init__()")
         lines.append(f"        self.default_transition = {self.default_transition}")
 
         # Initialize parameters
@@ -191,11 +188,11 @@ class _ModuleCompiler:
                     lines.append(f"        self.arrays[{name!r}][{idx}] = 0")
 
         # Generate initial_step method
-        lines.append(f"")
-        lines.append(f"    def initial_step(self, nv, time):")
-        lines.append(f"        if self._initial_step_done:")
-        lines.append(f"            return")
-        lines.append(f"        self._initial_step_done = True")
+        lines.append("")
+        lines.append("    def initial_step(self, nv, time):")
+        lines.append("        if self._initial_step_done:")
+        lines.append("            return")
+        lines.append("        self._initial_step_done = True")
 
         # Find and compile initial_step event blocks
         if mod.analog_block:
@@ -205,22 +202,22 @@ class _ModuleCompiler:
                         body_lines = self._compile_statement(stmt.body, 2)
                         lines.extend(body_lines)
 
-        lines.append(f"        pass")  # ensure method has body
+        lines.append("        pass")  # ensure method has body
 
         # Generate evaluate method
         self._trans_counter = 0
         self._cross_counter = 0
         self._above_counter = 0
 
-        lines.append(f"")
-        lines.append(f"    def evaluate(self, nv, time):")
+        lines.append("")
+        lines.append("    def evaluate(self, nv, time):")
 
         if mod.analog_block:
             for stmt in mod.analog_block.body.statements:
                 stmt_lines = self._compile_statement(stmt, 2)
                 lines.extend(stmt_lines)
 
-        lines.append(f"        pass")
+        lines.append("        pass")
 
         # Compile the class
         code = '\n'.join(lines)
@@ -410,8 +407,6 @@ class _ModuleCompiler:
             return [f"{prefix}pass  # could not compile for loop"]
 
         init_val = self._compile_expr(stmt.init.value)
-        cond = self._compile_expr(stmt.cond)
-        update_val = self._compile_expr(stmt.update.value)
 
         # Track that we're in a loop (for dynamic transition/contribution keys)
         prev_loop_var = self._in_loop_var
@@ -420,8 +415,6 @@ class _ModuleCompiler:
         # Use a while loop in Python
         lines.append(f"{prefix}self.state[{loop_var!r}] = {init_val}")
         # Replace loop var references in condition
-        cond_code = cond.replace(f"self.state[{loop_var!r}]", f"_loop_{loop_var}")
-        update_code = update_val.replace(f"self.state[{loop_var!r}]", f"_loop_{loop_var}")
         lines.append(f"{prefix}_loop_{loop_var} = {init_val}")
         cond_code2 = self._compile_expr_with_loop_var(stmt.cond, loop_var)
         lines.append(f"{prefix}while {cond_code2}:")
@@ -506,10 +499,10 @@ class _ModuleCompiler:
                 n2 = self._compile_node_voltage(expr.node2, expr.node2_index)
                 if expr.access_type == 'V':
                     return f"({n1} - {n2})"
-                return f"0.0"  # I() not fully supported yet
+                return "0.0"  # I() not fully supported yet
             if expr.access_type == 'V':
                 return self._compile_node_voltage(node, expr.node1_index)
-            return f"0.0"
+            return "0.0"
 
         if isinstance(expr, FunctionCall):
             return self._compile_function_call(expr)
@@ -586,7 +579,7 @@ class _ModuleCompiler:
             hi = args[2] if len(args) > 2 else "1.0"
             return f"random.uniform({lo}, {hi})"
 
-        return f"0.0"  # unknown function: {name}
+        return "0.0"  # unknown function: {name}
 
     def _compile_method_call(self, expr: MethodCall) -> str:
         """Compile method calls like conf.substr(i, i)."""
@@ -598,7 +591,7 @@ class _ModuleCompiler:
             # Verilog-A substr(start, end) → Python string slice
             return f"self.params[{obj!r}][int({args[0]}):int({args[1]})+1]"
 
-        return f"''"  # unknown method
+        return "''"  # unknown method
 
     def _compile_expr_with_loop_var(self, expr: Expr, loop_var: str) -> str:
         """Compile expression using loop variable from local scope."""
@@ -633,12 +626,16 @@ class _ModuleCompiler:
                 return float('inf')
             return 0
         if isinstance(expr, BinaryExpr):
-            l = self._eval_expr_static(expr.left)
-            r = self._eval_expr_static(expr.right)
-            if expr.op == '+': return l + r
-            if expr.op == '-': return l - r
-            if expr.op == '*': return l * r
-            if expr.op == '/': return l / r if r != 0 else 0
+            lv = self._eval_expr_static(expr.left)
+            rv = self._eval_expr_static(expr.right)
+            if expr.op == '+':
+                return lv + rv
+            if expr.op == '-':
+                return lv - rv
+            if expr.op == '*':
+                return lv * rv
+            if expr.op == '/':
+                return lv / rv if rv != 0 else 0
         return 0
 
 
@@ -651,8 +648,8 @@ def compile_va_file(va_path: str, source_dir: str = None) -> type:
         model = ModelClass()
         model.node_map = {'DCMPP': 'out_p', 'CLK': 'clk', ...}
     """
-    from evas.compiler.preprocessor import preprocess
     from evas.compiler.parser import parse
+    from evas.compiler.preprocessor import preprocess
 
     if source_dir is None:
         source_dir = str(Path(va_path).parent)

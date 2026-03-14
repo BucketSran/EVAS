@@ -3,12 +3,15 @@
 Runs the simulation and saves a waterfall plot showing delay propagation.
 """
 from pathlib import Path
-import pandas as pd
+
 import matplotlib
+import pandas as pd
+
 matplotlib.use('Agg')
+import time
+
 import matplotlib.pyplot as plt
 
-import time
 from evas.netlist.runner import evas_simulate
 
 HERE = Path(__file__).parent

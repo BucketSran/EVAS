@@ -2,7 +2,6 @@
 preprocessor.py — Handle `include, `define, `default_transition directives
 """
 import re
-import os
 from pathlib import Path
 
 VAMS_INCLUDE_DIR = Path(__file__).resolve().parent.parent / 'vams'

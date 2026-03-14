@@ -5,10 +5,11 @@ Clock period = 100ns, RST deasserts at ~20ns.
 After 2 startup cycles (~220ns), ramp starts from 0 and increments each cycle.
 Should reach MAX_CODE=15 and hold there.
 """
-from pathlib import Path
 import re
-import pandas as pd
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 
 OUT = Path(__file__).parent.parent.parent / 'output' / 'ramp_gen'
 
@@ -67,7 +68,7 @@ def validate_txt(out_dir: Path = OUT) -> int:
     failures = 0
 
     # Check INIT line
-    init_lines = [l for l in lines if '[ramp_gen] INIT' in l]
+    init_lines = [ln for ln in lines if '[ramp_gen] INIT' in ln]
     if init_lines:
         m = re.search(r'Direction=(\d+)', init_lines[0])
         if m and int(m.group(1)) != _DIRECTION:

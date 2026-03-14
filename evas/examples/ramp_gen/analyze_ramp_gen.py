@@ -1,8 +1,10 @@
 """Analyze ramp_gen: 12-bit up-ramp from 0 to 15 (step=1, N_CYCLE_START=2)."""
 from pathlib import Path
-import pandas as pd
-import numpy as np
+
 import matplotlib
+import numpy as np
+import pandas as pd
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 

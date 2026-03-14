@@ -1,7 +1,9 @@
 """Analyze clk_div: clock divider by ratio=4."""
 from pathlib import Path
-import pandas as pd
+
 import matplotlib
+import pandas as pd
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 

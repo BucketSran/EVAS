@@ -16,11 +16,9 @@ Parses real Cadence Spectre netlist syntax:
   \\ at EOL                    — Line continuation
 """
 import re
-import math
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple, Any
 from pathlib import Path
-
+from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # AST nodes

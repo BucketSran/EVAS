@@ -1,8 +1,9 @@
 """Analyze noise_gen: Gaussian noise added to a DC input (sigma=0.1V, vin=1.0V)."""
 from pathlib import Path
-import pandas as pd
-import numpy as np
+
 import matplotlib
+import pandas as pd
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 

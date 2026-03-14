@@ -4,10 +4,11 @@ CLK_1 period=200ns, delay=5ns -> rising edges at 5, 205, 405, ... ns
 CLK_2 period=200ns, delay=30ns -> rising edges at 30, 230, 430, ... ns
 Expected interval = 30 - 5 = 25ns = 25000 ps
 """
-from pathlib import Path
 import re
-import pandas as pd
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 
 OUT = Path(__file__).parent.parent.parent / 'output' / 'edge_interval_timer'
 

@@ -1,8 +1,9 @@
 """Validate dwa_ptr_gen behavior from CSV and strobe output."""
-from pathlib import Path
 import re
-import pandas as pd
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 
 OUT = Path(__file__).parent.parent.parent / 'output' / 'dwa_ptr_gen'
 

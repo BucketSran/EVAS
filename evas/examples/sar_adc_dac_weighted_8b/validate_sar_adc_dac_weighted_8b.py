@@ -18,11 +18,13 @@ Figure 3 — ADC nonlinearity (post-reset):
   • DNL                  (per-code step width error, in LSB)
   • INL                  (cumulative integral nonlinearity, in LSB)
 """
-from pathlib import Path
 import time
+from pathlib import Path
+
+import matplotlib
 import numpy as np
 import pandas as pd
-import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
@@ -191,7 +193,7 @@ if __name__ == '__main__':
     ax.axhline(+lsb_mv, color='gray', linewidth=1.0, linestyle=':', alpha=0.7,
                label=f'+1 LSB ({lsb_mv:.1f} mV)')
     ax.axhline(-lsb_mv, color='gray', linewidth=1.0, linestyle=':', alpha=0.7,
-               label=f'−1 LSB')
+               label='−1 LSB')
     ax.set_ylabel('Error (mV)')
     ax.set_xlabel('Time (µs)')
     ax.legend(fontsize=8, loc='upper right')

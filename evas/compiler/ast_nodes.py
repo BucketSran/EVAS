@@ -2,8 +2,8 @@
 ast_nodes.py — AST node definitions for Verilog-A
 """
 from dataclasses import dataclass, field
-from typing import List, Optional, Union
 from enum import Enum, auto
+from typing import List, Optional, Union
 
 
 class Direction(Enum):

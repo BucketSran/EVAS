@@ -14,8 +14,6 @@ import matplotlib.patches as mpatches
 from matplotlib.colors import ListedColormap
 import pandas as pd
 
-from evas.netlist.runner import evas_simulate
-
 HERE   = Path(__file__).parent
 OUT    = HERE.parent.parent / 'output' / 'dwa_ptr_gen'
 OUT.mkdir(parents=True, exist_ok=True)
@@ -129,17 +127,21 @@ for code in CODES:
 CMAP_CELL = ListedColormap(['#f0f9ff', '#0369a1'])   # cell_en: white / blue
 CMAP_PTR  = ListedColormap(['#fdf4ff', '#7e22ce'])   # ptr:     white / purple
 
-# ── Plot — 4×4 grid, one subplot per code ─────────────────────────────────────
-fig, axes = plt.subplots(4, 4, figsize=(20, 16),
-                         gridspec_kw={'hspace': 0.5, 'wspace': 0.1})
+# ── Plot — 4 rows × 4 cols, one subplot per code ──────────────────────────────
+# Layout per subplot:  rotation heatmap (16 steps × 16 cells) + usage bar row
+# No text inside cells — colour alone encodes 0/1; ptr marked with purple border.
+
+N_DISP_ROWS = N_STEPS + 2   # 16 step rows + blank separator + 1 usage bar
+
+fig, axes = plt.subplots(4, 4, figsize=(22, 18),
+                         gridspec_kw={'hspace': 0.45, 'wspace': 0.12})
 fig.suptitle(
-    f'dwa_ptr_gen — {N_STEPS} consecutive DWA steps per code (ptr_init=0)\n'
-    'cell_en_o[15:0]: blue=selected  ptr_o[15:0]: purple border',
-    fontsize=12
+    f'dwa_ptr_gen — {N_STEPS} consecutive DWA steps per code (ptr_init=0)  '
+    '|  blue = cell active  |  purple border = ptr',
+    fontsize=12, y=0.995
 )
 
 col_labels = [str(i) for i in range(N_CELLS)]
-row_labels  = [f's{k+1}' for k in range(N_STEPS)]
 
 for code in CODES:
     ax = axes[code // 4][code % 4]
@@ -148,55 +150,78 @@ for code in CODES:
         ax.set_visible(False)
         continue
 
-    cmat = cell_data[code]
-    pmat = ptr_data[code]
+    cmat  = cell_data[code]    # (16, 16)
+    pmat  = ptr_data[code]
+    uses  = cmat.sum(axis=0)   # total times each cell used across all steps
+    uses_per_step = int(cmat.sum(axis=1).mean())
+    balanced = bool(np.all(uses == uses[0]))
 
-    # Base: cell_en coloring
-    ax.imshow(cmat, aspect='auto', cmap=CMAP_CELL, vmin=0, vmax=1,
-              interpolation='nearest')
+    # Build display matrix: steps rows + empty separator + normalised usage bar
+    sep     = np.full((1, N_CELLS), -1.0)          # separator (rendered transparent)
+    use_row = (uses / uses.max()).reshape(1, -1)    # 0..1 normalised usage
+    disp    = np.vstack([cmat.astype(float), sep, use_row])
 
-    # Grid lines
+    # Custom colormap: -1=white (separator), 0=light-blue, 1=deep-blue
+    from matplotlib.colors import BoundaryNorm
+    cmap_ext = matplotlib.colors.LinearSegmentedColormap.from_list(
+        'dwa', [(0,'#f8faff'), (0.01,'#f0f9ff'), (0.5,'#60a5fa'), (1,'#0369a1')]
+    )
+
+    im = ax.imshow(disp, aspect='auto', cmap=cmap_ext, vmin=0, vmax=1,
+                   interpolation='nearest')
+    # White out the separator row
+    ax.axhline(N_STEPS - 0.5, color='white', linewidth=4)
+    ax.axhline(N_STEPS + 0.5, color='white', linewidth=4)
+
+    # Minor grid on step rows only
     ax.set_xticks(np.arange(-0.5, N_CELLS, 1), minor=True)
     ax.set_yticks(np.arange(-0.5, N_STEPS, 1), minor=True)
-    ax.grid(which='minor', color='white', linewidth=0.8)
+    ax.grid(which='minor', color='white', linewidth=0.6)
     ax.tick_params(which='minor', length=0)
 
-    # Cell text + purple highlight for ptr position
+    # Purple border for ptr position (step rows only)
     for r in range(N_STEPS):
         for c in range(N_CELLS):
-            v   = cmat[r, c]
-            is_ptr = pmat[r, c]
-            txt_color = 'white' if v else '#555555'
-            ax.text(c, r, str(v), ha='center', va='center',
-                    fontsize=5.5, color=txt_color, fontweight='bold')
-            if is_ptr:
-                rect = plt.Rectangle((c - 0.48, r - 0.48), 0.96, 0.96,
-                                     linewidth=1.8, edgecolor='#7e22ce',
+            if pmat[r, c]:
+                rect = plt.Rectangle((c - 0.47, r - 0.47), 0.94, 0.94,
+                                     linewidth=1.6, edgecolor='#7e22ce',
                                      facecolor='none')
                 ax.add_patch(rect)
 
+    # Usage bar labels (total count per cell)
+    for c in range(N_CELLS):
+        ax.text(c, N_STEPS + 1, str(int(uses[c])),
+                ha='center', va='center', fontsize=5,
+                color='white' if uses[c] / uses.max() > 0.5 else '#333')
+
+    # Axes
     ax.set_xticks(range(N_CELLS))
-    ax.set_xticklabels(col_labels, fontsize=5)
-    ax.set_yticks(range(N_STEPS))
-    ax.set_yticklabels(row_labels, fontsize=5)
+    ax.set_xticklabels(col_labels, fontsize=5.5)
+    ax.set_yticks(list(range(N_STEPS)) + [N_STEPS + 1])
+    ax.set_yticklabels(
+        [f's{k+1}' for k in range(N_STEPS)] + ['uses'],
+        fontsize=5.5
+    )
     ax.xaxis.set_label_position('top')
     ax.xaxis.tick_top()
 
-    # Title: code + usage count summary
-    total_uses = cell_data[code].sum(axis=0)   # how many times each cell was used
-    eq = np.all(total_uses == total_uses[0])
-    title_suffix = '  ✓ balanced' if eq else f'  uses: {list(total_uses)}'
-    ax.set_title(f'code={code}  ({code:#05b}){title_suffix}',
-                 fontsize=7, pad=3)
+    bal_str = '✓ balanced' if balanced else '✗ unbalanced'
+    period  = N_CELLS // int(np.gcd(N_CELLS, code)) if code else '—'
+    ax.set_title(
+        f'code {code:2d}  ({code:04b})   {uses_per_step} cells/step   '
+        f'period={period}   {bal_str}',
+        fontsize=6.5, pad=3
+    )
 
 leg = [
-    mpatches.Patch(color='#0369a1', label='cell_en=1  (cell active)'),
-    mpatches.Patch(color='#f0f9ff', label='cell_en=0'),
-    mpatches.Patch(facecolor='none', edgecolor='#7e22ce', linewidth=1.8,
+    mpatches.Patch(color='#0369a1', label='cell active (step rows)'),
+    mpatches.Patch(color='#f0f9ff', label='cell idle'),
+    mpatches.Patch(color='#60a5fa', label='high usage (bottom bar)'),
+    mpatches.Patch(facecolor='none', edgecolor='#7e22ce', linewidth=1.6,
                    label='ptr position'),
 ]
-fig.legend(handles=leg, loc='lower center', ncol=3, fontsize=9,
-           bbox_to_anchor=(0.5, 0.005))
+fig.legend(handles=leg, loc='lower center', ncol=4, fontsize=9,
+           bbox_to_anchor=(0.5, 0.002))
 
 out_png = OUT / 'visualize_dwa_ptr_gen.png'
 fig.savefig(str(out_png), dpi=150, bbox_inches='tight')

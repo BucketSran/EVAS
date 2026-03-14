@@ -1,7 +1,9 @@
 """Analyze clk_burst_gen: outputs 2 CLK pulses every div input cycles."""
 from pathlib import Path
-import pandas as pd
+
 import matplotlib
+import pandas as pd
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 

@@ -10,9 +10,10 @@ This is a behavioral simulator that:
 - Records output waveforms
 """
 import math
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional
+
 import numpy as np
-from dataclasses import dataclass, field
-from typing import Dict, List, Callable, Optional, Tuple
 
 
 @dataclass

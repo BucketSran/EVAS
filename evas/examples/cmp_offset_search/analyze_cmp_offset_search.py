@@ -1,7 +1,9 @@
 """Analyze cmp_offset_search: binary search convergence for comparator offset."""
 from pathlib import Path
-import pandas as pd
+
 import matplotlib
+import pandas as pd
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 

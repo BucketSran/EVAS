@@ -3,9 +3,10 @@
 Six subplots: bin, bin_n, onehot, onehot_n, therm, therm_n.
 """
 from pathlib import Path
-import pandas as pd
-import numpy as np
+
 import matplotlib
+import pandas as pd
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 

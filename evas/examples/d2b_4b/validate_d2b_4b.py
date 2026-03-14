@@ -10,8 +10,9 @@ Checks all six encoding buses:
 
 Also verifies the $strobe INIT line.
 """
-from pathlib import Path
 import re
+from pathlib import Path
+
 import pandas as pd
 
 OUT = Path(__file__).parent.parent.parent / 'output' / 'd2b_4b'
@@ -132,7 +133,7 @@ def validate_txt(out_dir: Path = OUT) -> int:
         return 0
     lines = txt_path.read_text().splitlines()
     failures = 0
-    init_lines = [l for l in lines if '[d2b_4b] INIT' in l]
+    init_lines = [ln for ln in lines if '[d2b_4b] INIT' in ln]
     if init_lines:
         m = re.search(r'trim_code=(\d+)', init_lines[0])
         if m:

@@ -2,9 +2,6 @@
 
 Smoke tests: every example runs to completion and produces a non-empty CSV.
 Functional tests: key signal properties validated against expected behaviour.
-
-Testbench files live under tests/tb/ (copies of examples/ without the
-user-facing analyze_*.py scripts).  The examples/ tree is for end-users only.
 """
 import importlib.util
 from pathlib import Path
@@ -15,16 +12,7 @@ import pytest
 
 from evas.netlist.runner import evas_simulate
 
-TB       = Path(__file__).parent / "tb"
 EXAMPLES = Path(__file__).parent.parent / "examples"
-
-
-def _resolve(tb_rel: str) -> Path:
-    """Return the testbench path, preferring examples/ over tests/tb/."""
-    p = EXAMPLES / tb_rel
-    if p.exists():
-        return p
-    return TB / tb_rel
 
 
 # ---------------------------------------------------------------------------
@@ -33,7 +21,7 @@ def _resolve(tb_rel: str) -> Path:
 
 def _simulate(tb_rel: str, tmp_path: Path) -> pd.DataFrame:
     """Run simulation and return the resulting tran.csv as a DataFrame."""
-    tb = _resolve(tb_rel)
+    tb = EXAMPLES / tb_rel
     assert tb.exists(), f"Testbench not found: {tb}"
     ok = evas_simulate(str(tb), output_dir=str(tmp_path))
     assert ok, f"evas_simulate returned False for {tb.name}"
@@ -43,29 +31,24 @@ def _simulate(tb_rel: str, tmp_path: Path) -> pd.DataFrame:
 
 
 def _load_validate(tb_dir_name: str):
-    """Import the validate_*.py module, checking examples/ then tests/tb/."""
-    for base in (EXAMPLES, TB):
-        candidates = list((base / tb_dir_name).glob("validate_*.py"))
-        if candidates:
-            spec = importlib.util.spec_from_file_location("_validate", candidates[0])
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            return mod
+    """Import the validate_*.py module from examples/."""
+    candidates = list((EXAMPLES / tb_dir_name).glob("validate_*.py"))
+    if candidates:
+        spec = importlib.util.spec_from_file_location("_validate", candidates[0])
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
     return None
 
 
 def _run_validate(tmp_path: Path, tb_rel: str, fn_name: str, tb_dir: str):
-    """Simulate and call a named validate function from a tb sub-directory."""
+    """Simulate and call a named validate function from examples/."""
     _simulate(tb_rel, tmp_path)
     mod = _load_validate(tb_dir)
-    assert mod is not None, f"No validate module found in tests/tb/{tb_dir}"
+    assert mod is not None, f"No validate module found in examples/{tb_dir}"
     fn = getattr(mod, fn_name)
     failures = fn(out_dir=tmp_path)
     assert failures == 0, f"{fn_name} reported {failures} failure(s)"
-
-
-def _high(v: float, vth: float = 0.4) -> bool:
-    return float(v) > vth
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +56,6 @@ def _high(v: float, vth: float = 0.4) -> bool:
 # ---------------------------------------------------------------------------
 
 _SMOKE_CASES = [
-    ("adc_ideal_8b",        "adc_ideal_8b/tb_adc_ideal_8b.scs"),
     ("clk_burst_gen",       "clk_burst_gen/tb_clk_burst_gen.scs"),
     ("clk_div",             "clk_div/tb_clk_div.scs"),
     ("cmp_offset_search",   "cmp_offset_search/tb_cmp_offset_search.scs"),
@@ -90,6 +72,7 @@ _SMOKE_CASES = [
     ("lfsr",                "lfsr/tb_lfsr.scs"),
     ("noise_gen",           "noise_gen/tb_noise_gen.scs"),
     ("ramp_gen",            "ramp_gen/tb_ramp_gen.scs"),
+    ("sar_adc_dac_weighted_8b", "sar_adc_dac_weighted_8b/tb_sar_adc_dac_weighted_8b.scs"),
 ]
 
 

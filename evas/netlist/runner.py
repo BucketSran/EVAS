@@ -6,21 +6,23 @@ import csv
 import re as _re
 import sys
 import time
-
-import numpy as np
-
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, TextIO
 
+import numpy as np
+
 from evas.compiler.parser import parse as parse_va
 from evas.compiler.preprocessor import preprocess
 from evas.simulator.backend import compile_module
-from evas.simulator.engine import Simulator, pulse, dc, sine, pwl, SimResult
+from evas.simulator.engine import SimResult, Simulator, dc, pulse, pwl, sine
 
 from .spectre_parser import (
-    SpectreNetlist, SpectreSource, SpectreInstance, parse_spectre,
-    evaluate_expr, _parse_suffix_number, has_transistors,
+    SpectreNetlist,
+    SpectreSource,
+    _parse_suffix_number,
+    has_transistors,
+    parse_spectre,
 )
 
 VERSION = '0.1.0'
@@ -408,7 +410,7 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
               f"time = (0 s -> {_eng_format(tstop, 's')})")
     log.write("*****************************************************")
     log.write("Important parameter values:")
-    log.write(f"    start = 0 s")
+    log.write("    start = 0 s")
     log.write(f"    stop  = {_eng_format(tstop, 's')}")
     log.write(f"    step  = {_eng_format(tstep, 's')}")
     log.write("")

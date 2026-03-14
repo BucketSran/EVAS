@@ -1,10 +1,9 @@
 """
 lexer.py — Tokenizer for Verilog-A
 """
-import re
 from dataclasses import dataclass
-from typing import List, Optional
 from enum import Enum, auto
+from typing import List
 
 
 class TokenType(Enum):

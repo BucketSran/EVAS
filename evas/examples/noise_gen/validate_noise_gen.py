@@ -1,7 +1,8 @@
 """Validate noise_gen behavior from CSV output (sigma=0.1V, vin=1.0V DC)."""
 from pathlib import Path
-import pandas as pd
+
 import numpy as np
+import pandas as pd
 
 OUT = Path(__file__).parent.parent.parent / 'output' / 'noise_gen'
 

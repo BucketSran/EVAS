@@ -8,16 +8,16 @@ For each trim_code in 0..15:
 Then plots 6 heatmaps (binary, one-hot, thermometer × active-high / active-low)
 where rows = trim_code and columns = bit index.
 """
-import tempfile
 from pathlib import Path
 
-import numpy as np
 import matplotlib
+import numpy as np
+
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from matplotlib.colors import ListedColormap
+import matplotlib.pyplot as plt
 import pandas as pd
+from matplotlib.colors import ListedColormap
 
 from evas.netlist.runner import evas_simulate
 

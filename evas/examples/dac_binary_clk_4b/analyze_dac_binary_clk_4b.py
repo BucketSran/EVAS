@@ -1,6 +1,8 @@
 """Analyze dac_binary_clk_4b: 4-bit clocked binary DAC full code sweep (0 → 15)."""
 from pathlib import Path
+
 import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import pandas as pd

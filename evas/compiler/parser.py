@@ -2,8 +2,9 @@
 parser.py — Recursive descent parser for Verilog-A → AST
 """
 from typing import List, Optional, Tuple
-from .lexer import Token, TokenType, tokenize
+
 from .ast_nodes import *
+from .lexer import Token, TokenType, tokenize
 
 
 class ParseError(Exception):
@@ -183,7 +184,7 @@ class Parser:
             return -val if neg else val
         elif self.at(TokenType.IDENT):
             # Could be a define reference — return as identifier
-            name = self.advance().value
+            self.advance()
             return 0  # fallback
         if self.at(TokenType.LPAREN):
             self.advance()
@@ -548,7 +549,7 @@ class Parser:
             self.match(TokenType.SEMI)
             if isinstance(expr, BranchAccess):
                 return Contribution(branch=expr, expr=rhs)
-            raise ParseError(f"Left side of <+ must be a branch access (V/I)")
+            raise ParseError("Left side of <+ must be a branch access (V/I)")
 
         # Assignment: ident = expr
         if self.match(TokenType.ASSIGN):
@@ -802,7 +803,6 @@ class Parser:
 
 def parse(source: str) -> Module:
     """Parse preprocessed Verilog-A source into a Module AST."""
-    from .lexer import tokenize
     tokens = tokenize(source)
     parser = Parser(tokens)
     return parser.parse_module()

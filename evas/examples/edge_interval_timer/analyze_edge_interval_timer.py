@@ -1,7 +1,9 @@
 """Analyze edge_interval_timer: measures CLK_1 to CLK_2 rising-edge delay."""
 from pathlib import Path
-import pandas as pd
+
 import matplotlib
+import pandas as pd
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
