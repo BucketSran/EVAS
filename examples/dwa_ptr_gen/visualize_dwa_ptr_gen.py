@@ -14,6 +14,8 @@ import matplotlib.patches as mpatches
 from matplotlib.colors import ListedColormap
 import pandas as pd
 
+from evas.netlist.runner import evas_simulate
+
 HERE   = Path(__file__).parent
 OUT    = HERE.parent.parent / 'output' / 'dwa_ptr_gen'
 OUT.mkdir(parents=True, exist_ok=True)

@@ -6,7 +6,6 @@ Functional tests: key signal properties validated against expected behaviour.
 import importlib.util
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -56,6 +55,7 @@ def _run_validate(tmp_path: Path, tb_rel: str, fn_name: str, tb_dir: str):
 # ---------------------------------------------------------------------------
 
 _SMOKE_CASES = [
+    ("adc_dac_ideal_4b",    "adc_dac_ideal_4b/tb_adc_dac_ideal_4b_sine.scs"),
     ("clk_burst_gen",       "clk_burst_gen/tb_clk_burst_gen.scs"),
     ("clk_div",             "clk_div/tb_clk_div.scs"),
     ("cmp_offset_search",   "cmp_offset_search/tb_cmp_offset_search.scs"),
@@ -87,6 +87,15 @@ def test_smoke(tmp_path, name, tb_rel):
 
 
 # ---------------------------------------------------------------------------
+# Functional: adc_dac_ideal_4b — 4-bit ADC→DAC round-trip
+# ---------------------------------------------------------------------------
+
+def test_adc_dac_ideal_4b(tmp_path):
+    _run_validate(tmp_path, "adc_dac_ideal_4b/tb_adc_dac_ideal_4b_sine.scs",
+                  "validate_csv", "adc_dac_ideal_4b")
+
+
+# ---------------------------------------------------------------------------
 # Functional: digital_basics — truth-table and clocked-sequence checks
 # ---------------------------------------------------------------------------
 
@@ -107,40 +116,81 @@ def test_dff_rst(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Functional: clock divider
+# Functional: clock / timing
 # ---------------------------------------------------------------------------
 
 def test_clk_div(tmp_path):
     _run_validate(tmp_path, "clk_div/tb_clk_div.scs", "validate_csv", "clk_div")
 
 
+def test_clk_burst_gen(tmp_path):
+    _run_validate(tmp_path, "clk_burst_gen/tb_clk_burst_gen.scs", "validate_csv", "clk_burst_gen")
+
+
+def test_edge_interval_timer(tmp_path):
+    _run_validate(tmp_path, "edge_interval_timer/tb_edge_interval_timer.scs",
+                  "validate_csv", "edge_interval_timer")
+
+
 # ---------------------------------------------------------------------------
-# Functional: ramp_gen — output is a ramp signal
+# Functional: comparators
+# ---------------------------------------------------------------------------
+
+def test_cmp_strongarm(tmp_path):
+    _run_validate(tmp_path, "cmp_strongarm/tb_cmp_strongarm.scs",
+                  "validate_csv", "cmp_strongarm")
+
+
+def test_cmp_offset_search(tmp_path):
+    _run_validate(tmp_path, "cmp_offset_search/tb_cmp_offset_search.scs",
+                  "validate_csv", "cmp_offset_search")
+
+
+# ---------------------------------------------------------------------------
+# Functional: DACs
+# ---------------------------------------------------------------------------
+
+def test_dac_binary_clk_4b(tmp_path):
+    _run_validate(tmp_path, "dac_binary_clk_4b/tb_dac_binary_clk_4b.scs",
+                  "validate_csv", "dac_binary_clk_4b")
+
+
+def test_dac_therm_16b(tmp_path):
+    _run_validate(tmp_path, "dac_therm_16b/tb_dac_therm_16b.scs",
+                  "validate_csv", "dac_therm_16b")
+
+
+# ---------------------------------------------------------------------------
+# Functional: encoding / bus drivers
+# ---------------------------------------------------------------------------
+
+def test_d2b_4b(tmp_path):
+    _run_validate(tmp_path, "d2b_4b/tb_d2b_4b.scs", "validate_csv", "d2b_4b")
+
+
+# ---------------------------------------------------------------------------
+# Functional: algorithmic / sequenced
 # ---------------------------------------------------------------------------
 
 def test_ramp_gen(tmp_path):
     _run_validate(tmp_path, "ramp_gen/tb_ramp_gen.scs", "validate_csv", "ramp_gen")
 
 
-# ---------------------------------------------------------------------------
-# Functional: lfsr — output toggles (non-trivial bit sequence)
-# ---------------------------------------------------------------------------
+def test_dwa_ptr_gen(tmp_path):
+    _run_validate(tmp_path, "dwa_ptr_gen/tb_dwa_ptr_gen.scs", "validate_csv", "dwa_ptr_gen")
+
 
 def test_lfsr(tmp_path):
-    """LFSR output transitions at least once."""
-    df = _simulate("lfsr/tb_lfsr.scs", tmp_path)
+    _run_validate(tmp_path, "lfsr/tb_lfsr.scs", "validate_csv", "lfsr")
 
-    # Find any output signal other than reset/clock inputs
-    bit_cols = [c for c in df.columns if c not in ("time", "rstb", "clk")]
-    assert len(bit_cols) > 0, "No output signals in LFSR CSV"
 
-    # At least one output should toggle
-    toggled = any(df[c].nunique() > 1 for c in bit_cols)
-    assert toggled, "No LFSR output ever changed value"
+def test_sar_adc_dac_weighted_8b(tmp_path):
+    _run_validate(tmp_path, "sar_adc_dac_weighted_8b/tb_sar_adc_dac_weighted_8b.scs",
+                  "validate_csv", "sar_adc_dac_weighted_8b")
 
 
 # ---------------------------------------------------------------------------
-# Functional: noise_gen — output is non-deterministic (has spread)
+# Functional: noise / analog utility
 # ---------------------------------------------------------------------------
 
 def test_noise_gen(tmp_path):

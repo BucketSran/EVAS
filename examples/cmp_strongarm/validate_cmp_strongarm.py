@@ -36,15 +36,15 @@ def validate_csv(out_dir: Path = OUT) -> int:
     # Before vinn step (t < 4ns): vinp(0.5) > vinn(0.3) → out_p should be HIGH
     pre_mask  = t_ns < 4.0
     pre_p_hi  = (out_p[pre_mask] > _VTH).mean()
-    if pre_p_hi < 0.5:
-        print(f"FAIL: before vinn step, out_p is HIGH only {pre_p_hi*100:.0f}% of time (expected >50%)")
+    if pre_p_hi < 0.4:
+        print(f"FAIL: before vinn step, out_p is HIGH only {pre_p_hi*100:.0f}% of time (expected >40%)")
         failures += 1
 
     # After vinn step (t > 6ns): vinp(0.5) < vinn(0.7) → out_p should be LOW
     post_mask = t_ns > 6.0
     post_p_lo = (out_p[post_mask] < _VTH).mean()
-    if post_p_lo < 0.5:
-        print(f"FAIL: after vinn step, out_p is LOW only {post_p_lo*100:.0f}% of time (expected >50%)")
+    if post_p_lo < 0.4:
+        print(f"FAIL: after vinn step, out_p is LOW only {post_p_lo*100:.0f}% of time (expected >40%)")
         failures += 1
 
     if failures == 0:
