@@ -1,0 +1,14 @@
+{%- extends "!layout.html" %}
+
+{%- block extrahead %}
+{{ super() }}
+<script async src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+{%- endblock %}
+
+{%- block footer %}
+{{ super() }}
+<div style="text-align:center; padding: 0.8rem 0; font-size:0.8rem; color: var(--color-foreground-secondary);">
+  Visitors: <span id="busuanzi_value_site_uv"></span> &nbsp;|&nbsp;
+  Page views: <span id="busuanzi_value_site_pv"></span>
+</div>
+{%- endblock %}

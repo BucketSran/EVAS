@@ -16,8 +16,8 @@ Vclk (clk 0) vsource type=pulse val0=0 val1=0.9 period=1n delay=0.5n \
 Vvinp (vinp 0) vsource dc=0.5 type=dc
 Vvinn (vinn 0) vsource type=pwl wave=[0 0.3 4.9e-9 0.3 5e-9 0.7 10e-9 0.7]
 
-// DUT (port order: DCMPN DCMPP GND VDD CLK VINN VINP)
-XDUT (out_n out_p gnd vdd clk vinn vinp) cmp_strongarm
+// DUT (port order: CLK VINN VINP DCMPN DCMPP LP LM VSS VDD)
+XDUT (clk vinn vinp out_n out_p lp_int lm_int gnd vdd) cmp_strongarm
 
 tran tran stop=10n maxstep=5p
 save clk:2e vinp:3f vinn:3f out_p:2e out_n:2e

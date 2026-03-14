@@ -1,9 +1,9 @@
 """Validate ramp_gen behavior from CSV and strobe output.
 
-Configuration: DIRECTION=1, MIN_CODE=0, MAX_CODE=15, STEP_SIZE=1, N_CYCLE_START=2
+Configuration: DIRECTION=1, MIN_CODE=0, MAX_CODE=127, STEP_SIZE=1, N_CYCLE_START=2
 Clock period = 100ns, RST deasserts at ~20ns.
 After 2 startup cycles (~220ns), ramp starts from 0 and increments each cycle.
-Should reach MAX_CODE=15 and hold there.
+Should reach MAX_CODE=127 and hold there.
 """
 import re
 from pathlib import Path
@@ -14,7 +14,7 @@ import pandas as pd
 OUT = Path(__file__).parent.parent.parent / 'output' / 'ramp_gen'
 
 _MIN_CODE = 0
-_MAX_CODE = 15
+_MAX_CODE = 127
 _DIRECTION = 1
 
 
@@ -49,7 +49,7 @@ def validate_csv(out_dir: Path = OUT) -> int:
         print("FAIL: ramp code decreased unexpectedly (not monotonic)")
         failures += 1
 
-    # Final value should be MAX_CODE=15
+    # Final value should be MAX_CODE=127
     final_code = int(ramp_code[-1])
     if final_code != _MAX_CODE:
         print(f"FAIL: final code={final_code}, expected {_MAX_CODE}")

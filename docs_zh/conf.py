@@ -53,6 +53,7 @@ html_theme_options = {
     ],
 }
 html_static_path = ["_static"]
+html_favicon = "_static/favicon.svg"
 html_css_files = ["custom.css"]
 
 intersphinx_mapping = {
