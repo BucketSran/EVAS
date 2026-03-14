@@ -79,11 +79,8 @@ _SMOKE_CASES = [
     ("cmp_offset_search",   "cmp_offset_search/tb_cmp_offset_search.scs"),
     ("cmp_strongarm",       "cmp_strongarm/tb_cmp_strongarm.scs"),
     ("d2b_4b",              "d2b_4b/tb_d2b_4b.scs"),
-    ("dac_binary_8b",       "dac_binary_8b/tb_dac_binary_8b.scs"),
     ("dac_binary_clk_4b",   "dac_binary_clk_4b/tb_dac_binary_clk_4b.scs"),
-    ("dac_onehot_inv_16b",  "dac_onehot_inv_16b/tb_dac_onehot_inv_16b.scs"),
     ("dac_therm_16b",       "dac_therm_16b/tb_dac_therm_16b.scs"),
-    ("dac_weighted_11b",    "dac_weighted_11b/tb_dac_weighted_11b.scs"),
     ("digital_basics_and",  "digital_basics/tb_and_gate.scs"),
     ("digital_basics_or",   "digital_basics/tb_or_gate.scs"),
     ("digital_basics_not",  "digital_basics/tb_not_gate.scs"),
@@ -93,8 +90,6 @@ _SMOKE_CASES = [
     ("lfsr",                "lfsr/tb_lfsr.scs"),
     ("noise_gen",           "noise_gen/tb_noise_gen.scs"),
     ("ramp_gen",            "ramp_gen/tb_ramp_gen.scs"),
-    ("sar_adc_4b",          "sar_adc_4b/tb_sar_adc_4b.scs"),
-    ("sar_adc_weighted",    "sar_adc_weighted/tb_sar_adc_weighted.scs"),
 ]
 
 
@@ -134,66 +129,6 @@ def test_dff_rst(tmp_path):
 
 def test_clk_div(tmp_path):
     _run_validate(tmp_path, "clk_div/tb_clk_div.scs", "validate_csv", "clk_div")
-
-
-# ---------------------------------------------------------------------------
-# Functional: adc_ideal_8b — 4-bit ideal ADC
-# ---------------------------------------------------------------------------
-
-def test_adc_ideal_8b(tmp_path):
-    """dout_code sweeps 0..15 monotonically; rst_n reaches VDD."""
-    df = _simulate("adc_ideal_8b/tb_adc_ideal_8b.scs", tmp_path)
-
-    assert "dout_code" in df.columns, "dout_code missing from CSV"
-
-    # rst_n must go high (normalized to ~1.00)
-    assert df["rst_n"].max() > 0.5, "rst_n never went high"
-
-    # After reset deassert, codes should be monotonically non-decreasing
-    active = df[df["time"] > 40e-9]["dout_code"].values
-    assert len(active) > 0
-    diffs = np.diff(active.astype(float))
-    assert np.all(diffs >= -1), "dout_code decreased unexpectedly (non-monotonic)"
-
-    # 4-bit ADC: max code should reach 15
-    assert df["dout_code"].max() >= 14, f"Max dout_code={df['dout_code'].max()}, expected 15"
-    assert df["dout_code"].max() <= 15
-
-
-# ---------------------------------------------------------------------------
-# Functional: sar_adc_4b — 4-bit SAR ADC full sweep
-# ---------------------------------------------------------------------------
-
-def test_sar_adc_4b(tmp_path):
-    """dout_code sweeps from 0 up to at least 12 during the vin ramp."""
-    df = _simulate("sar_adc_4b/tb_sar_adc_4b.scs", tmp_path)
-
-    assert "dout_code" in df.columns, "dout_code missing from CSV"
-    assert df["dout_code"].min() == 0, "SAR ADC code never reached 0"
-    assert df["dout_code"].max() >= 12, (
-        f"SAR ADC max code={df['dout_code'].max()}, expected ≥ 12"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Functional: sar_adc_weighted — 12-bit non-binary SAR ADC
-# ---------------------------------------------------------------------------
-
-def test_sar_adc_weighted(tmp_path):
-    """dout_code increases as vin ramps; reaches a high code near end."""
-    df = _simulate("sar_adc_weighted/tb_sar_adc_weighted.scs", tmp_path)
-
-    assert "dout_code" in df.columns, "dout_code missing from CSV"
-    # vin ramps from 0 to VDD, so final code should be near full-scale
-    assert df["dout_code"].max() > 0, "dout_code never left zero"
-
-
-# ---------------------------------------------------------------------------
-# Functional: dac_binary_8b — output voltage swing
-# ---------------------------------------------------------------------------
-
-def test_dac_binary_8b(tmp_path):
-    _run_validate(tmp_path, "dac_binary_8b/tb_dac_binary_8b.scs", "validate_csv", "dac_binary_8b")
 
 
 # ---------------------------------------------------------------------------

@@ -41,3 +41,6 @@ htmlcov/
 
 # Simulation output
 output/
+
+# Test fixtures (local only)
+tests/tb/
