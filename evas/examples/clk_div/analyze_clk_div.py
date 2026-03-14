@@ -58,7 +58,7 @@ def analyze(out_dir: Path = _DEFAULT_OUT) -> None:
 
         period_out_ns = _measure_period_ns(t_ns, clk_out)
         period_in_ns  = _measure_period_ns(t_ns, clk_in)
-        wall_ms       = wall_times[ratio] * 1e3
+        wall_s = wall_times[ratio]
 
         fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(10, 5), sharex=True)
 
@@ -76,7 +76,7 @@ def analyze(out_dir: Path = _DEFAULT_OUT) -> None:
         fig.suptitle(
             f'clk_div  ÷{ratio}  —  '
             f'in {period_in_ns:.0f} ns / out {period_out_ns:.0f} ns  |  '
-            f'wall clock: {wall_ms:.1f} ms',
+            f'wall clock: {wall_s:.4f} s',
             fontsize=10,
         )
         fig.tight_layout()
