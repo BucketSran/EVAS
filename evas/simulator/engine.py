@@ -106,10 +106,11 @@ class CrossDetector:
             self.last_triggered = False
             return False
 
+        _tol = 1e-12  # guard against floating-point rounding at exact crossings
         triggered = False
-        if self.direction >= 0 and self.prev_val < 0 and val >= 0:
+        if self.direction >= 0 and self.prev_val < 0 and val >= -_tol:
             triggered = True  # Rising
-        if self.direction <= 0 and self.prev_val > 0 and val <= 0:
+        if self.direction <= 0 and self.prev_val > 0 and val <= _tol:
             if self.direction == 0 or self.direction == -1:
                 triggered = True  # Falling
 
@@ -145,7 +146,7 @@ class AboveDetector:
             return False
 
         triggered = False
-        if self.direction >= 0 and self.prev_val < 0 and val >= 0:
+        if self.direction >= 0 and self.prev_val < 0 and val >= -1e-12:
             triggered = True
 
         self.prev_val = val
