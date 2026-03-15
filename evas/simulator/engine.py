@@ -304,6 +304,12 @@ class Simulator:
                     if dt < 1e-18:
                         dt = 1e-18
 
+            # Respect $bound_step from models
+            for model in self.models:
+                bs = model._bound_step
+                if bs > 0 and dt > bs:
+                    dt = bs
+
             time += dt
 
             # Update source voltages
@@ -335,6 +341,14 @@ class Simulator:
 
             self._record_point(time)
             self._step_sizes.append(dt)
+
+        # Fire final_step events
+        for model in self.models:
+            model.final_step(self.node_voltages, time)
+
+        # Close any open file handles
+        for model in self.models:
+            model._cleanup_files()
 
         # Convert to arrays
         time_arr = np.array(self.time_points)

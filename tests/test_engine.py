@@ -503,3 +503,331 @@ class TestCompiledModelHelpers:
         self.model.transitions["t"] = ts
         bp = self.model.next_breakpoint(0.0)
         assert bp == pytest.approx(10e-9)
+
+    def test_check_timer_first_fire(self):
+        fired = self.model._check_timer("t0", 10e-9, 10e-9)
+        assert fired is True
+
+    def test_check_timer_before_period(self):
+        fired = self.model._check_timer("t1", 5e-9, 10e-9)
+        assert fired is False
+
+    def test_check_timer_advances_next_fire(self):
+        self.model._check_timer("t2", 10e-9, 10e-9)  # fires, sets next=20ns
+        assert not self.model._check_timer("t2", 15e-9, 10e-9)  # before 20ns
+        assert self.model._check_timer("t2", 20e-9, 10e-9)  # fires at 20ns
+
+    def test_next_breakpoint_includes_timer(self):
+        self.model.timer_states["t0"] = 10e-9
+        bp = self.model.next_breakpoint(0.0)
+        assert bp == pytest.approx(10e-9)
+
+    def test_temperature_default(self):
+        assert self.model._temperature == pytest.approx(27.0)
+
+    def test_final_step_base_is_noop(self):
+        # base class final_step should not raise
+        self.model.final_step({}, 0.0)
+
+
+# ===========================================================================
+# Compiled model features: timer, final_step, $temperature, $vt
+# ===========================================================================
+
+class TestTimerEvent:
+    """Test @(timer(period)) via a compiled VA module."""
+
+    VA_SRC = """\
+`include "disciplines.vams"
+module timer_test(out);
+    output voltage out;
+    integer count;
+    analog begin
+        @(initial_step) begin
+            count = 0;
+        end
+        @(timer(10e-9)) begin
+            count = count + 1;
+        end
+        V(out) <+ count;
+    end
+endmodule
+"""
+
+    def test_timer_fires_periodically(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+        mod = parse(self.VA_SRC)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=50e-9, tstep=1e-9)
+        # At 50ns, timer should have fired at 10, 20, 30, 40, 50 → count=5
+        final_val = result.signals["out"][-1]
+        assert final_val == pytest.approx(5.0, abs=1.0)
+
+
+class TestFinalStep:
+    """Test @(final_step) via a compiled VA module."""
+
+    VA_SRC = """\
+`include "disciplines.vams"
+module final_test(out);
+    output voltage out;
+    integer flag;
+    analog begin
+        @(initial_step) begin
+            flag = 0;
+        end
+        @(final_step) begin
+            flag = 99;
+        end
+        V(out) <+ flag;
+    end
+endmodule
+"""
+
+    def test_final_step_fires_after_sim(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+        mod = parse(self.VA_SRC)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        result = sim.run(tstop=10e-9, tstep=1e-9)
+        # After simulation, final_step should have set flag=99
+        assert model.state['flag'] == 99
+
+
+class TestTemperatureVt:
+    """Test $temperature and $vt via compiled VA modules."""
+
+    VA_TEMP = """\
+`include "disciplines.vams"
+module temp_test(out);
+    output voltage out;
+    real t_val;
+    analog begin
+        t_val = $temperature;
+        V(out) <+ t_val;
+    end
+endmodule
+"""
+
+    VA_VT = """\
+`include "disciplines.vams"
+module vt_test(out);
+    output voltage out;
+    real vt_val;
+    analog begin
+        vt_val = $vt;
+        V(out) <+ vt_val;
+    end
+endmodule
+"""
+
+    def test_temperature_returns_kelvin(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+        mod = parse(self.VA_TEMP)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=0.5e-9)
+        # Default temp = 27C → 300.15 K
+        assert result.signals["out"][-1] == pytest.approx(300.15, abs=0.01)
+
+    def test_vt_at_room_temperature(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+        mod = parse(self.VA_VT)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=0.5e-9)
+        # kT/q at 300.15K ≈ 0.025875 V
+        expected_vt = 1.380649e-23 * 300.15 / 1.602176634e-19
+        assert result.signals["out"][-1] == pytest.approx(expected_vt, rel=1e-4)
+
+
+class TestCaseStatement:
+    """Test case/endcase via compiled VA modules."""
+
+    VA_SRC = """\
+`include "disciplines.vams"
+module case_test(out, sel);
+    input voltage sel;
+    output voltage out;
+    integer code;
+    real result;
+    analog begin
+        code = V(sel) > 1.5 ? 2 : (V(sel) > 0.5 ? 1 : 0);
+        case (code)
+            0: result = 0.0;
+            1: result = 0.5;
+            2: result = 1.0;
+            default: result = -1.0;
+        endcase
+        V(out) <+ result;
+    end
+endmodule
+"""
+
+    def test_case_selects_branch(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+        mod = parse(self.VA_SRC)
+        ModelCls = compile_module(mod)
+
+        # sel=0.0 → code=0 → result=0.0
+        model = ModelCls()
+        sim = Simulator()
+        sim.add_source("sel", dc(0.0))
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=0.5e-9)
+        assert result.signals["out"][-1] == pytest.approx(0.0)
+
+    def test_case_selects_middle(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+        mod = parse(self.VA_SRC)
+        ModelCls = compile_module(mod)
+
+        # sel=1.0 → code=1 → result=0.5
+        model = ModelCls()
+        sim = Simulator()
+        sim.add_source("sel", dc(1.0))
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=0.5e-9)
+        assert result.signals["out"][-1] == pytest.approx(0.5)
+
+    def test_case_selects_high(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+        mod = parse(self.VA_SRC)
+        ModelCls = compile_module(mod)
+
+        # sel=2.0 → code=2 → result=1.0
+        model = ModelCls()
+        sim = Simulator()
+        sim.add_source("sel", dc(2.0))
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=0.5e-9)
+        assert result.signals["out"][-1] == pytest.approx(1.0)
+
+
+class TestBoundStep:
+    """Test $bound_step() via compiled VA module."""
+
+    VA_SRC = """\
+`include "disciplines.vams"
+module bound_test(out);
+    output voltage out;
+    analog begin
+        $bound_step(1e-9);
+        V(out) <+ 1.0;
+    end
+endmodule
+"""
+
+    def test_bound_step_limits_dt(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+        mod = parse(self.VA_SRC)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        # tstep=10ns but $bound_step limits to 1ns
+        result = sim.run(tstop=10e-9, tstep=10e-9)
+        # Should have at least 10 steps (10ns / 1ns)
+        assert len(result.time) >= 10
+        # All step sizes (after first) should be <= 1ns + tolerance
+        for dt in result.step_sizes[1:]:
+            assert dt <= 1e-9 + 1e-15
+
+
+class TestFileIO:
+    """Test $fopen/$fstrobe/$fclose via compiled VA module."""
+
+    VA_SRC = """\
+`include "disciplines.vams"
+module fileio_test(clk);
+    input voltage clk;
+    integer fd;
+    integer count;
+    analog begin
+        @(initial_step) begin
+            fd = $fopen("{filepath}", "w");
+            count = 0;
+        end
+        @(cross(V(clk) - 0.5, 1)) begin
+            count = count + 1;
+            $fstrobe(fd, "edge %d at %e", count, $abstime);
+        end
+        @(final_step) begin
+            $fclose(fd);
+        end
+    end
+endmodule
+"""
+
+    def test_fopen_fstrobe_fclose(self, tmp_path):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        outfile = tmp_path / "test_output.txt"
+        src = self.VA_SRC.replace("{filepath}", str(outfile).replace("\\", "/"))
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        # 5 rising edges: pulse period=20ns, tstop=100ns
+        sim.add_source("clk", pulse(v_lo=0.0, v_hi=1.0, period=20e-9,
+                                     rise=0.1e-9, fall=0.1e-9, duty=0.5))
+        sim.add_model(model)
+        result = sim.run(tstop=100e-9, tstep=1e-9)
+
+        # File should exist and have lines
+        assert outfile.exists()
+        lines = outfile.read_text().strip().splitlines()
+        assert len(lines) == 5
+        assert lines[0].startswith("edge 1 at")
+        assert lines[4].startswith("edge 5 at")
+
+    def test_fclose_cleans_handle(self, tmp_path):
+        """After simulation, file handles should be cleaned up."""
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        outfile = tmp_path / "cleanup_test.txt"
+        src = self.VA_SRC.replace("{filepath}", str(outfile).replace("\\", "/"))
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_source("clk", pulse(v_lo=0.0, v_hi=1.0, period=20e-9,
+                                     rise=0.1e-9, fall=0.1e-9, duty=0.5))
+        sim.add_model(model)
+        sim.run(tstop=50e-9, tstep=1e-9)
+
+        # After sim, all file handles should be closed
+        assert len(model._file_handles) == 0

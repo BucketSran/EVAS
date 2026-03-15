@@ -26,6 +26,8 @@ class TokenType(Enum):
     IF = auto()
     ELSE = auto()
     FOR = auto()
+    CASE = auto()
+    ENDCASE = auto()
     OR = auto()
 
     # Literals
@@ -99,6 +101,8 @@ KEYWORDS = {
     'if': TokenType.IF,
     'else': TokenType.ELSE,
     'for': TokenType.FOR,
+    'case': TokenType.CASE,
+    'endcase': TokenType.ENDCASE,
     'or': TokenType.OR,
 }
 

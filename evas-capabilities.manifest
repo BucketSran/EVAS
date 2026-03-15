@@ -20,6 +20,8 @@ V(node1, node2) <+
 @(cross())
 @(above())
 @(initial_step)
+@(timer())
+@(final_step)
 # combined: @(event1 or event2)
 # --- Operators ---
 transition()
@@ -44,6 +46,13 @@ $strobe
 $random
 $dist_uniform()
 $rdist_normal()
+$temperature
+$vt
+$fopen()
+$fclose()
+$fstrobe()
+$fwrite()
+$fdisplay()
 # --- Math ---
 abs() sqrt() ln() log() exp() pow()
 sin() cos() floor() ceil() min() max()
@@ -64,12 +73,7 @@ laplace_nd()
 laplace_zp()
 flicker_noise()
 white_noise()
-$temperature
-$vt
 KCL-based solving
-@(timer())
-@(final_step)
-$fopen / $fclose / $fstrobe
 last_crossing()
 analysis()
 branch

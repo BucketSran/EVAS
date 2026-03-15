@@ -38,11 +38,19 @@ class CompiledModel:
         self._initial_step_done: bool = False
         self._strobe_log: List[str] = []
         self._event_time: float = 0.0  # $abstime inside cross/above event bodies
+        self._temperature: float = 27.0  # degrees Celsius (expressions convert to Kelvin)
+        self.timer_states: Dict[str, float] = {}  # key → next_fire_time
+        self._bound_step: float = 0.0  # $bound_step limit (0 = no limit)
+        self._file_handles: Dict[int, Any] = {}  # fd → file object
+        self._next_fd: int = 1
 
     def initial_step(self, node_voltages: Dict[str, float], time: float):
         pass
 
     def evaluate(self, node_voltages: Dict[str, float], time: float):
+        pass
+
+    def final_step(self, node_voltages: Dict[str, float], time: float):
         pass
 
     def next_breakpoint(self, time: float) -> Optional[float]:
@@ -59,7 +67,20 @@ class CompiledModel:
             bp = ad.next_breakpoint()
             if bp is not None and bp > time:
                 bps.append(bp)
+        # Timer breakpoints
+        for nf in self.timer_states.values():
+            if nf > time:
+                bps.append(nf)
         return min(bps) if bps else None
+
+    def _check_timer(self, key: str, time: float, period: float) -> bool:
+        if key not in self.timer_states:
+            self.timer_states[key] = period  # first fire at t=period
+        next_fire = self.timer_states[key]
+        if time >= next_fire - 1e-18:
+            self.timer_states[key] = next_fire + period
+            return True
+        return False
 
     def _get_voltage(self, node: str, node_voltages: Dict[str, float]) -> float:
         """Get voltage of a node, resolving through node_map."""
@@ -125,6 +146,30 @@ class CompiledModel:
             msg = f"{fmt}  [format error: {e}]"
         self._strobe_log.append((time, msg))
 
+    def _fopen(self, filename: str, mode: str = 'w') -> int:
+        fd = self._next_fd
+        self._next_fd += 1
+        self._file_handles[fd] = open(filename, mode)
+        return fd
+
+    def _fclose(self, fd: int):
+        if fd in self._file_handles:
+            self._file_handles[fd].close()
+            del self._file_handles[fd]
+
+    def _fstrobe(self, fd: int, fmt: str, *args):
+        if fd in self._file_handles:
+            try:
+                msg = (fmt % args) if args else fmt
+            except Exception as e:
+                msg = f"{fmt}  [format error: {e}]"
+            self._file_handles[fd].write(msg + '\n')
+
+    def _cleanup_files(self):
+        for f in self._file_handles.values():
+            f.close()
+        self._file_handles.clear()
+
 
 def compile_module(module: Module, default_transition: float = None) -> type:
     """
@@ -144,6 +189,7 @@ class _ModuleCompiler:
         self._trans_counter = 0
         self._cross_counter = 0
         self._above_counter = 0
+        self._timer_counter = 0
         self._indent = 2
         self._in_loop_var = None  # track if we're inside a for loop
 
@@ -223,6 +269,7 @@ class _ModuleCompiler:
         self._trans_counter = 0
         self._cross_counter = 0
         self._above_counter = 0
+        self._timer_counter = 0
 
         lines.append("")
         lines.append("    def evaluate(self, nv, time):")
@@ -233,6 +280,17 @@ class _ModuleCompiler:
                 stmt_lines = self._compile_statement(stmt, 2)
                 lines.extend(stmt_lines)
 
+        lines.append("        pass")
+
+        # Generate final_step method
+        lines.append("")
+        lines.append("    def final_step(self, nv, time):")
+        if mod.analog_block:
+            for stmt in mod.analog_block.body.statements:
+                if isinstance(stmt, EventStatement):
+                    if self._is_final_step_event(stmt.event):
+                        body_lines = self._compile_statement(stmt.body, 2)
+                        lines.extend(body_lines)
         lines.append("        pass")
 
         # Compile the class
@@ -266,6 +324,14 @@ class _ModuleCompiler:
             return True
         if isinstance(event, CombinedEvent):
             return any(e.event_type == EventType.INITIAL_STEP for e in event.events)
+        return False
+
+    def _is_final_step_event(self, event) -> bool:
+        """Check if event includes final_step."""
+        if isinstance(event, EventExpr) and event.event_type == EventType.FINAL_STEP:
+            return True
+        if isinstance(event, CombinedEvent):
+            return any(e.event_type == EventType.FINAL_STEP for e in event.events)
         return False
 
     def _compile_statement(self, stmt, indent) -> List[str]:
@@ -303,6 +369,9 @@ class _ModuleCompiler:
         elif isinstance(stmt, ForStatement):
             lines.extend(self._compile_for(stmt, indent))
 
+        elif isinstance(stmt, CaseStatement):
+            lines.extend(self._compile_case(stmt, indent))
+
         elif isinstance(stmt, SystemTask):
             # $strobe, $display → collect output
             if stmt.name in ('$strobe', '$display'):
@@ -315,6 +384,23 @@ class _ModuleCompiler:
                         lines.append(f"{prefix}self._strobe(time, {fmt_expr})")
                 else:
                     lines.append(f"{prefix}self._strobe(time, '')")
+            elif stmt.name == '$bound_step' and stmt.args:
+                val = self._compile_expr(stmt.args[0])
+                lines.append(f"{prefix}self._bound_step = {val}")
+            elif stmt.name == '$fclose' and stmt.args:
+                fd = self._compile_expr(stmt.args[0])
+                lines.append(f"{prefix}self._fclose(int({fd}))")
+            elif stmt.name in ('$fstrobe', '$fwrite', '$fdisplay') and stmt.args:
+                fd = self._compile_expr(stmt.args[0])
+                if len(stmt.args) > 1:
+                    fmt_expr = self._compile_expr(stmt.args[1])
+                    rest = ', '.join(self._compile_expr(a) for a in stmt.args[2:])
+                    if rest:
+                        lines.append(f"{prefix}self._fstrobe(int({fd}), {fmt_expr}, {rest})")
+                    else:
+                        lines.append(f"{prefix}self._fstrobe(int({fd}), {fmt_expr})")
+                else:
+                    lines.append(f"{prefix}self._fstrobe(int({fd}), '')")
 
         return lines
 
@@ -326,6 +412,10 @@ class _ModuleCompiler:
         if isinstance(event, EventExpr):
             if event.event_type == EventType.INITIAL_STEP:
                 # Skip in evaluate — handled in initial_step method
+                return []
+
+            elif event.event_type == EventType.FINAL_STEP:
+                # Skip in evaluate — handled in final_step method
                 return []
 
             elif event.event_type == EventType.CROSS:
@@ -352,12 +442,26 @@ class _ModuleCompiler:
                     lines.append(f"{prefix}    pass")
                 lines.append(f"{prefix}    self._event_time = time")
 
+            elif event.event_type == EventType.TIMER:
+                key = f"timer_{self._timer_counter}"
+                self._timer_counter += 1
+                period_expr = self._compile_expr(event.args[0])
+                lines.append(f"{prefix}if self._check_timer({key!r}, time, {period_expr}):")
+                body_lines = self._compile_statement(stmt.body, indent + 1)
+                lines.extend(body_lines)
+                if not body_lines:
+                    lines.append(f"{prefix}    pass")
+                lines.append(f"{prefix}    self._event_time = time")
+
         elif isinstance(event, CombinedEvent):
             # Combined events: @(initial_step or cross(...))
             conditions = []
             for e in event.events:
                 if e.event_type == EventType.INITIAL_STEP:
                     # In evaluate, initial_step never fires again
+                    continue
+                elif e.event_type == EventType.FINAL_STEP:
+                    # In evaluate, final_step never fires
                     continue
                 elif e.event_type == EventType.CROSS:
                     key = f"cross_{self._cross_counter}"
@@ -371,6 +475,11 @@ class _ModuleCompiler:
                     expr = self._compile_expr(e.args[0])
                     direction = e.direction if e.direction is not None else 1
                     conditions.append(f"self._check_above({key!r}, time, {expr}, {direction})")
+                elif e.event_type == EventType.TIMER:
+                    key = f"timer_{self._timer_counter}"
+                    self._timer_counter += 1
+                    period_expr = self._compile_expr(e.args[0])
+                    conditions.append(f"self._check_timer({key!r}, time, {period_expr})")
 
             if conditions:
                 cond = ' or '.join(conditions)
@@ -447,6 +556,38 @@ class _ModuleCompiler:
         self._in_loop_var = prev_loop_var
         return lines
 
+    def _compile_case(self, stmt: CaseStatement, indent) -> List[str]:
+        """Compile a case statement to chained if/elif/else."""
+        prefix = '    ' * indent
+        lines = []
+        sel = self._compile_expr(stmt.expr)
+        first = True
+        default_lines = None
+        for item in stmt.items:
+            if not item.values:
+                # default branch — emit last
+                default_lines = self._compile_statement(item.body, indent + 1)
+                continue
+            cond_parts = [f"({sel} == {self._compile_expr(v)})" for v in item.values]
+            cond = ' or '.join(cond_parts)
+            keyword = 'if' if first else 'elif'
+            lines.append(f"{prefix}{keyword} {cond}:")
+            body_lines = self._compile_statement(item.body, indent + 1)
+            lines.extend(body_lines)
+            if not body_lines:
+                lines.append(f"{prefix}    pass")
+            first = False
+        if default_lines is not None:
+            if first:
+                # only default, no value branches
+                lines.extend(default_lines)
+            else:
+                lines.append(f"{prefix}else:")
+                lines.extend(default_lines)
+                if not default_lines:
+                    lines.append(f"{prefix}    pass")
+        return lines
+
     def _compile_expr(self, expr: Expr) -> str:
         """Compile an expression to Python code string."""
         if isinstance(expr, NumberLiteral):
@@ -470,6 +611,10 @@ class _ModuleCompiler:
                 return "float('inf')"
             if name == '$abstime':
                 return "self._event_time"
+            if name == '$temperature':
+                return "(self._temperature + 273.15)"
+            if name == '$vt':
+                return "(1.380649e-23 * (self._temperature + 273.15) / 1.602176634e-19)"
             return f"self.state[{name!r}]"
 
         if isinstance(expr, ArrayAccess):
@@ -596,6 +741,10 @@ class _ModuleCompiler:
             lo = args[1] if len(args) > 1 else "0.0"
             hi = args[2] if len(args) > 2 else "1.0"
             return f"random.uniform({lo}, {hi})"
+        if name == '$fopen':
+            filename = args[0] if len(args) > 0 else "'output.txt'"
+            mode = args[1] if len(args) > 1 else "'w'"
+            return f"self._fopen({filename}, {mode})"
 
         return "0.0"  # unknown function: {name}
 

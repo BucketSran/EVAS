@@ -22,6 +22,8 @@ class EventType(Enum):
     CROSS = auto()
     ABOVE = auto()
     INITIAL_STEP = auto()
+    TIMER = auto()
+    FINAL_STEP = auto()
 
 
 class BinOp(Enum):
@@ -161,13 +163,24 @@ class ForStatement:
     body: 'Statement'
 
 @dataclass
+class CaseItem:
+    """One branch: value_expr [, value_expr]: statement"""
+    values: List[Expr]          # empty list means 'default'
+    body: 'Statement'
+
+@dataclass
+class CaseStatement:
+    expr: Expr                  # the selector expression
+    items: List[CaseItem]
+
+@dataclass
 class SystemTask:
     """$strobe, $display, etc."""
     name: str
     args: List[Expr]
 
 Statement = Union[Assignment, Contribution, EventStatement, Block,
-                  IfStatement, ForStatement, SystemTask]
+                  IfStatement, ForStatement, CaseStatement, SystemTask]
 
 
 # --- Declaration nodes ---

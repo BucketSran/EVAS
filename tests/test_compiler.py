@@ -21,11 +21,11 @@ from evas.compiler.lexer import tokenize, TokenType, LexerError
 from evas.compiler.parser import parse, ParseError
 from evas.compiler.ast_nodes import (
     Assignment, AnalogBlock, BinaryExpr, Block, BranchAccess,
-    Contribution, CombinedEvent, Direction, EventExpr, EventStatement,
-    EventType, ForStatement, FunctionCall, Identifier, IfStatement,
-    MethodCall, Module, NumberLiteral, ParamType, ParameterDecl,
-    StringLiteral, SystemTask, TernaryExpr, UnaryExpr, VariableDecl,
-    ArrayAccess,
+    CaseStatement, Contribution, CombinedEvent, Direction, EventExpr,
+    EventStatement, EventType, ForStatement, FunctionCall, Identifier,
+    IfStatement, MethodCall, Module, NumberLiteral, ParamType,
+    ParameterDecl, StringLiteral, SystemTask, TernaryExpr, UnaryExpr,
+    VariableDecl, ArrayAccess,
 )
 
 
@@ -625,6 +625,54 @@ class TestParserEventStatements:
         stmts = _stmts("@(cross(V(a))) begin x = 1; y = 2; end")
         stmt = stmts[0]
         assert isinstance(stmt.body, Block)
+
+    def test_timer_event(self):
+        stmts = _stmts("@(timer(10e-9)) x = 1;")
+        stmt = stmts[0]
+        assert isinstance(stmt.event, EventExpr)
+        assert stmt.event.event_type == EventType.TIMER
+        assert len(stmt.event.args) == 1
+
+    def test_final_step_event(self):
+        stmts = _stmts("@(final_step) x = 1;")
+        stmt = stmts[0]
+        assert isinstance(stmt.event, EventExpr)
+        assert stmt.event.event_type == EventType.FINAL_STEP
+
+    def test_combined_timer_or_initial_step(self):
+        stmts = _stmts("@(initial_step or timer(10e-9)) x = 1;")
+        stmt = stmts[0]
+        assert isinstance(stmt.event, CombinedEvent)
+        types = [e.event_type for e in stmt.event.events]
+        assert EventType.INITIAL_STEP in types
+        assert EventType.TIMER in types
+
+
+class TestParserCaseStatement:
+
+    def test_case_parses(self):
+        stmts = _stmts("case (x) 0: y = 0; 1: y = 1; endcase")
+        stmt = stmts[0]
+        assert isinstance(stmt, CaseStatement)
+        assert len(stmt.items) == 2
+
+    def test_case_with_default(self):
+        stmts = _stmts("case (x) 0: y = 0; default: y = -1; endcase")
+        stmt = stmts[0]
+        assert isinstance(stmt, CaseStatement)
+        assert len(stmt.items) == 2
+        # default has empty values
+        assert stmt.items[1].values == []
+
+    def test_case_multi_value(self):
+        stmts = _stmts("case (x) 0, 1: y = 0; 2: y = 1; endcase")
+        stmt = stmts[0]
+        assert len(stmt.items[0].values) == 2
+
+    def test_case_with_block_body(self):
+        stmts = _stmts("case (x) 0: begin y = 0; z = 1; end endcase")
+        stmt = stmts[0]
+        assert isinstance(stmt.items[0].body, Block)
 
 
 class TestParserExpressions:

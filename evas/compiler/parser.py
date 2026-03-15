@@ -434,6 +434,10 @@ class Parser:
         if tok.type == TokenType.FOR:
             return self._parse_for_statement()
 
+        # Case statement
+        if tok.type == TokenType.CASE:
+            return self._parse_case_statement()
+
         # System task: $strobe, $display
         if tok.type == TokenType.IDENT and tok.value.startswith('$'):
             return self._parse_system_task()
@@ -463,7 +467,7 @@ class Parser:
         return EventStatement(event=event, body=body)
 
     def _parse_single_event(self) -> EventExpr:
-        """Parse: cross(expr, dir) | above(expr, dir) | initial_step"""
+        """Parse: cross(expr, dir) | above(expr, dir) | initial_step | timer(period) | final_step"""
         tok = self.peek()
 
         if tok.type == TokenType.IDENT:
@@ -495,6 +499,17 @@ class Parser:
                 self.advance()
                 return EventExpr(EventType.INITIAL_STEP)
 
+            elif tok.value == 'timer':
+                self.advance()
+                self.expect(TokenType.LPAREN)
+                period_expr = self._parse_expression()
+                self.expect(TokenType.RPAREN)
+                return EventExpr(EventType.TIMER, [period_expr])
+
+            elif tok.value == 'final_step':
+                self.advance()
+                return EventExpr(EventType.FINAL_STEP)
+
         raise ParseError(f"Expected event expression, got {tok.value!r}", tok)
 
     def _parse_if_statement(self) -> IfStatement:
@@ -519,6 +534,32 @@ class Parser:
         self.expect(TokenType.RPAREN)
         body = self._parse_block_or_statement()
         return ForStatement(init=init, cond=cond, update=update, body=body)
+
+    def _parse_case_statement(self) -> CaseStatement:
+        """Parse: case (expr) value: stmt ... default: stmt endcase"""
+        self.expect(TokenType.CASE)
+        self.expect(TokenType.LPAREN)
+        sel_expr = self._parse_expression()
+        self.expect(TokenType.RPAREN)
+
+        items = []
+        while not self.at(TokenType.ENDCASE, TokenType.EOF):
+            # Check for 'default'
+            if self.at(TokenType.IDENT) and self.peek().value == 'default':
+                self.advance()
+                self.expect(TokenType.COLON)
+                body = self._parse_block_or_statement()
+                items.append(CaseItem(values=[], body=body))
+            else:
+                # Parse comma-separated value expressions before ':'
+                values = [self._parse_expression()]
+                while self.match(TokenType.COMMA):
+                    values.append(self._parse_expression())
+                self.expect(TokenType.COLON)
+                body = self._parse_block_or_statement()
+                items.append(CaseItem(values=values, body=body))
+        self.expect(TokenType.ENDCASE)
+        return CaseStatement(expr=sel_expr, items=items)
 
     def _parse_simple_assignment(self) -> Assignment:
         """Parse: target = expr"""
