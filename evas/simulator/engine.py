@@ -95,6 +95,8 @@ class CrossDetector:
     """Detect zero-crossings in a signal expression."""
     prev_val: float = 0.0
     prev_time: float = 0.0
+    pprev_val: float = 0.0   # second-to-last value for slope extrapolation
+    pprev_time: float = 0.0
     initialized: bool = False
     direction: int = 0  # +1=rising, -1=falling, 0=both
     last_triggered: bool = False  # set by check(), read by simulator
@@ -103,8 +105,8 @@ class CrossDetector:
     def check(self, time: float, val: float) -> bool:
         """Check if a zero crossing occurred. Returns True if triggered."""
         if not self.initialized:
-            self.prev_val = val
-            self.prev_time = time
+            self.pprev_val = self.prev_val = val
+            self.pprev_time = self.prev_time = time
             self.initialized = True
             self.last_triggered = False
             return False
@@ -122,10 +124,24 @@ class CrossDetector:
             frac = max(0.0, min(1.0, -self.prev_val / dv)) if abs(dv) > 1e-30 else 0.0
             self.t_cross = self.prev_time + frac * (time - self.prev_time)
 
+        self.pprev_val = self.prev_val
+        self.pprev_time = self.prev_time
         self.prev_time = time
         self.prev_val = val
         self.last_triggered = triggered
         return triggered
+
+    def next_breakpoint(self) -> Optional[float]:
+        """Predict the next zero-crossing time by linear extrapolation."""
+        dt = self.prev_time - self.pprev_time
+        if dt <= 1e-30:
+            return None
+        rate = (self.prev_val - self.pprev_val) / dt
+        if self.direction >= 0 and self.prev_val < 0 and rate > 0:
+            return self.prev_time + (-self.prev_val / rate)
+        if self.direction <= 0 and self.prev_val > 0 and rate < 0:
+            return self.prev_time + (-self.prev_val / rate)
+        return None
 
     def would_cross(self, val: float) -> bool:
         """Check if a crossing would occur without updating state."""
@@ -144,6 +160,8 @@ class AboveDetector:
     """Detect above() condition: triggers when signal crosses above threshold."""
     prev_val: float = 0.0
     prev_time: float = 0.0
+    pprev_val: float = 0.0
+    pprev_time: float = 0.0
     initialized: bool = False
     direction: int = 1  # +1=above only
     last_triggered: bool = False
@@ -151,8 +169,8 @@ class AboveDetector:
 
     def check(self, time: float, val: float) -> bool:
         if not self.initialized:
-            self.prev_val = val
-            self.prev_time = time
+            self.pprev_val = self.prev_val = val
+            self.pprev_time = self.prev_time = time
             self.initialized = True
             self.last_triggered = False
             return False
@@ -166,10 +184,22 @@ class AboveDetector:
             frac = max(0.0, min(1.0, -self.prev_val / dv)) if abs(dv) > 1e-30 else 0.0
             self.t_cross = self.prev_time + frac * (time - self.prev_time)
 
+        self.pprev_val = self.prev_val
+        self.pprev_time = self.prev_time
         self.prev_time = time
         self.prev_val = val
         self.last_triggered = triggered
         return triggered
+
+    def next_breakpoint(self) -> Optional[float]:
+        """Predict next crossing time by linear extrapolation."""
+        dt = self.prev_time - self.pprev_time
+        if dt <= 1e-30:
+            return None
+        rate = (self.prev_val - self.pprev_val) / dt
+        if self.prev_val < 0 and rate > 0:
+            return self.prev_time + (-self.prev_val / rate)
+        return None
 
 
 @dataclass

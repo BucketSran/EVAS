@@ -51,6 +51,14 @@ class CompiledModel:
             bp = ts.next_breakpoint(time)
             if bp is not None:
                 bps.append(bp)
+        for cd in self.cross_detectors.values():
+            bp = cd.next_breakpoint()
+            if bp is not None and bp > time:
+                bps.append(bp)
+        for ad in self.above_detectors.values():
+            bp = ad.next_breakpoint()
+            if bp is not None and bp > time:
+                bps.append(bp)
         return min(bps) if bps else None
 
     def _get_voltage(self, node: str, node_voltages: Dict[str, float]) -> float:
