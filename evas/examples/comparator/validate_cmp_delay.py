@@ -1,6 +1,7 @@
-"""Validate cmp_delay: log-linear regeneration delay td = tau*ln(VDD/|Vdiff|).
+"""Validate cmp_delay: log-linear regeneration delay td = td_0 + tau*ln(VDD/|Vdiff|).
 
-Testbench: 4 phases (10mV, 1mV, 0.1mV, 0.01mV). VDD=0.9V, tau=300ps.
+Testbench: 4 phases of 4ns each (16ns total), 1GHz CLK. VDD=0.9V.
+Phase diffs: 10mV, 1mV, 0.1mV, 0.01mV.
 Expected: out_p goes HIGH in each phase; delay increases with decreasing |Vdiff|.
 """
 from pathlib import Path
@@ -10,9 +11,7 @@ import numpy as np
 OUT = Path(__file__).parent.parent.parent / 'output' / 'comparator' / 'cmp_delay'
 
 _VTH = 0.45
-_TAU = 300e-12
-_VDD = 0.9
-_PHASES_NS = [(0, 20, 10e-3), (20, 40, 1e-3), (40, 60, 0.1e-3), (60, 80, 0.01e-3)]
+_PHASES_NS = [(0, 4, 10e-3), (4, 8, 1e-3), (8, 12, 0.1e-3), (12, 16, 0.01e-3)]
 
 
 def validate_csv(out_dir: Path = OUT) -> int:
@@ -30,10 +29,10 @@ def validate_csv(out_dir: Path = OUT) -> int:
 
     # Measured delay must increase across phases (log-linear trend)
     delays = []
-    clk_rise_ns = 1.0
+    clk_rise_ns = 0.1   # CLK delay=100ps
     for i, (t0, _, diff_v) in enumerate(_PHASES_NS):
         tr = t0 + clk_rise_ns
-        mask = (t_ns >= tr) & (t_ns < tr + 9.0)
+        mask = (t_ns >= tr) & (t_ns < tr + 3.0)
         idx = np.where((out_p[mask] > _VTH))[0]
         if len(idx) > 0:
             delays.append(t_ns[mask][idx[0]] - tr)

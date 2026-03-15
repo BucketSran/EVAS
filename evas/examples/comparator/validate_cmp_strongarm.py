@@ -1,11 +1,11 @@
 """Validate cmp_strongarm: clocked StrongARM comparator.
 
-Testbench: VCM=0.45V (VDD/2), diff=1mV (VINP=450.5mV, VINN=449.5mV), polarity swaps at 5ns.
+Testbench: VCM=0.45V (VDD/2), diff=1mV (VINP=450.5mV, VINN=449.5mV), polarity swaps at 2ns.
 Clock: 1GHz, VDD=0.9V.
 
 Expected:
-  - Before swap (t < 4ns):  vinp > vinn (+1mV) → out_p HIGH, out_n LOW
-  - After  swap (t > 6ns):  vinp < vinn (-1mV) → out_p LOW,  out_n HIGH
+  - Before swap (t < 2ns):  vinp > vinn (+1mV) -> out_p HIGH, out_n LOW
+  - After  swap (t > 2ns):  vinp < vinn (-1mV) -> out_p LOW,  out_n HIGH
 """
 from pathlib import Path
 
@@ -32,18 +32,18 @@ def validate_csv(out_dir: Path = OUT) -> int:
         print("FAIL: out_n never toggles")
         failures += 1
 
-    # Before vinn step (t < 4ns): vinp(0.5) > vinn(0.3) → out_p should be HIGH
-    pre_mask  = t_ns < 4.0
-    pre_p_hi  = (out_p[pre_mask] > _VTH).mean()
-    if pre_p_hi < 0.4:
-        print(f"FAIL: before vinn step, out_p is HIGH only {pre_p_hi*100:.0f}% of time (expected >40%)")
+    # Before swap (0.6ns < t < 2ns): vinp > vinn -> out_p HIGH
+    pre = out_p[(t_ns > 0.6) & (t_ns < 2.0)]
+    if len(pre) == 0 or (pre > _VTH).mean() < 0.4:
+        pct = 0 if len(pre) == 0 else (pre > _VTH).mean() * 100
+        print(f"FAIL: before swap, out_p HIGH only {pct:.0f}% (expected >40%)")
         failures += 1
 
-    # After vinn step (t > 6ns): vinp(0.5) < vinn(0.7) → out_p should be LOW
-    post_mask = t_ns > 6.0
-    post_p_lo = (out_p[post_mask] < _VTH).mean()
-    if post_p_lo < 0.4:
-        print(f"FAIL: after vinn step, out_p is LOW only {post_p_lo*100:.0f}% of time (expected >40%)")
+    # After swap (2.5ns < t < 4ns): vinp < vinn -> out_p LOW
+    post = out_p[(t_ns > 2.5) & (t_ns < 4.0)]
+    if len(post) == 0 or (post < _VTH).mean() < 0.4:
+        pct = 0 if len(post) == 0 else (post < _VTH).mean() * 100
+        print(f"FAIL: after swap, out_p LOW only {pct:.0f}% (expected >40%)")
         failures += 1
 
     if failures == 0:
