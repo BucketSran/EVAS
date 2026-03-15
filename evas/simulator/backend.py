@@ -37,6 +37,7 @@ class CompiledModel:
         self.default_transition: float = 1e-12
         self._initial_step_done: bool = False
         self._strobe_log: List[str] = []
+        self._event_time: float = 0.0  # $abstime inside cross/above event bodies
 
     def initial_step(self, node_voltages: Dict[str, float], time: float):
         pass
@@ -83,15 +84,21 @@ class CompiledModel:
         ts.set_target(time, target, delay, rise, fall, self.default_transition)
         return ts.evaluate(time)
 
-    def _check_cross(self, key: str, val: float, direction: int = 0) -> bool:
+    def _check_cross(self, key: str, time: float, val: float, direction: int = 0) -> bool:
         if key not in self.cross_detectors:
             self.cross_detectors[key] = CrossDetector(direction=direction)
-        return self.cross_detectors[key].check(val)
+        fired = self.cross_detectors[key].check(time, val)
+        if fired:
+            self._event_time = self.cross_detectors[key].t_cross
+        return fired
 
-    def _check_above(self, key: str, val: float, direction: int = 1) -> bool:
+    def _check_above(self, key: str, time: float, val: float, direction: int = 1) -> bool:
         if key not in self.above_detectors:
             self.above_detectors[key] = AboveDetector(direction=direction)
-        return self.above_detectors[key].check(val)
+        fired = self.above_detectors[key].check(time, val)
+        if fired:
+            self._event_time = self.above_detectors[key].t_cross
+        return fired
 
     def _array_get(self, name: str, idx: int) -> Any:
         if name in self.arrays and idx in self.arrays[name]:
@@ -211,6 +218,7 @@ class _ModuleCompiler:
 
         lines.append("")
         lines.append("    def evaluate(self, nv, time):")
+        lines.append("        self._event_time = time")
 
         if mod.analog_block:
             for stmt in mod.analog_block.body.statements:
@@ -317,22 +325,24 @@ class _ModuleCompiler:
                 self._cross_counter += 1
                 expr = self._compile_expr(event.args[0])
                 direction = event.direction if event.direction is not None else 0
-                lines.append(f"{prefix}if self._check_cross({key!r}, {expr}, {direction}):")
+                lines.append(f"{prefix}if self._check_cross({key!r}, time, {expr}, {direction}):")
                 body_lines = self._compile_statement(stmt.body, indent + 1)
                 lines.extend(body_lines)
                 if not body_lines:
                     lines.append(f"{prefix}    pass")
+                lines.append(f"{prefix}    self._event_time = time")
 
             elif event.event_type == EventType.ABOVE:
                 key = f"above_{self._above_counter}"
                 self._above_counter += 1
                 expr = self._compile_expr(event.args[0])
                 direction = event.direction if event.direction is not None else 1
-                lines.append(f"{prefix}if self._check_above({key!r}, {expr}, {direction}):")
+                lines.append(f"{prefix}if self._check_above({key!r}, time, {expr}, {direction}):")
                 body_lines = self._compile_statement(stmt.body, indent + 1)
                 lines.extend(body_lines)
                 if not body_lines:
                     lines.append(f"{prefix}    pass")
+                lines.append(f"{prefix}    self._event_time = time")
 
         elif isinstance(event, CombinedEvent):
             # Combined events: @(initial_step or cross(...))
@@ -346,13 +356,13 @@ class _ModuleCompiler:
                     self._cross_counter += 1
                     expr = self._compile_expr(e.args[0])
                     direction = e.direction if e.direction is not None else 0
-                    conditions.append(f"self._check_cross({key!r}, {expr}, {direction})")
+                    conditions.append(f"self._check_cross({key!r}, time, {expr}, {direction})")
                 elif e.event_type == EventType.ABOVE:
                     key = f"above_{self._above_counter}"
                     self._above_counter += 1
                     expr = self._compile_expr(e.args[0])
                     direction = e.direction if e.direction is not None else 1
-                    conditions.append(f"self._check_above({key!r}, {expr}, {direction})")
+                    conditions.append(f"self._check_above({key!r}, time, {expr}, {direction})")
 
             if conditions:
                 cond = ' or '.join(conditions)
@@ -361,6 +371,7 @@ class _ModuleCompiler:
                 lines.extend(body_lines)
                 if not body_lines:
                     lines.append(f"{prefix}    pass")
+                lines.append(f"{prefix}    self._event_time = time")
 
         return lines
 
@@ -450,7 +461,7 @@ class _ModuleCompiler:
             if name == 'inf':
                 return "float('inf')"
             if name == '$abstime':
-                return "time"
+                return "self._event_time"
             return f"self.state[{name!r}]"
 
         if isinstance(expr, ArrayAccess):
@@ -541,7 +552,7 @@ class _ModuleCompiler:
             self._cross_counter += 1
             val = args[0]
             direction = args[1] if len(args) > 1 else "0"
-            return f"self._check_cross({key!r}, {val}, {direction})"
+            return f"self._check_cross({base_key!r}, time, {val}, {direction})"
 
         if name == 'ln':
             return f"math.log({args[0]})"

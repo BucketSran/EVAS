@@ -133,52 +133,52 @@ class TestCrossDetector:
 
     def test_first_call_returns_false(self):
         cd = CrossDetector(direction=0)
-        assert cd.check(-0.5) is False
+        assert cd.check(0.0, -0.5) is False
         assert cd.initialized
 
     def test_rising_edge_both_direction(self):
         cd = CrossDetector(direction=0)
-        cd.check(-0.5)
-        assert cd.check(0.5) is True
+        cd.check(0.0, -0.5)
+        assert cd.check(0.0, 0.5) is True
 
     def test_falling_edge_both_direction(self):
         cd = CrossDetector(direction=0)
-        cd.check(0.5)
-        assert cd.check(-0.5) is True
+        cd.check(0.0, 0.5)
+        assert cd.check(0.0, -0.5) is True
 
     def test_no_crossing_same_sign(self):
         cd = CrossDetector(direction=0)
-        cd.check(-0.3)
-        assert cd.check(-0.1) is False   # still negative, no crossing
+        cd.check(0.0, -0.3)
+        assert cd.check(0.0, -0.1) is False   # still negative, no crossing
 
     def test_rising_only_ignores_falling(self):
         cd = CrossDetector(direction=1)
-        cd.check(0.5)                  # init positive
-        assert cd.check(-0.5) is False  # falling → should NOT fire
-        assert cd.check(0.5) is True   # rising → should fire
+        cd.check(0.0, 0.5)                  # init positive
+        assert cd.check(0.0, -0.5) is False  # falling → should NOT fire
+        assert cd.check(0.0, 0.5) is True   # rising → should fire
 
     def test_falling_only_ignores_rising(self):
         cd = CrossDetector(direction=-1)
-        cd.check(-0.5)                 # init negative
-        assert cd.check(0.5) is False  # rising → should NOT fire
-        assert cd.check(-0.5) is True  # falling → should fire
+        cd.check(0.0, -0.5)                 # init negative
+        assert cd.check(0.0, 0.5) is False  # rising → should NOT fire
+        assert cd.check(0.0, -0.5) is True  # falling → should fire
 
     def test_exact_zero_crossing_rising(self):
         cd = CrossDetector(direction=0)
-        cd.check(-1e-10)
-        assert cd.check(0.0) is True   # val == 0 counts as "above zero"
+        cd.check(0.0, -1e-10)
+        assert cd.check(0.0, 0.0) is True   # val == 0 counts as "above zero"
 
     def test_last_triggered_reflects_result(self):
         cd = CrossDetector(direction=0)
-        cd.check(-1.0)
-        cd.check(1.0)
+        cd.check(0.0, -1.0)
+        cd.check(0.0, 1.0)
         assert cd.last_triggered is True
-        cd.check(0.5)                  # no crossing
+        cd.check(0.0, 0.5)                  # no crossing
         assert cd.last_triggered is False
 
     def test_would_cross_does_not_update_state(self):
         cd = CrossDetector(direction=0)
-        cd.check(-0.5)
+        cd.check(0.0, -0.5)
         prev_val = cd.prev_val
         result = cd.would_cross(0.5)
         assert result is True
@@ -197,29 +197,29 @@ class TestAboveDetector:
 
     def test_first_call_returns_false(self):
         ad = AboveDetector()
-        assert ad.check(-0.5) is False
+        assert ad.check(0.0, -0.5) is False
 
     def test_negative_to_positive_triggers(self):
         ad = AboveDetector()
-        ad.check(-0.5)
-        assert ad.check(0.5) is True
+        ad.check(0.0, -0.5)
+        assert ad.check(0.0, 0.5) is True
 
     def test_positive_to_negative_does_not_trigger(self):
         ad = AboveDetector()
-        ad.check(0.5)
-        assert ad.check(-0.5) is False
+        ad.check(0.0, 0.5)
+        assert ad.check(0.0, -0.5) is False
 
     def test_stays_positive_does_not_trigger(self):
         ad = AboveDetector()
-        ad.check(0.3)
-        assert ad.check(0.7) is False
+        ad.check(0.0, 0.3)
+        assert ad.check(0.0, 0.7) is False
 
     def test_last_triggered_updates(self):
         ad = AboveDetector()
-        ad.check(-1.0)
-        ad.check(1.0)
+        ad.check(0.0, -1.0)
+        ad.check(0.0, 1.0)
         assert ad.last_triggered is True
-        ad.check(0.5)
+        ad.check(0.0, 0.5)
         assert ad.last_triggered is False
 
 
@@ -467,18 +467,18 @@ class TestCompiledModelHelpers:
         assert 0.0 < val_mid < 1.0
 
     def test_check_cross_first_call_false(self):
-        assert self.model._check_cross("c0", -0.5) is False
+        assert self.model._check_cross("c0", 0.0, -0.5) is False
 
     def test_check_cross_rising_triggers(self):
-        self.model._check_cross("c1", -0.5)
-        assert self.model._check_cross("c1", 0.5) is True
+        self.model._check_cross("c1", 0.0, -0.5)
+        assert self.model._check_cross("c1", 0.0, 0.5) is True
 
     def test_check_above_first_call_false(self):
-        assert self.model._check_above("a0", -0.5) is False
+        assert self.model._check_above("a0", 0.0, -0.5) is False
 
     def test_check_above_negative_to_positive_triggers(self):
-        self.model._check_above("a1", -0.5)
-        assert self.model._check_above("a1", 0.5) is True
+        self.model._check_above("a1", 0.0, -0.5)
+        assert self.model._check_above("a1", 0.0, 0.5) is True
 
     def test_array_get_unset_returns_zero(self):
         assert self.model._array_get("arr", 0) == 0
@@ -490,7 +490,7 @@ class TestCompiledModelHelpers:
     def test_strobe_appends_message(self):
         self.model._strobe(1e-9, "val=%d", 7)
         assert len(self.model._strobe_log) == 1
-        assert "7" in self.model._strobe_log[0]
+        assert "7" in self.model._strobe_log[0][1]
 
     def test_next_breakpoint_no_active_transitions(self):
         assert self.model.next_breakpoint(0.0) is None

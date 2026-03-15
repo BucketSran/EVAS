@@ -94,14 +94,17 @@ class TransitionState:
 class CrossDetector:
     """Detect zero-crossings in a signal expression."""
     prev_val: float = 0.0
+    prev_time: float = 0.0
     initialized: bool = False
     direction: int = 0  # +1=rising, -1=falling, 0=both
     last_triggered: bool = False  # set by check(), read by simulator
+    t_cross: float = 0.0  # interpolated exact crossing time
 
-    def check(self, val: float) -> bool:
+    def check(self, time: float, val: float) -> bool:
         """Check if a zero crossing occurred. Returns True if triggered."""
         if not self.initialized:
             self.prev_val = val
+            self.prev_time = time
             self.initialized = True
             self.last_triggered = False
             return False
@@ -114,6 +117,12 @@ class CrossDetector:
             if self.direction == 0 or self.direction == -1:
                 triggered = True  # Falling
 
+        if triggered:
+            dv = val - self.prev_val
+            frac = max(0.0, min(1.0, -self.prev_val / dv)) if abs(dv) > 1e-30 else 0.0
+            self.t_cross = self.prev_time + frac * (time - self.prev_time)
+
+        self.prev_time = time
         self.prev_val = val
         self.last_triggered = triggered
         return triggered
@@ -122,9 +131,9 @@ class CrossDetector:
         """Check if a crossing would occur without updating state."""
         if not self.initialized:
             return False
-        if self.direction >= 0 and self.prev_val < 0 and val >= 0:
+        if self.direction >= 0 and self.prev_val < 0 and val >= -1e-12:
             return True
-        if self.direction <= 0 and self.prev_val > 0 and val <= 0:
+        if self.direction <= 0 and self.prev_val > 0 and val <= 1e-12:
             if self.direction == 0 or self.direction == -1:
                 return True
         return False
@@ -134,13 +143,16 @@ class CrossDetector:
 class AboveDetector:
     """Detect above() condition: triggers when signal crosses above threshold."""
     prev_val: float = 0.0
+    prev_time: float = 0.0
     initialized: bool = False
     direction: int = 1  # +1=above only
     last_triggered: bool = False
+    t_cross: float = 0.0
 
-    def check(self, val: float) -> bool:
+    def check(self, time: float, val: float) -> bool:
         if not self.initialized:
             self.prev_val = val
+            self.prev_time = time
             self.initialized = True
             self.last_triggered = False
             return False
@@ -149,6 +161,12 @@ class AboveDetector:
         if self.direction >= 0 and self.prev_val < 0 and val >= -1e-12:
             triggered = True
 
+        if triggered:
+            dv = val - self.prev_val
+            frac = max(0.0, min(1.0, -self.prev_val / dv)) if abs(dv) > 1e-30 else 0.0
+            self.t_cross = self.prev_time + frac * (time - self.prev_time)
+
+        self.prev_time = time
         self.prev_val = val
         self.last_triggered = triggered
         return triggered
