@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "evas-sim"
-version = "0.1.2"
+version = "0.2.0"
 description = "Event-driven Verilog-A Simulator — pure-Python behavioral simulation"
 readme = "README.md"
 license = { text = "MIT" }
