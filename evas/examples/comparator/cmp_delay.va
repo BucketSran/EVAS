@@ -25,7 +25,7 @@ parameter real td_max  = 200e-12;    // maximum delay ceiling [s]
 
 real vdd;
 integer xoutp, xoutn;
-real tedge = 20p;
+real tedge = 30p;
 real td;
 real vdiff_eff;
 

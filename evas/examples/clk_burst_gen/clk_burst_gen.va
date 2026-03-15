@@ -24,7 +24,7 @@ integer clk_hi;     // tracks current CLK level for continuous output
 analog begin
     @(initial_step) begin
         counter_q = 0;
-        gate_q    = 1;
+        gate_q    = 0;
         clk_hi    = 0;
         $strobe("[clk_burst_gen] INIT | div=%d | vdd=%.3gV | vth=%.3gV", div, vdd, vth);
     end
@@ -33,7 +33,7 @@ analog begin
         clk_hi = 1;
         if (V(RST_N) < vth) begin
             counter_q = 0;
-            gate_q    = 1;
+            gate_q    = 0;
         end else begin
             // Gate decision uses counter BEFORE incrementing:
             //   counter=0 → gate=1 (pulse 1 high phase)
