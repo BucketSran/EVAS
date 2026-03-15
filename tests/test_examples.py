@@ -163,6 +163,11 @@ def test_dwa_ptr_gen(tmp_path):
     _run_validate(tmp_path, "dwa_ptr_gen/tb_dwa_ptr_gen.scs", "validate_csv", "dwa_ptr_gen")
 
 
+def test_dwa_ptr_gen_msb(tmp_path):
+    _run_validate(tmp_path, "dwa_ptr_gen/tb_dwa_ptr_gen_msb.scs", "validate_csv", "dwa_ptr_gen",
+                  "validate_dwa_ptr_gen_msb.py")
+
+
 def test_lfsr(tmp_path):
     _run_validate(tmp_path, "lfsr/tb_lfsr.scs", "validate_csv", "lfsr")
 

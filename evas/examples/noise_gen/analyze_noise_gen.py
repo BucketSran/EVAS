@@ -35,7 +35,8 @@ def analyze(out_dir: Path = _DEFAULT_OUT) -> None:
     axes[0].grid(True, alpha=0.3)
     v_mean = float(data['vin_i'].mean())
     axes[0].set_ylim(v_mean - 0.5, v_mean + 0.5)
-    axes[0].set_xlim(t[0], t[-1])
+    _margin = 0.05 * (t[-1] - t[0])
+    axes[0].set_xlim(t[0] - _margin, t[-1] + _margin)
 
     axes[1].plot(t, noise, linewidth=1.0, color='purple', alpha=0.8)
     axes[1].axhline(0,    color='black', linewidth=1.0, linestyle='--')
@@ -45,7 +46,9 @@ def analyze(out_dir: Path = _DEFAULT_OUT) -> None:
     axes[1].set_xlabel('Time (ns)')
     axes[1].legend(fontsize=8)
     axes[1].grid(True, alpha=0.3)
-    axes[1].set_xlim(t[0], t[-1])
+    _noise_abs = max(float(np.abs(noise).max()) * 1.05, 0.15)
+    axes[1].set_ylim(-_noise_abs, _noise_abs)
+    axes[1].set_xlim(t[0] - _margin, t[-1] + _margin)
 
     fig.tight_layout()
     fig.savefig(str(out_dir / 'analyze_noise_gen.png'), dpi=150, bbox_inches='tight')

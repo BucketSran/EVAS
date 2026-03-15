@@ -34,13 +34,15 @@ analog begin
 	end
 
 	@ (cross(V(CLK)-vtrans_clk,+1)) begin
-		for (i=0;i<=`N_lfsr;i=i+1) begin tmp_lfsr_r[i+1]=lfsr_r[i];end
+		if (V(RSTB) > vtrans_clk) begin
+			for (i=0;i<=`N_lfsr;i=i+1) begin tmp_lfsr_r[i+1]=lfsr_r[i];end
 
-		tmp_lfsr_r[0] = lfsr_r[31]^lfsr_r[21]^lfsr_r[1]^lfsr_r[0]; //`N_lfsr=31
+			tmp_lfsr_r[0] = lfsr_r[31]^lfsr_r[21]^lfsr_r[1]^lfsr_r[0]; //`N_lfsr=31
 
-		for (i=0;i<=`N_lfsr;i=i+1) begin lfsr_r[i] = tmp_lfsr_r[i];end
-		$strobe("[lfsr] t=%.3f ns | DPN=%d", $abstime*1e9, lfsr_r[`N_lfsr]);
-	end	
+			for (i=0;i<=`N_lfsr;i=i+1) begin lfsr_r[i] = tmp_lfsr_r[i];end
+			$strobe("[lfsr] t=%.3f ns | DPN=%d", $abstime*1e9, lfsr_r[`N_lfsr]);
+		end
+	end
 
 	V(DPN) <+ transition(lfsr_r[`N_lfsr]>0? V(VDD):V(VSS), 50p);
 

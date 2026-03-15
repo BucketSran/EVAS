@@ -31,7 +31,7 @@ module dff_rst(clk, d, rst, q, qbar);
                     $abstime*1e9, (V(rst)>vth)?1:0, (V(d)>vth)?1:0, q_bit);
         end
 
-        V(q)    <+ transition( q_bit         * vhigh, 0);
-        V(qbar) <+ transition((1 - q_bit)    * vhigh, 0);
+        V(q)    <+ transition( q_bit         * vhigh, 30p);
+        V(qbar) <+ transition((1 - q_bit)    * vhigh, 30p);
     end
 endmodule

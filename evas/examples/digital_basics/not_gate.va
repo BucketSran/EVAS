@@ -18,6 +18,6 @@ module not_gate(a, out);
             $strobe("[not_gate] INIT | vth=%.3gV | vhigh=%.3gV", vth, vhigh);
         V(out) <+ transition(
             (V(a) > vth) ? vlow : vhigh,
-            0);
+            30p);
     end
 endmodule

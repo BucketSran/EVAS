@@ -13,7 +13,7 @@ global 0
 ahdl_include "inverter.va"
 
 VIN (in 0) vsource type=pulse val0=0 val1=0.8 \
-           period=4n width=2n delay=1n rise=10p fall=10p
+           period=4n width=2n delay=1n rise=30p fall=30p
 
 IINV1 (in  n1)  inverter td=100p tr=50p
 IINV2 (n1  n2)  inverter td=100p tr=50p

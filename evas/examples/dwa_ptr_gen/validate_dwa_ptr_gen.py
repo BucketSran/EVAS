@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-OUT = Path(__file__).parent.parent.parent / 'output' / 'dwa_ptr_gen'
+OUT = Path(__file__).parent.parent.parent / 'output' / 'dwa_ptr_gen' / 'dwa_ptr_gen'
 
 
 def validate_csv(out_dir: Path = OUT) -> int:

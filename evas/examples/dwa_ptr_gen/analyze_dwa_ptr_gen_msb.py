@@ -1,4 +1,4 @@
-"""Analyze dwa_ptr_gen: DWA pointer rotation generator."""
+"""Analyze dwa_ptr_gen_msb: DWA rotation, MSB-only (no overlap)."""
 import time
 from pathlib import Path
 
@@ -17,11 +17,11 @@ _DEFAULT_BASE = HERE.parent.parent.parent / 'output' / 'dwa_ptr_gen'
 
 
 def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
-    out_dir = base_dir / 'dwa_ptr_gen'
+    out_dir = base_dir / 'dwa_ptr_gen_msb'
     out_dir.mkdir(parents=True, exist_ok=True)
 
     t0 = time.perf_counter()
-    evas_simulate(str(HERE / 'tb_dwa_ptr_gen.scs'), output_dir=str(out_dir))
+    evas_simulate(str(HERE / 'tb_dwa_ptr_gen_msb.scs'), output_dir=str(out_dir))
     wall_s = time.perf_counter() - t0
 
     data = np.genfromtxt(out_dir / 'tran.csv', delimiter=',', names=True,
@@ -30,18 +30,15 @@ def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
     cols = set(data.dtype.names)
     vth  = 0.45
 
-    # ── Clock period from netlist (100 ns → 10 MHz) ─────────────────────
     CLK_PERIOD_NS = 100.0
-    CLK_MHZ       = 1e3 / CLK_PERIOD_NS   # 10 MHz
+    CLK_MHZ       = 1e3 / CLK_PERIOD_NS
 
-    # ── Find clock rising edges ──────────────────────────────────────────
     clk    = data['clk_i']
     rising = np.where((clk[:-1] < vth) & (clk[1:] >= vth))[0] + 1
     si     = np.clip(rising + 10, 0, len(data) - 1)
     N      = len(rising)
     rst_ok = data['rst_ni'][si] > vth
 
-    # ── Per-cell matrices  [16 × N_cycles] ──────────────────────────────
     cell_mat = np.zeros((16, N), dtype=int)
     ptr_mat  = np.zeros((16, N), dtype=int)
     for b in range(16):
@@ -63,8 +60,7 @@ def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
         else:
             prev_ptr = 0
 
-    # ── Plot ─────────────────────────────────────────────────────────────
-    BAR_W = 0.45   # half-width of each column bar
+    BAR_W = 0.45
 
     fig, ax = plt.subplots(figsize=(max(10, N * 1.1), 6))
 
@@ -79,7 +75,6 @@ def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
         sel  = sorted(np.where(cell_mat[:, ci] == 1)[0].tolist())
         gaps = np.diff(sel) if len(sel) > 1 else np.array([1])
 
-        # Split into contiguous segments (handles circular wrap-around)
         segs = []
         if len(sel) > 0 and gaps.max() > 1:
             cut = int(np.argmax(gaps))
@@ -91,15 +86,13 @@ def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
             ax.fill_betweenx(
                 [seg[0] - 0.42, seg[-1] + 0.42],
                 ci - BAR_W, ci + BAR_W,
-                color='#4c8edd', alpha=0.45, linewidth=0, zorder=1)
-            # Thin border
+                color='#2eab6e', alpha=0.45, linewidth=0, zorder=1)
             ax.fill_betweenx(
                 [seg[0] - 0.42, seg[-1] + 0.42],
                 ci - BAR_W, ci + BAR_W,
                 color='none', linewidth=0.8,
-                edgecolor='#2a6ab0', zorder=2)
+                edgecolor='#1a7a4a', zorder=2)
 
-        # Ptr diamond
         if ptr_pos[ci] >= 0:
             ax.scatter(ci, ptr_pos[ci], s=110, marker='D',
                        color='#e05020', zorder=5, linewidths=0)
@@ -107,14 +100,12 @@ def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
                     ha='center', va='bottom', fontsize=8,
                     color='#c03010', fontweight='bold')
 
-    # Dashed trajectory line through ptr positions
     vc = [ci for ci in range(N) if rst_ok[ci] and ptr_pos[ci] >= 0]
     if vc:
         ax.plot(vc, [ptr_pos[ci] for ci in vc],
                 color='#e05020', linewidth=1.0, linestyle='--',
                 alpha=0.5, zorder=3)
 
-    # ── Axes ─────────────────────────────────────────────────────────────
     ax.set_xlim(-0.6, N - 0.4)
     ax.set_ylim(-0.8, 17.2)
     ax.set_xticks(range(N))
@@ -129,21 +120,21 @@ def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
     ax.spines['right'].set_visible(False)
 
     ax.set_title(
-        f'dwa_ptr_gen  —  DWA pointer rotation, overlap (code+1 cells/cycle)  '
+        f'dwa_ptr_gen_msb  —  DWA pointer rotation, no overlap (code cells/cycle)  '
         f'|  wall clock: {wall_s:.4f} s',
         fontsize=11)
 
     ax.legend(handles=[
-        Patch(facecolor='#4c8edd', alpha=0.5, label='cell_en (selected range)'),
+        Patch(facecolor='#2eab6e', alpha=0.5, label='cell_en (selected range)'),
         Line2D([0], [0], marker='D', color='#e05020', linestyle='--',
                markersize=7, label='ptr  (+N = advance code)'),
     ], fontsize=9, loc='upper right', framealpha=0.9)
 
     fig.tight_layout()
-    fig.savefig(str(out_dir / 'analyze_dwa_ptr_gen.png'), dpi=150,
+    fig.savefig(str(out_dir / 'analyze_dwa_ptr_gen_msb.png'), dpi=150,
                 bbox_inches='tight')
     plt.close(fig)
-    print(f"Plot saved: {out_dir / 'analyze_dwa_ptr_gen.png'}")
+    print(f"Plot saved: {out_dir / 'analyze_dwa_ptr_gen_msb.png'}")
 
 
 if __name__ == "__main__":

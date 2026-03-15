@@ -1,7 +1,7 @@
 """Validate lfsr: Linear Feedback Shift Register output.
 
-Testbench: seed=123, clock 1GHz, reset deasserts at t=2ns, run for 50ns.
-Expected post-reset (t > 3ns):
+Testbench: seed=123, clock 1GHz, reset deasserts at t=101ns, run for 500ns.
+Expected post-reset (t > 102ns):
   - dpn toggles at least 10 times (non-trivial LFSR sequence).
   - dpn is not stuck HIGH or stuck LOW.
 """
@@ -21,7 +21,7 @@ def validate_csv(out_dir: Path = OUT) -> int:
     vdd = max(data[c].max() for c in ['rstb', 'clk', 'dpn'])
     vth  = vdd * 0.5
 
-    post = t_ns > 3.0
+    post = t_ns > 102.0
     dpn_post = dpn[post]
 
     if len(dpn_post) == 0:

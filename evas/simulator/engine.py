@@ -270,6 +270,12 @@ class Simulator:
         for model in self.models:
             model.initial_step(self.node_voltages, 0.0)
 
+        # Evaluate models at t=0 so output nodes are assigned before recording.
+        # Without this, output nodes default to 0, producing spurious values in
+        # post-processing (e.g. noise = vout_o - vin_i = 0 - 1 = -1 V).
+        for model in self.models:
+            model.evaluate(self.node_voltages, 0.0)
+
         # Record initial state
         self._record_point(0.0)
         self._step_sizes.append(0.0)
