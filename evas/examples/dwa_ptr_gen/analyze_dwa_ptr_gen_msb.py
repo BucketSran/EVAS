@@ -26,7 +26,7 @@ def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
 
     data = np.genfromtxt(out_dir / 'tran.csv', delimiter=',', names=True,
                          dtype=None, encoding='utf-8')
-    t    = data['time'] * 1e9
+    t    = data['time'] * 1e9  # noqa: F841
     cols = set(data.dtype.names)
     vth  = 0.45
 
