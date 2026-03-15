@@ -556,7 +556,6 @@ class _ModuleCompiler:
 
         if name == 'cross':
             # cross() as a function (in some contexts)
-            key = f"cross_{self._cross_counter}"
             self._cross_counter += 1
             val = args[0]
             direction = args[1] if len(args) > 1 else "0"
