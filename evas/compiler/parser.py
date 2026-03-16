@@ -59,6 +59,7 @@ class Parser:
         name = name_tok.value
 
         # Parse port list
+        self._ansi_warnings = []  # cleared by _parse_ansi_port_list if ANSI
         ports = []
         if self.match(TokenType.LPAREN):
             ports = self._parse_port_list_header()
@@ -70,8 +71,14 @@ class Parser:
         # If ANSI-style, ports may contain PortDecl objects
         ansi_decls = [p for p in ports if isinstance(p, PortDecl)]
         if ansi_decls:
-            module.ports = [p.name for p in ansi_decls]
+            # Preserve original port order: mix of PortDecl names and plain strings
+            module.ports = [
+                p.name if isinstance(p, PortDecl) else p for p in ports
+            ]
             module.port_decls = ansi_decls
+
+        # Attach any parse-time warnings (e.g. shared-discipline ANSI ports)
+        module.warnings.extend(getattr(self, '_ansi_warnings', []))
 
         # Parse module items until endmodule
         while not self.at(TokenType.ENDMODULE, TokenType.EOF):
@@ -106,8 +113,15 @@ class Parser:
         Returns a list where each element is either:
         - a string (port name) — for non-ANSI compatibility
         - a PortDecl — for ANSI-style declarations with direction/array info
+
+        Ports that are missing a direction keyword (e.g. the second name in
+        ``inout electrical VDD, VSS``) are returned as plain strings AND a
+        warning tuple ``('ansi_shared_discipline', name)`` is appended so the
+        caller can report it.  Cadence VACOMP rejects this syntax; Verilog-A
+        LRM behaviour is ambiguous.  EVAS tolerates it but warns.
         """
         ports = []
+        self._ansi_warnings: List[str] = []  # reset for this port list
         while not self.at(TokenType.RPAREN, TokenType.EOF):
             direction = None
             if self.match(TokenType.INPUT):
@@ -137,6 +151,14 @@ class Parser:
                     pd.array_lo = array_lo
                 ports.append(pd)
             else:
+                # Port has no direction — likely a shared-discipline comma list.
+                # EVAS still accepts it (tolerant), but flag it for callers.
+                self._ansi_warnings.append(
+                    f"Port '{name}' in ANSI port list has no direction/discipline. "
+                    f"Cadence VACOMP requires each port to be declared separately "
+                    f"(e.g. 'inout electrical {name}'). "
+                    f"This will cause a compile error in Spectre."
+                )
                 ports.append(name)
 
             if not self.match(TokenType.COMMA):

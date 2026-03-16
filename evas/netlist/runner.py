@@ -400,6 +400,9 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         cls, module = _compile_va(str(va_path))
         models_by_name[module.name] = (cls, module)
         log.write(f"Compiled Verilog-A module: {module.name}")
+        for w in module.warnings:
+            log.write(f"WARNING ({module.name}): {w}")
+            warnings += 1
 
     if errors > 0:
         log.write(f"\nevas completes with {errors} errors, {warnings} warnings.")

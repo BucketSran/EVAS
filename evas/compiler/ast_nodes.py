@@ -229,3 +229,4 @@ class Module:
     analog_block: Optional[AnalogBlock] = None
     default_transition: Optional[float] = None
     defines: dict = field(default_factory=dict)
+    warnings: List[str] = field(default_factory=list)

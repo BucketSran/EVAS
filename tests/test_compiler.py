@@ -950,3 +950,74 @@ class TestParser2DNodeArray:
         pd = next((p for p in m.port_decls if p.name == "dbus"), None)
         assert pd is not None
         assert pd.is_array
+
+
+class TestAnsiSharedDisciplineWarning:
+    """Parser warns when ANSI port list has shared direction/discipline (Cadence VACOMP pitfall)."""
+
+    def test_shared_discipline_generates_warning(self):
+        """inout electrical VDD, VSS  — VSS has no direction, must warn."""
+        src = """
+        module adc(
+            inout electrical VDD, VSS,
+            input electrical VIN,
+            output electrical [9:0] DOUT
+        );
+        analog begin
+            V(DOUT[0], VSS) <+ 0.0;
+        end
+        endmodule
+        """
+        m = _parse(src)
+        # VSS has no direction → warning expected
+        assert len(m.warnings) >= 1
+        assert any("VSS" in w for w in m.warnings)
+        assert any("Cadence" in w or "direction" in w for w in m.warnings)
+
+    def test_warning_message_mentions_spectre(self):
+        src = """
+        module m(
+            input electrical VIN, CLK,
+            output electrical DOUT
+        );
+        endmodule
+        """
+        m = _parse(src)
+        # CLK has no direction
+        w_text = " ".join(m.warnings)
+        assert "CLK" in w_text
+        assert "Spectre" in w_text
+
+    def test_correct_separate_declarations_no_warning(self):
+        """One port per line — no warnings."""
+        src = """
+        module adc(
+            inout  electrical VDD,
+            inout  electrical VSS,
+            input  electrical VIN,
+            input  electrical CLK,
+            output electrical [9:0] DOUT
+        );
+        endmodule
+        """
+        m = _parse(src)
+        assert m.warnings == []
+
+    def test_shared_discipline_still_parses_correctly(self):
+        """EVAS must still simulate even with the warning — tolerant behaviour."""
+        src = """
+        module m(
+            inout electrical VDD, VSS,
+            output electrical OUT
+        );
+        analog begin
+            V(OUT, VSS) <+ 0.0;
+        end
+        endmodule
+        """
+        m = _parse(src)
+        # All three ports should be reachable
+        all_ports = set(m.ports) | {pd.name for pd in m.port_decls}
+        assert "VDD" in all_ports
+        assert "VSS" in all_ports
+        assert "OUT" in all_ports
