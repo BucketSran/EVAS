@@ -86,11 +86,16 @@ def _build_node_map(instance, module) -> Dict[str, str]:
 # Source conversion: Spectre params -> simulator waveform
 # ---------------------------------------------------------------------------
 
-def _add_spectre_source(sim: Simulator, src: SpectreSource, ground: str) -> None:
-    """Convert a SpectreSource to a simulator waveform and add it."""
+def _add_spectre_source(sim: Simulator, src: SpectreSource,
+                        ground: str) -> List[str]:
+    """Convert a SpectreSource to a simulator waveform and add it.
+
+    Returns a (possibly empty) list of warning strings for degenerate cases.
+    """
     node = src.node_pos if src.node_neg == ground else src.node_pos
     params = src.params
     stype = src.source_type
+    warn: List[str] = []
 
     if stype in ('dc', ''):
         sim.add_source(node, dc(float(params.get('dc', 0.0))))
@@ -98,7 +103,20 @@ def _add_spectre_source(sim: Simulator, src: SpectreSource, ground: str) -> None
     elif stype == 'pulse':
         v0 = float(params.get('val0', 0.0))
         v1 = float(params.get('val1', 1.0))
-        period = float(params.get('period', 1.0))
+        period = float(params.get('period', 0.0))
+
+        if v0 == v1:
+            warn.append(f"{src.name}: pulse val0 == val1 == {v0} "
+                        f"— treated as DC {v0} V")
+            sim.add_source(node, dc(v0))
+            return warn
+
+        if period <= 0:
+            warn.append(f"{src.name}: pulse period not set "
+                        f"— treated as DC {v1} V")
+            sim.add_source(node, dc(v1))
+            return warn
+
         delay = float(params.get('delay', 0.0))
         rise = float(params.get('rise', 1e-12))
         fall = float(params.get('fall', 1e-12))
@@ -125,9 +143,23 @@ def _add_spectre_source(sim: Simulator, src: SpectreSource, ground: str) -> None
 
     elif stype in ('sin', 'sine'):
         offset = float(params.get('sinedc', params.get('dc', 0.0)))
-        ampl = float(params.get('ampl', 1.0))
-        freq = float(params.get('freq', 1e6))
+        ampl = float(params.get('ampl', 0.0))
+        freq = float(params.get('freq', 0.0))
+
+        if freq <= 0:
+            warn.append(f"{src.name}: sine freq not set "
+                        f"— treated as DC {offset} V")
+            sim.add_source(node, dc(offset))
+            return warn
+
+        if ampl == 0:
+            warn.append(f"{src.name}: sine ampl=0 — treated as DC {offset} V")
+            sim.add_source(node, dc(offset))
+            return warn
+
         sim.add_source(node, sine(offset=offset, amplitude=ampl, freq=freq))
+
+    return warn
 
 
 # ---------------------------------------------------------------------------
@@ -338,11 +370,33 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     # 2. Compile VA models
     models_by_name = {}
     for inc in netlist.ahdl_includes:
-        va_path = (Path(netlist.source_dir) / inc.path).resolve()
-        if not va_path.exists():
-            log.write(f"ERROR: Cannot find VA file: {inc.path}")
+        # Three-level path search so Virtuoso-exported absolute paths work
+        # even when the netlist is used on a different machine:
+        #   1. Path as written (works if absolute and reachable, or relative to cwd)
+        #   2. Relative to the .scs source directory
+        #   3. Just the filename in the .scs source directory (cross-machine fallback)
+        p = Path(inc.path)
+        scs_dir = Path(netlist.source_dir)
+        candidates: List[Path] = []
+        for c in [p, scs_dir / p, scs_dir / p.name]:
+            r = c.resolve()
+            if r not in candidates:
+                candidates.append(r)
+
+        va_path = next((c for c in candidates if c.exists()), None)
+        if va_path is None:
+            searched = ', '.join(str(c) for c in candidates)
+            log.write(f"ERROR: Cannot find VA file: {inc.path!r}")
+            log.write(f"       Searched: {searched}")
             errors += 1
             continue
+
+        original = p.resolve()
+        if va_path != original:
+            log.write(f"WARNING: ahdl_include resolved to '{va_path.name}' "
+                      f"(original path not found, used scs directory fallback)")
+            warnings += 1
+
         cls, module = _compile_va(str(va_path))
         models_by_name[module.name] = (cls, module)
         log.write(f"Compiled Verilog-A module: {module.name}")
@@ -357,7 +411,10 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     sim = Simulator()
 
     for src in netlist.sources:
-        _add_spectre_source(sim, src, netlist.ground)
+        src_warnings = _add_spectre_source(sim, src, netlist.ground)
+        for w in src_warnings:
+            log.write(f"WARNING: {w}")
+            warnings += 1
 
     # 4. Instantiate models
     instance_counts: Dict[str, int] = {}

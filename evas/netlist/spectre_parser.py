@@ -534,8 +534,22 @@ def _parse_tran(line: str, netlist: SpectreNetlist,
                                refine_factor=refine_factor, refine_steps=refine_steps)
 
 
+def _normalize_node_name(name: str) -> str:
+    """Normalize Cadence-escaped bus subscripts to plain angle-bracket form.
+
+    Cadence Spectre exports bus pins as ``DOUT\\<9\\>`` (backslash-escaped).
+    We strip the backslashes so node names become ``DOUT<9>`` throughout —
+    cleaner in CSVs and consistent with what the user sees in Virtuoso.
+    """
+    return name.replace('\\<', '<').replace('\\>', '>')
+
+
 def _extract_nodes(line: str) -> Tuple[str, List[str], str]:
-    """Extract (name, nodes, remainder) from a line like 'Vname (n1 n2) rest...'"""
+    """Extract (name, nodes, remainder) from a line like 'Vname (n1 n2) rest...'
+
+    Node names are normalized: Cadence escaped-bus notation ``DOUT\\<9\\>``
+    is converted to plain ``DOUT<9>``.
+    """
     # Find the first '(' and matching ')'
     paren_start = line.index('(')
     paren_end = line.index(')', paren_start)
@@ -544,7 +558,7 @@ def _extract_nodes(line: str) -> Tuple[str, List[str], str]:
     nodes_str = line[paren_start + 1:paren_end].strip()
     remainder = line[paren_end + 1:].strip()
 
-    nodes = nodes_str.split()
+    nodes = [_normalize_node_name(n) for n in nodes_str.split()]
     return name, nodes, remainder
 
 
