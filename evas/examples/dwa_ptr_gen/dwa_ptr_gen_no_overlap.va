@@ -8,7 +8,7 @@
 // per cycle: cells [old_ptr, new_ptr-1] (new_ptr itself is NOT included).
 // Consecutive cycles share no boundary cell (首尾不重叠).
 
-module dwa_ptr_gen_msb (
+module dwa_ptr_gen_no_overlap (
     input  electrical        clk_i,
     input  electrical        rst_ni,
     input  electrical [3:0]  code_msb_i,
@@ -62,7 +62,7 @@ analog begin
             cell_en_val[j] = ((dist > 0) && (dist <= msb_count_q)) ? vdd : 0.0;
             ptr_val[j] = (j == start_idx_q) ? vdd : 0.0;
         end
-        $strobe("[dwa_ptr_gen_msb] t=%.3f ns | ptr=%2d | msb=%2d | lsb=%2d | cell=%0d%0d%0d%0d%0d%0d%0d%0d%0d%0d%0d%0d%0d%0d%0d%0d",
+        $strobe("[dwa_ptr_gen_no_overlap] t=%.3f ns | ptr=%2d | msb=%2d | lsb=%2d | cell=%0d%0d%0d%0d%0d%0d%0d%0d%0d%0d%0d%0d%0d%0d%0d%0d",
             $abstime*1e9, start_idx_q, msb_count_q, lsb_idx,
             (cell_en_val[15]>vth?1:0),(cell_en_val[14]>vth?1:0),(cell_en_val[13]>vth?1:0),(cell_en_val[12]>vth?1:0),
             (cell_en_val[11]>vth?1:0),(cell_en_val[10]>vth?1:0),(cell_en_val[9]>vth?1:0),(cell_en_val[8]>vth?1:0),

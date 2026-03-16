@@ -123,6 +123,13 @@ class CrossDetector:
             dv = val - self.prev_val
             frac = max(0.0, min(1.0, -self.prev_val / dv)) if abs(dv) > 1e-30 else 0.0
             self.t_cross = self.prev_time + frac * (time - self.prev_time)
+            # Clamp val to the post-crossing side to prevent immediate re-trigger.
+            # Falling: prev_val was >0, val near 0 — ensure stored val is <= 0.
+            # Rising:  prev_val was <0, val near 0 — ensure stored val is >= 0.
+            if self.prev_val > 0:
+                val = min(val, 0.0)
+            else:
+                val = max(val, 0.0)
 
         self.pprev_val = self.prev_val
         self.pprev_time = self.prev_time
@@ -183,6 +190,8 @@ class AboveDetector:
             dv = val - self.prev_val
             frac = max(0.0, min(1.0, -self.prev_val / dv)) if abs(dv) > 1e-30 else 0.0
             self.t_cross = self.prev_time + frac * (time - self.prev_time)
+            # Clamp val to prevent immediate re-trigger
+            val = max(val, 0.0)
 
         self.pprev_val = self.prev_val
         self.pprev_time = self.prev_time

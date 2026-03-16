@@ -26,7 +26,7 @@ def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
     t   = data['time'] * 1e9
     vdd = data['clk'].max()
 
-    fig, axes = plt.subplots(3, 1, figsize=(12, 7), sharex=True,
+    fig, axes = plt.subplots(3, 1, figsize=(8, 5), sharex=True,
                              gridspec_kw={'height_ratios': [1.5, 2.5, 2.5]})
     fig.suptitle(f'cmp_strongarm — Clocked Comparator  |  wall clock: {wall_s:.4f} s')
 
@@ -38,7 +38,10 @@ def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
     axes[1].plot(t, data['vinp'], linewidth=1.0, label='vinp')
     axes[1].plot(t, data['vinn'], linewidth=1.0, label='vinn')
     axes[1].set_ylabel('input (V)')
-    axes[1].set_ylim(-vdd * 0.1, vdd * 1.2)
+    vin_all = np.concatenate([data['vinp'], data['vinn']])
+    vin_min, vin_max = vin_all.min(), vin_all.max()
+    vin_margin = max((vin_max - vin_min) * 0.2, 1e-3)  # at least 1mV margin
+    axes[1].set_ylim(vin_min - vin_margin, vin_max + vin_margin)
     axes[1].legend(loc='upper right')
     axes[1].grid(True, alpha=0.3)
 

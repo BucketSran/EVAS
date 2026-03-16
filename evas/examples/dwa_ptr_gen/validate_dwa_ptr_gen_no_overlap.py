@@ -1,9 +1,9 @@
-"""Validate dwa_ptr_gen_msb: MSB-only DWA (no overlap)."""
+"""Validate dwa_ptr_gen_no_overlap: DWA (no overlap)."""
 from pathlib import Path
 
 import numpy as np
 
-OUT = Path(__file__).parent.parent.parent / 'output' / 'dwa_ptr_gen' / 'dwa_ptr_gen_msb'
+OUT = Path(__file__).parent.parent.parent / 'output' / 'dwa_ptr_gen' / 'dwa_ptr_gen_no_overlap'
 
 
 def validate_csv(out_dir: Path = OUT) -> int:

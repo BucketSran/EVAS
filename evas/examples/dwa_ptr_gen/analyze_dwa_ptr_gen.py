@@ -140,10 +140,10 @@ def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
     ], fontsize=9, loc='upper right', framealpha=0.9)
 
     fig.tight_layout()
-    fig.savefig(str(out_dir / 'analyze_dwa_ptr_gen.png'), dpi=150,
+    fig.savefig(str(base_dir / 'analyze_dwa_ptr_gen.png'), dpi=150,
                 bbox_inches='tight')
     plt.close(fig)
-    print(f"Plot saved: {out_dir / 'analyze_dwa_ptr_gen.png'}")
+    print(f"Plot saved: {base_dir / 'analyze_dwa_ptr_gen.png'}")
 
 
 if __name__ == "__main__":

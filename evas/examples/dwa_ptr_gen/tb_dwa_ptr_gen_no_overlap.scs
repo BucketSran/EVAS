@@ -1,35 +1,18 @@
-// dwa_ptr_gen: DWA pointer rotation generator
+// dwa_ptr_gen_no_overlap: DWA pointer rotation, no overlap
 simulator lang=spectre
 global 0
 
-ahdl_include "dwa_ptr_gen.va"
+ahdl_include "dwa_ptr_gen_no_overlap.va"
 
-// Clock: 100ns period
+// Clock: 100ns period (10 MHz)
 Vclk (clk_i 0) vsource type=pulse val0=0 val1=0.9 period=100n delay=5n rise=1n fall=1n width=48n
 
 // Reset: deassert at 20ns (active-low)
 Vrst_n (rst_ni 0) vsource type=pwl \
         wave=[0 0 19n 0 20n 0.9 5000n 0.9]
 
-// 4-bit MSB code input: 16 random codes
+// 4-bit MSB code input: 16 random codes, same as dwa_ptr_gen
 // codes = [3, 7, 2, 5, 1, 8, 4, 6, 3, 5, 2, 7, 1, 4, 8, 2]
-// cycle  1T  code= 3  = 0b0011
-// cycle  2T  code= 7  = 0b0111
-// cycle  3T  code= 2  = 0b0010
-// cycle  4T  code= 5  = 0b0101
-// cycle  5T  code= 1  = 0b0001
-// cycle  6T  code= 8  = 0b1000
-// cycle  7T  code= 4  = 0b0100
-// cycle  8T  code= 6  = 0b0110
-// cycle  9T  code= 3  = 0b0011
-// cycle 10T  code= 5  = 0b0101
-// cycle 11T  code= 2  = 0b0010
-// cycle 12T  code= 7  = 0b0111
-// cycle 13T  code= 1  = 0b0001
-// cycle 14T  code= 4  = 0b0100
-// cycle 15T  code= 8  = 0b1000
-// cycle 16T  code= 2  = 0b0010
-
 Vcode0 (code_msb_i_0 0) vsource type=pwl \
     wave=[0 0 49n 0 50n 0.9 149n 0.9 150n 0.9 249n 0.9 250n 0 349n 0 350n 0.9 449n 0.9 450n 0.9 549n 0.9 550n 0 649n 0 650n 0 749n 0 750n 0 849n 0 850n 0.9 949n 0.9 950n 0.9 1049n 0.9 1050n 0 1149n 0 1150n 0.9 1249n 0.9 1250n 0.9 1349n 0.9 1350n 0 1449n 0 1450n 0 1549n 0 1550n 0 1700n 0]
 Vcode1 (code_msb_i_1 0) vsource type=pwl \
@@ -46,7 +29,7 @@ IDUT (clk_i rst_ni \
       cell_en_7 cell_en_6 cell_en_5 cell_en_4 cell_en_3 cell_en_2 cell_en_1 cell_en_0 \
       ptr_15 ptr_14 ptr_13 ptr_12 ptr_11 ptr_10 ptr_9 ptr_8 \
       ptr_7 ptr_6 ptr_5 ptr_4 ptr_3 ptr_2 ptr_1 ptr_0) \
-      dwa_ptr_gen vdd=0.9 vth=0.45 ptr_init=0
+      dwa_ptr_gen_no_overlap vdd=0.9 vth=0.45 ptr_init=0
 
 tran tran stop=1700n maxstep=1n
 save clk_i:2e rst_ni:d \

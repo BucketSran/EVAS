@@ -52,7 +52,7 @@ def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
     t   = data['time'] * 1e9
     vdd = max(data[c].max() for c in ['CLK', 'dcmpp'])
 
-    fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
+    fig, axes = plt.subplots(3, 1, figsize=(8, 6), sharex=True)
 
     for sig in ['CLK', 'dcmpp']:
         axes[0].plot(t, data[sig], linewidth=1.0, drawstyle='steps-post', label=sig)
@@ -65,7 +65,10 @@ def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
     for sig in ['vinp_node', 'vinn_node']:
         axes[1].plot(t, data[sig] * 1e3, linewidth=1.0, label=sig)
     axes[1].set_ylabel('VINP/VINN (mV)')
-    axes[1].set_ylim(350, 450)
+    vin_all = np.concatenate([data['vinp_node'], data['vinn_node']]) * 1e3
+    vin_min, vin_max = vin_all.min(), vin_all.max()
+    vin_margin = (vin_max - vin_min) * 0.2
+    axes[1].set_ylim(vin_min - vin_margin, vin_max + vin_margin)
     axes[1].legend(loc='upper right', fontsize=8)
     axes[1].grid(True, alpha=0.3)
 

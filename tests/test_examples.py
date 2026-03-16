@@ -118,7 +118,6 @@ def test_cmp_strongarm(tmp_path):
                   "validate_csv", "comparator", "validate_cmp_strongarm.py")
 
 
-@pytest.mark.xfail(reason="cmp_offset_search double-triggers cross event, converges to wrong offset")
 def test_cmp_offset_search(tmp_path):
     _run_validate(tmp_path, "comparator/tb_cmp_offset_search.scs",
                   "validate_csv", "comparator", "validate_cmp_offset_search.py")
@@ -163,9 +162,9 @@ def test_dwa_ptr_gen(tmp_path):
     _run_validate(tmp_path, "dwa_ptr_gen/tb_dwa_ptr_gen.scs", "validate_csv", "dwa_ptr_gen")
 
 
-def test_dwa_ptr_gen_msb(tmp_path):
-    _run_validate(tmp_path, "dwa_ptr_gen/tb_dwa_ptr_gen_msb.scs", "validate_csv", "dwa_ptr_gen",
-                  "validate_dwa_ptr_gen_msb.py")
+def test_dwa_ptr_gen_no_overlap(tmp_path):
+    _run_validate(tmp_path, "dwa_ptr_gen/tb_dwa_ptr_gen_no_overlap.scs", "validate_csv", "dwa_ptr_gen",
+                  "validate_dwa_ptr_gen_no_overlap.py")
 
 
 def test_lfsr(tmp_path):

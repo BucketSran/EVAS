@@ -1,4 +1,4 @@
-"""Analyze dwa_ptr_gen_msb: DWA rotation, MSB-only (no overlap)."""
+"""Analyze dwa_ptr_gen_no_overlap: DWA rotation, no overlap."""
 import time
 from pathlib import Path
 
@@ -17,11 +17,11 @@ _DEFAULT_BASE = HERE.parent.parent.parent / 'output' / 'dwa_ptr_gen'
 
 
 def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
-    out_dir = base_dir / 'dwa_ptr_gen_msb'
+    out_dir = base_dir / 'dwa_ptr_gen_no_overlap'
     out_dir.mkdir(parents=True, exist_ok=True)
 
     t0 = time.perf_counter()
-    evas_simulate(str(HERE / 'tb_dwa_ptr_gen_msb.scs'), output_dir=str(out_dir))
+    evas_simulate(str(HERE / 'tb_dwa_ptr_gen_no_overlap.scs'), output_dir=str(out_dir))
     wall_s = time.perf_counter() - t0
 
     data = np.genfromtxt(out_dir / 'tran.csv', delimiter=',', names=True,
@@ -94,15 +94,16 @@ def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
                 edgecolor='#1a7a4a', zorder=2)
 
         if ptr_pos[ci] >= 0:
-            ax.scatter(ci, ptr_pos[ci], s=110, marker='D',
+            disp_ptr = (ptr_pos[ci] - 1) % 16  # no-overlap: ptr at last selected cell
+            ax.scatter(ci, disp_ptr, s=110, marker='D',
                        color='#e05020', zorder=5, linewidths=0)
-            ax.text(ci, ptr_pos[ci] + 0.65, f'+{code[ci]}',
+            ax.text(ci, disp_ptr + 0.65, f'+{code[ci]}',
                     ha='center', va='bottom', fontsize=8,
                     color='#c03010', fontweight='bold')
 
     vc = [ci for ci in range(N) if rst_ok[ci] and ptr_pos[ci] >= 0]
     if vc:
-        ax.plot(vc, [ptr_pos[ci] for ci in vc],
+        ax.plot(vc, [(ptr_pos[ci] - 1) % 16 for ci in vc],
                 color='#e05020', linewidth=1.0, linestyle='--',
                 alpha=0.5, zorder=3)
 
@@ -120,7 +121,7 @@ def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
     ax.spines['right'].set_visible(False)
 
     ax.set_title(
-        f'dwa_ptr_gen_msb  —  DWA pointer rotation, no overlap (code cells/cycle)  '
+        f'dwa_ptr_gen_no_overlap  —  DWA pointer rotation, no overlap (code cells/cycle)  '
         f'|  wall clock: {wall_s:.4f} s',
         fontsize=11)
 
@@ -131,10 +132,10 @@ def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
     ], fontsize=9, loc='upper right', framealpha=0.9)
 
     fig.tight_layout()
-    fig.savefig(str(out_dir / 'analyze_dwa_ptr_gen_msb.png'), dpi=150,
+    fig.savefig(str(base_dir / 'analyze_dwa_ptr_gen_no_overlap.png'), dpi=150,
                 bbox_inches='tight')
     plt.close(fig)
-    print(f"Plot saved: {out_dir / 'analyze_dwa_ptr_gen_msb.png'}")
+    print(f"Plot saved: {base_dir / 'analyze_dwa_ptr_gen_no_overlap.png'}")
 
 
 if __name__ == "__main__":

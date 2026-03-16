@@ -27,7 +27,7 @@ def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
     vdd = data['clk'].max()
     vdiff = (data['vinp'] - data['vinn']) * 1e3
 
-    fig, axes = plt.subplots(3, 1, figsize=(12, 7), sharex=True,
+    fig, axes = plt.subplots(3, 1, figsize=(8, 5), sharex=True,
                              gridspec_kw={'height_ratios': [1.5, 2, 2.5]})
     fig.suptitle(f'cmp_ideal — Ideal Clocked Comparator  |  wall clock: {wall_s:.4f} s')
 
