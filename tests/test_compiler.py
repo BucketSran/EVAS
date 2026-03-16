@@ -888,3 +888,65 @@ class TestParserPortDecls:
         assert pd.is_array
         assert pd.array_hi == 3
         assert pd.array_lo == 0
+
+
+class TestParser2DNodeArray:
+    """Parser support for 1-D and 2-D electrical node arrays in V()/I()."""
+
+    def test_1d_node_array_contribution(self):
+        """V(clk_nodes[N], VSS) <+ 0.0  — 1-D dynamic index."""
+        src = _wrap("V(clk_nodes[N], VSS) <+ 0.0;")
+        stmts = _parse(src).analog_block.body.statements
+        contrib = stmts[0]
+        assert isinstance(contrib, Contribution)
+        ba = contrib.branch
+        assert ba.node1 == "clk_nodes"
+        assert isinstance(ba.node1_index, Identifier)
+        assert ba.node1_index.name == "N"
+        assert ba.node1_index2 is None
+        assert ba.node2 == "VSS"
+
+    def test_2d_node_array_contribution(self):
+        """V(dbus[ch][j], VSS) <+ 0.0  — 2-D dynamic index."""
+        src = _wrap("V(dbus[ch][j], VSS) <+ 0.0;")
+        stmts = _parse(src).analog_block.body.statements
+        contrib = stmts[0]
+        assert isinstance(contrib, Contribution)
+        ba = contrib.branch
+        assert ba.node1 == "dbus"
+        assert isinstance(ba.node1_index, Identifier)
+        assert ba.node1_index.name == "ch"
+        assert isinstance(ba.node1_index2, Identifier)
+        assert ba.node1_index2.name == "j"
+        assert ba.node2 == "VSS"
+
+    def test_2d_node_array_read(self):
+        """x = V(dbus[ch][j])  — reading a 2-D array node."""
+        src = _wrap("x = V(dbus[ch][j]);")
+        stmts = _parse(src).analog_block.body.statements
+        assign = stmts[0]
+        assert isinstance(assign, Assignment)
+        ba = assign.value
+        assert isinstance(ba, BranchAccess)
+        assert ba.node1 == "dbus"
+        assert isinstance(ba.node1_index, Identifier)
+        assert ba.node1_index.name == "ch"
+        assert isinstance(ba.node1_index2, Identifier)
+        assert ba.node1_index2.name == "j"
+
+    def test_2d_electrical_decl_parsed_without_error(self):
+        """electrical [1:0] dbus [0:3]; should not leave stray tokens."""
+        src = """
+        module m(VDD, VSS);
+        inout electrical VDD, VSS;
+        electrical [1:0] dbus [0:3];
+        analog begin
+            V(dbus[0][0], VSS) <+ 0.0;
+        end
+        endmodule
+        """
+        m = _parse(src)
+        # dbus should be registered as an array port/node
+        pd = next((p for p in m.port_decls if p.name == "dbus"), None)
+        assert pd is not None
+        assert pd.is_array

@@ -101,8 +101,10 @@ class BranchAccess:
     access_type: str  # 'V' or 'I'
     node1: str
     node2: Optional[str] = None
-    node1_index: Optional['Expr'] = None  # dynamic array index for node1
-    node2_index: Optional['Expr'] = None  # dynamic array index for node2
+    node1_index: Optional['Expr'] = None   # first dynamic array index for node1
+    node2_index: Optional['Expr'] = None   # first dynamic array index for node2
+    node1_index2: Optional['Expr'] = None  # second dynamic array index for node1 (2-D)
+    node2_index2: Optional['Expr'] = None  # second dynamic array index for node2 (2-D)
 
 @dataclass
 class MethodCall:

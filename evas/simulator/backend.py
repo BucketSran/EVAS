@@ -499,8 +499,11 @@ class _ModuleCompiler:
         expr = self._compile_expr(stmt.expr)
 
         if branch.node1_index is not None:
-            # Dynamic array-indexed port: V(DOUT[i-1]) <+
+            # Dynamic array-indexed port: V(DOUT[i]) <+ or V(DOUT[i][j]) <+
             idx_expr = self._compile_expr(branch.node1_index)
+            if branch.node1_index2 is not None:
+                idx_expr2 = self._compile_expr(branch.node1_index2)
+                return [f"{prefix}self._set_output(f'{node}[{{int({idx_expr})}}][{{int({idx_expr2})}}]', {expr}, nv)"]
             return [f"{prefix}self._set_output(f'{node}[{{int({idx_expr})}}]', {expr}, nv)"]
         else:
             return [f"{prefix}self._set_output({node!r}, {expr}, nv)"]
@@ -659,13 +662,13 @@ class _ModuleCompiler:
         if isinstance(expr, BranchAccess):
             node = expr.node1
             if expr.node2:
-                n1 = self._compile_node_voltage(expr.node1, expr.node1_index)
-                n2 = self._compile_node_voltage(expr.node2, expr.node2_index)
+                n1 = self._compile_node_voltage(expr.node1, expr.node1_index, expr.node1_index2)
+                n2 = self._compile_node_voltage(expr.node2, expr.node2_index, expr.node2_index2)
                 if expr.access_type == 'V':
                     return f"({n1} - {n2})"
                 return "0.0"  # I() not fully supported yet
             if expr.access_type == 'V':
-                return self._compile_node_voltage(node, expr.node1_index)
+                return self._compile_node_voltage(node, expr.node1_index, expr.node1_index2)
             return "0.0"
 
         if isinstance(expr, FunctionCall):
@@ -676,10 +679,13 @@ class _ModuleCompiler:
 
         return "0.0"
 
-    def _compile_node_voltage(self, node: str, index_expr=None) -> str:
+    def _compile_node_voltage(self, node: str, index_expr=None, index_expr2=None) -> str:
         """Compile a node voltage reference."""
         if index_expr is not None:
             idx = self._compile_expr(index_expr)
+            if index_expr2 is not None:
+                idx2 = self._compile_expr(index_expr2)
+                return f"self._get_voltage(f'{node}[{{int({idx})}}][{{int({idx2})}}]', nv)"
             return f"self._get_voltage(f'{node}[{{int({idx})}}]', nv)"
         return f"self._get_voltage({node!r}, nv)"
 

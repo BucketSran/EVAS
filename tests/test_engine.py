@@ -831,3 +831,94 @@ endmodule
 
         # After sim, all file handles should be closed
         assert len(model._file_handles) == 0
+
+
+class Test2DNodeArray:
+    """Backend compilation and runtime for 2-D electrical node arrays."""
+
+    VA_1D = """\
+`include "disciplines.vams"
+module clk_array_1d(VDD, VSS);
+    inout electrical VDD, VSS;
+    electrical [0:3] clk_nodes;
+    genvar N;
+    analog begin
+        for (N = 0; N <= 3; N = N + 1)
+            V(clk_nodes[N], VSS) <+ (N == 0) ? 1.0 : 0.0;
+    end
+endmodule
+"""
+
+    VA_2D = """\
+`include "disciplines.vams"
+module dbus_2d(VDD, VSS);
+    inout electrical VDD, VSS;
+    electrical [1:0] dbus [0:3];
+    genvar ch, j;
+    analog begin
+        for (ch = 0; ch <= 3; ch = ch + 1)
+            for (j = 0; j <= 1; j = j + 1)
+                V(dbus[ch][j], VSS) <+ (ch * 2.0 + j);
+    end
+endmodule
+"""
+
+    def test_1d_array_contribution_compiles(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+        mod = parse(self.VA_1D)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+        nv = {}
+        model.evaluate(nv, 0.0)
+        # clk_nodes[0] should be 1.0, others 0.0
+        assert model.output_nodes.get("clk_nodes[0]") == pytest.approx(1.0)
+        assert model.output_nodes.get("clk_nodes[1]") == pytest.approx(0.0)
+        assert model.output_nodes.get("clk_nodes[2]") == pytest.approx(0.0)
+        assert model.output_nodes.get("clk_nodes[3]") == pytest.approx(0.0)
+
+    def test_2d_array_contribution_compiles(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+        mod = parse(self.VA_2D)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+        nv = {}
+        model.evaluate(nv, 0.0)
+        # V(dbus[ch][j]) <+ ch*2 + j
+        for ch in range(4):
+            for j in range(2):
+                key = f"dbus[{ch}][{j}]"
+                expected = ch * 2.0 + j
+                assert model.output_nodes.get(key) == pytest.approx(expected), \
+                    f"{key} expected {expected}, got {model.output_nodes.get(key)}"
+
+    def test_2d_array_read_voltage(self):
+        """V(dbus[ch][j], VSS) used as a read expression (cross event etc.)"""
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+        va_src = """\
+`include "disciplines.vams"
+module dbus_read(VDD, VSS);
+    inout electrical VDD, VSS;
+    electrical [1:0] dbus [0:3];
+    real v00;
+    genvar ch, j;
+    analog begin
+        for (ch = 0; ch <= 3; ch = ch + 1)
+            for (j = 0; j <= 1; j = j + 1)
+                V(dbus[ch][j], VSS) <+ (ch * 2.0 + j);
+        v00 = V(dbus[0][0], VSS);
+    end
+endmodule
+"""
+        mod = parse(va_src)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+        # Pre-set dbus[0][0] in output_nodes so the read can see it
+        nv = {}
+        model.evaluate(nv, 0.0)
+        # v00 = V(dbus[0][0]) = 0*2+0 = 0.0
+        assert model.state.get("v00") == pytest.approx(0.0)
+        # v01 check: dbus[1][1] = 1*2+1 = 3.0
+        assert model.output_nodes.get("dbus[1][1]") == pytest.approx(3.0)

@@ -279,10 +279,15 @@ class Parser:
         self.match(TokenType.SEMI)
 
     def _parse_discipline_decl(self, module: Module):
-        """Parse: electrical name [, name] ;"""
+        """Parse: electrical name [, name] ;
+
+        Also handles 1-D and 2-D array forms:
+          electrical [lo:hi] name ;          ← 1-D inner range before name
+          electrical [lo:hi] name [lo2:hi2] ; ← 2-D: inner range before, outer range after name
+        """
         discipline = self.advance().value
 
-        # Check for array range
+        # Check for inner array range before the name(s)
         array_hi, array_lo = None, None
         if self.at(TokenType.LBRACKET):
             array_hi, array_lo = self._parse_range()
@@ -290,6 +295,9 @@ class Parser:
         while True:
             if self.at(TokenType.IDENT):
                 name = self.advance().value
+                # Optional outer dimension range after the name (2-D array)
+                if self.at(TokenType.LBRACKET):
+                    self._skip_range()  # consume [hi:lo] — recorded in array_hi/lo already
                 # Update existing port decl or add new one
                 found = False
                 for pd in module.port_decls:
@@ -767,13 +775,14 @@ class Parser:
             access_type = tok.value
             self.advance()
             self.expect(TokenType.LPAREN)
-            name1, idx1 = self._parse_node_ref()
-            name2, idx2 = None, None
+            name1, idx1, idx1_2 = self._parse_node_ref()
+            name2, idx2, idx2_2 = None, None, None
             if self.match(TokenType.COMMA):
-                name2, idx2 = self._parse_node_ref()
+                name2, idx2, idx2_2 = self._parse_node_ref()
             self.expect(TokenType.RPAREN)
             return BranchAccess(access_type=access_type, node1=name1, node2=name2,
-                                node1_index=idx1, node2_index=idx2)
+                                node1_index=idx1, node2_index=idx2,
+                                node1_index2=idx1_2, node2_index2=idx2_2)
 
         # Identifier (variable, parameter, function call)
         if tok.type == TokenType.IDENT:
@@ -814,15 +823,27 @@ class Parser:
         return NumberLiteral(0)
 
     def _parse_node_ref(self):
-        """Parse a node reference which might be array-indexed.
-        Returns (name, index_expr) where index_expr is an Expr or None."""
+        """Parse a node reference which may be 1-D or 2-D array-indexed.
+
+        Returns (name, index_expr, index_expr2) where either index may be None.
+        Supports:
+          name            → (name, None, None)
+          name[i]         → (name, i_expr, None)
+          name[i][j]      → (name, i_expr, j_expr)
+        """
         name = self.expect(TokenType.IDENT).value
         index_expr = None
+        index_expr2 = None
         if self.at(TokenType.LBRACKET):
             self.advance()
             index_expr = self._parse_expression()
             self.expect(TokenType.RBRACKET)
-        return name, index_expr
+            # Optional second dimension: array[i][j]
+            if self.at(TokenType.LBRACKET):
+                self.advance()
+                index_expr2 = self._parse_expression()
+                self.expect(TokenType.RBRACKET)
+        return name, index_expr, index_expr2
 
     def _parse_arg_list(self) -> List[Expr]:
         args = []
