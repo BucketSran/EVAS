@@ -25,14 +25,10 @@ def validate_csv(out_dir: Path = OUT) -> int:
         print("FAIL: CLK_OUT never went high")
         failures += 1
 
-    # CLK_OUT should be 0 for most of the time (only 2 of 8 cycles are high)
-    # After reset is active, fraction of time CLK_OUT is high should be ~2/8 = 25%
-    t_ns = data['time'] * 1e9
-    active_mask = t_ns > 200.0  # skip initial transient and reset
+    # CLK_OUT high fraction should be ~25% after reset (2/8 cycles × 50% duty)
+    active_mask = data['RST_N'] > 0.45
     if active_mask.sum() > 10:
-        clk_out_active = data['CLK_OUT'][active_mask]
-        frac_high = np.mean(clk_out_active > 0.45)
-        # Expect roughly 25% high (2/8 cycles * 50% duty = 12.5%), allow generous range
+        frac_high = np.mean(data['CLK_OUT'][active_mask] > 0.45)
         if frac_high > 0.5:
             print(f"FAIL: CLK_OUT high fraction={frac_high:.2f}, expected < 0.5 (burst mode)")
             failures += 1
@@ -41,18 +37,7 @@ def validate_csv(out_dir: Path = OUT) -> int:
         print("[CSV] All assertions passed.")
     return failures
 
-
-def validate_txt(out_dir: Path = OUT) -> int:
-    txt_path = out_dir / 'strobe.txt'
-    if not txt_path.exists():
-        return 0
-    # clk_burst_gen does not emit $strobe lines
-    return 0
-
-
 if __name__ == '__main__':
-    f1 = validate_csv()
-    f2 = validate_txt()
-    total = f1 + f2
-    print(f"Validation: {total} failure(s) [{f1} CSV, {f2} TXT]")
-    raise SystemExit(0 if total == 0 else 1)
+    failures = validate_csv()
+    print(f"Validation: {failures} failure(s)")
+    raise SystemExit(0 if failures == 0 else 1)

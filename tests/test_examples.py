@@ -119,8 +119,11 @@ def test_cmp_strongarm(tmp_path):
 
 
 def test_cmp_offset_search(tmp_path):
-    _run_validate(tmp_path, "comparator/tb_cmp_offset_search.scs",
-                  "validate_csv", "comparator", "validate_cmp_offset_search.py")
+    _simulate("comparator/tb_cmp_offset_search.scs", tmp_path)
+    mod = _load_validate("comparator", "validate_cmp_offset_search.py")
+    assert mod is not None
+    assert mod.validate_csv(out_dir=tmp_path) == 0
+    assert mod.validate_txt(out_dir=tmp_path) == 0
 
 
 def test_cmp_delay(tmp_path):
@@ -155,7 +158,11 @@ def test_d2b_4b(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_ramp_gen(tmp_path):
-    _run_validate(tmp_path, "ramp_gen/tb_ramp_gen.scs", "validate_csv", "ramp_gen")
+    _simulate("ramp_gen/tb_ramp_gen.scs", tmp_path)
+    mod = _load_validate("ramp_gen")
+    assert mod is not None
+    assert mod.validate_csv(out_dir=tmp_path) == 0
+    assert mod.validate_txt(out_dir=tmp_path) == 0
 
 
 def test_dwa_ptr_gen(tmp_path):

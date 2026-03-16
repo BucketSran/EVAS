@@ -57,18 +57,7 @@ def validate_csv(out_dir: Path = OUT) -> int:
         print("[CSV] All assertions passed.")
     return failures
 
-
-def validate_txt(out_dir: Path = OUT) -> int:
-    txt_path = out_dir / 'strobe.txt'
-    if not txt_path.exists():
-        return 0
-    # clk_div does not emit $strobe lines
-    return 0
-
-
 if __name__ == '__main__':
-    f1 = validate_csv()
-    f2 = validate_txt()
-    total = f1 + f2
-    print(f"Validation: {total} failure(s) [{f1} CSV, {f2} TXT]")
-    raise SystemExit(0 if total == 0 else 1)
+    failures = validate_csv()
+    print(f"Validation: {failures} failure(s)")
+    raise SystemExit(0 if failures == 0 else 1)
