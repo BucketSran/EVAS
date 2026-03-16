@@ -32,7 +32,8 @@ Read the `.va` file before simulating. If any unsupported pattern is found, stop
 | `$display`, `$strobe`, `$random`, `$dist_uniform()`, `$rdist_normal()` | ✅ |
 | Math: `abs` `sqrt` `exp` `ln` `log` `pow` `sin` `cos` `floor` `ceil` `min` `max` | ✅ |
 | `I(...) <+`, `q(...) <+`, `ddt(...)`, `idt(...)` | not supported by design |
-| AC/DC analysis, subcircuit hierarchy, transistors | not supported by design |
+| AC/DC analysis, transistors | not supported by design |
+| Spectre `subckt` hierarchy | not yet implemented |
 
 ## Install
 

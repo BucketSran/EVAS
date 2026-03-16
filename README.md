@@ -8,12 +8,14 @@
 A lightweight, pure-Python behavioral simulator for digital/mixed-signal Verilog-A models.
 Event-driven. No C compiler, no ngspice, no KCL/KVL solver.
 
-📖 **Docs:** [evas.tokenzhang.com](https://evas.tokenzhang.com) &nbsp;|&nbsp; [中文](https://evas.tokenzhang.com/zh/)
 
 ---
 
-> **If you're a human** — see the full docs at [evas.tokenzhang.com](https://evas.tokenzhang.com) ([中文](https://evas.tokenzhang.com/zh/)).
->
+> **If you're a human** — see the full docs at 
+
+📖 **Docs:** [evas.tokenzhang.com](https://evas.tokenzhang.com) &nbsp;|&nbsp; [中文](https://evas.tokenzhang.com/zh/)
+
+
 > **If you're an AI agent** — load `skills/evas-sim/SKILL.md` (or copy the `skills/evas-sim/`
 > folder into your skills directory). It contains the full compatibility table, CLI reference,
 > output format, and common failure modes — everything you need to write and debug EVAS
@@ -100,7 +102,8 @@ They are the best reference for how to wire up common patterns:
 | `$fopen()`, `$fclose()`, `$fstrobe()`, `$fwrite()`, `$fdisplay()` | ✅ |
 | `$display`, `$strobe`, `$random`, `$dist_uniform()`, `$rdist_normal()` | ✅ |
 | `I() <+`, `ddt()`, `idt()`, `q() <+` | not supported by design |
-| AC/DC analysis, subcircuit hierarchy, transistors | not supported by design |
+| AC/DC analysis, transistors | not supported by design |
+| Spectre `subckt` hierarchy | not yet implemented |
 
 ## CSV output format
 

@@ -62,6 +62,10 @@ sin() cos() floor() ceil() min() max()
 # --- Other ---
 from [a:b] (parameter ranges)
 
+[not_yet_implemented]
+# Parser supports these constructs but the runner does not yet act on them.
+subckt / ends (Spectre netlist hierarchy flattening)
+
 [unsupported]
 # These are PERMANENT architectural exclusions — EVAS is event-driven,
 # not a SPICE-class KCL solver. These will never be supported.
