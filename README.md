@@ -97,8 +97,8 @@ They are the best reference for how to wire up common patterns:
 | `$bound_step()` | ✅ |
 | `$fopen()`, `$fclose()`, `$fstrobe()`, `$fwrite()`, `$fdisplay()` | ✅ |
 | `$display`, `$strobe`, `$random`, `$dist_uniform()`, `$rdist_normal()` | ✅ |
-| `I() <+`, `ddt()`, `idt()`, `q() <+` | ❌ |
-| AC/DC analysis, subcircuit hierarchy, transistors | ❌ |
+| `I() <+`, `ddt()`, `idt()`, `q() <+` | requires analog solver (KCL/KVL) |
+| AC/DC analysis, subcircuit hierarchy, transistors | requires analog solver |
 
 ## CSV output format
 

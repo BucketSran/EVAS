@@ -18,13 +18,12 @@ _T_MEASURE_NS = 1950.0
 
 
 def _write_sweep_scs(scs_path: Path, voffset_v: float) -> None:
-    va_dir = HERE
     content = (
         f"// cmp_offset_search sweep: voffset={voffset_v*1e3:.1f}mV\n"
         "simulator lang=spectre\n"
         "global 0\n\n"
-        f'ahdl_include "{va_dir / "cmp_offset_search.va"}"\n'
-        f'ahdl_include "{va_dir / "cmp_strongarm.va"}"\n\n'
+        'ahdl_include "cmp_offset_search.va"\n'
+        'ahdl_include "cmp_strongarm.va"\n\n'
         "Vvdd (vdd 0) vsource type=dc dc=0.8\n"
         "Vvss (vss 0) vsource type=dc dc=0\n"
         "Vclk (CLK 0) vsource type=pulse val0=0 val1=0.8 period=200n delay=10n rise=2n fall=2n width=98n\n"
@@ -95,9 +94,13 @@ def analyze(base_dir: Path = _DEFAULT_BASE) -> None:
         label     = f'v{voffset_mv:+.0f}mV'.replace('+', 'p').replace('-', 'n')
         sim_dir   = sweep_dir / label
         sim_dir.mkdir(parents=True, exist_ok=True)
-        scs_path  = sim_dir / 'tb_sweep.scs'
+        # Write SCS next to VA files so bare ahdl_include paths resolve correctly
+        scs_path  = HERE / f'_sweep_{label}.scs'
         _write_sweep_scs(scs_path, voffset_v)
-        evas_simulate(str(scs_path), output_dir=str(sim_dir))
+        try:
+            evas_simulate(str(scs_path), output_dir=str(sim_dir))
+        finally:
+            scs_path.unlink(missing_ok=True)
 
         sw   = np.genfromtxt(sim_dir / 'tran.csv', delimiter=',', names=True, dtype=None, encoding='utf-8')
         t_ns = sw['time'] * 1e9

@@ -29,7 +29,7 @@ TB_TEMPLATE = """\
 simulator lang=spectre
 global 0
 
-ahdl_include "{va_path}"
+ahdl_include "d2b_4b.va"
 
 XDUT (bin_o_3 bin_o_2 bin_o_1 bin_o_0 \\
       bin_n_o_3 bin_n_o_2 bin_n_o_1 bin_n_o_0 \\
@@ -64,8 +64,6 @@ save bin_o_3:d bin_o_2:d bin_o_1:d bin_o_0:d \\
      therm_n_o_4:d therm_n_o_3:d therm_n_o_2:d therm_n_o_1:d therm_n_o_0:d
 """
 
-VA_PATH = (HERE / 'd2b_4b.va').resolve()
-
 # ── Run 16 simulations and collect last-row values ───────────────────────────
 CODES = list(range(16))
 rows = {}   # trim_code -> dict of {col: bit_value}
@@ -74,16 +72,17 @@ for code in CODES:
     sim_out = OUT / f'code_{code}'
     sim_out.mkdir(parents=True, exist_ok=True)
 
-    tb_content = TB_TEMPLATE.format(
-        va_path=VA_PATH.as_posix(),
-        trim_code=code,
-    )
-    tb_path = sim_out / 'tb_d2b_4b.scs'
+    # Write SCS next to VA file so bare ahdl_include resolves correctly; delete after
+    tb_content = TB_TEMPLATE.format(trim_code=code)
+    tb_path = HERE / f'_tb_d2b_4b_code{code}.scs'
     tb_path.write_text(tb_content, encoding='utf-8')
 
     print(f"[code={code:2d}] simulating ...", end=' ', flush=True)
-    ok = evas_simulate(str(tb_path), output_dir=str(sim_out),
-                       log_path=str(sim_out / 'sim.log'))
+    try:
+        ok = evas_simulate(str(tb_path), output_dir=str(sim_out),
+                           log_path=str(sim_out / 'sim.log'))
+    finally:
+        tb_path.unlink(missing_ok=True)
     if not ok:
         print("FAILED")
         continue

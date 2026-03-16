@@ -31,8 +31,8 @@ Read the `.va` file before simulating. If any unsupported pattern is found, stop
 | `$fopen()`, `$fclose()`, `$fstrobe()`, `$fwrite()`, `$fdisplay()` | ✅ |
 | `$display`, `$strobe`, `$random`, `$dist_uniform()`, `$rdist_normal()` | ✅ |
 | Math: `abs` `sqrt` `exp` `ln` `log` `pow` `sin` `cos` `floor` `ceil` `min` `max` | ✅ |
-| `I(...) <+`, `q(...) <+`, `ddt(...)`, `idt(...)` | ❌ |
-| AC/DC analysis, subcircuit hierarchy, transistors | ❌ |
+| `I(...) <+`, `q(...) <+`, `ddt(...)`, `idt(...)` | requires KCL/KVL analog solver — use ngspice/Xyce |
+| AC/DC analysis, subcircuit hierarchy, transistors | requires KCL/KVL analog solver — use ngspice/Xyce |
 
 ## Install
 
