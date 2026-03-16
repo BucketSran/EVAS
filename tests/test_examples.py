@@ -159,7 +159,8 @@ def test_ramp_gen(tmp_path):
 
 
 def test_dwa_ptr_gen(tmp_path):
-    _run_validate(tmp_path, "dwa_ptr_gen/tb_dwa_ptr_gen.scs", "validate_csv", "dwa_ptr_gen")
+    _run_validate(tmp_path, "dwa_ptr_gen/tb_dwa_ptr_gen.scs", "validate_csv", "dwa_ptr_gen",
+                  "validate_dwa_ptr_gen.py")
 
 
 def test_dwa_ptr_gen_no_overlap(tmp_path):
