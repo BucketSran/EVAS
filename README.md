@@ -12,6 +12,8 @@ Event-driven. No C compiler, no ngspice, no KCL/KVL solver.
 
 ---
 
+> **If you're a human** — see the full docs at [evas.tokenzhang.com](https://evas.tokenzhang.com) ([中文](https://evas.tokenzhang.com/zh/)).
+>
 > **If you're an AI agent** — load `skills/evas-sim/SKILL.md` (or copy the `skills/evas-sim/`
 > folder into your skills directory). It contains the full compatibility table, CLI reference,
 > output format, and common failure modes — everything you need to write and debug EVAS
