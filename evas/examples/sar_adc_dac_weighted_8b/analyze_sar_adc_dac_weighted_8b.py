@@ -88,9 +88,9 @@ def analyze(out_dir: Path = _DEFAULT_OUT) -> None:
     vth    = VDD / 2
     rising = np.where((clks[:-1] < vth) & (clks[1:] >= vth))[0] + 1
     t_samp      = t_us[rising]
-    vin_sh_samp = vin_sh[rising]
+    vin_sh_samp = vin_sh[rising]  # noqa: F841
     vout_samp   = vout[rising]
-    code_samp   = code[rising]
+    code_samp   = code[rising]  # noqa: F841
     post_samp   = t_samp > T_PLOT_US
 
     post  = t_us > T_PLOT_US
