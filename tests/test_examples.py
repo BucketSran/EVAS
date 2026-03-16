@@ -43,7 +43,7 @@ def _load_validate(tb_dir_name: str, validate_name: str = None):
             spec.loader.exec_module(mod)
             return mod
         return None
-    candidates = list((EXAMPLES / tb_dir_name).glob("validate_*.py"))
+    candidates = sorted((EXAMPLES / tb_dir_name).glob("validate_*.py"))
     if candidates:
         spec = importlib.util.spec_from_file_location("_validate", candidates[0])
         mod = importlib.util.module_from_spec(spec)
