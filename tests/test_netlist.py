@@ -96,6 +96,8 @@ REAL_NETLIST = textwrap.dedent(r"""
     designParamVals info what=parameters where=rawfile
     primitives info what=primitives where=rawfile
     subckts info what=subckts where=rawfile
+    save DOUT\<9\> DOUT\<8\> DOUT\<7\> DOUT\<6\> DOUT\<5\> DOUT\<4\> DOUT\<3\> \
+        DOUT\<2\> DOUT\<1\> DOUT\<0\> clk_i VDD VSS
     saveOptions options save=allpub
     ahdl_include "/home/zhangz/TSMC28N/2026_TISAR/adc_10b/veriloga/veriloga.va"
 """)
@@ -163,6 +165,15 @@ class TestParseSpectreRealNetlist:
         i3 = netlist.instances[0]
         # VDD VSS vin_i clk_i + 10 DOUT bits
         assert len(i3.nodes) == 14
+
+    def test_save_signals_normalized(self, netlist):
+        """save DOUT\\<9\\> ... must be stored as DOUT<9> — no backslashes."""
+        assert len(netlist.save_signals) == 13  # 10 DOUT + clk_i + VDD + VSS
+        for sig in netlist.save_signals:
+            assert "\\" not in sig, f"Signal {sig!r} still contains backslash"
+        assert "DOUT<9>" in netlist.save_signals
+        assert "DOUT<0>" in netlist.save_signals
+        assert "clk_i" in netlist.save_signals
 
 
 # ===========================================================================

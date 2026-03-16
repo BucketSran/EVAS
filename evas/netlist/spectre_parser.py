@@ -449,7 +449,7 @@ def parse_spectre(filepath: str) -> SpectreNetlist:
         if low.startswith('save'):
             parts = line.split()
             for sig in parts[1:]:
-                sig = sig.strip()
+                sig = _normalize_node_name(sig.strip())
                 if not sig or sig.startswith('options'):
                     continue
                 if ':' in sig:
