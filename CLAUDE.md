@@ -23,7 +23,7 @@
 
 ## Docs
 
-- Two Sphinx docs: `docs_zh/` (Chinese, at `/zh/`) and `docs_en/` (English, at root).
+- Sphinx docs: `docs_en/` (English only, deployed at root).
 - Custom CSS: Apple Developer Documentation aesthetic — SF Pro fonts, `#0071e3` blue, white/charcoal.
 - busuanzi CDN: `https://cdn.bootcdn.net/ajax/libs/busuanzi/2.3.0/bsz.pure.mini.js`.
 - CI: `.github/workflows/docs.yml` deploys to `evas.tokenzhang.com` on push to `main`.

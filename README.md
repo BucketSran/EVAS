@@ -13,7 +13,7 @@ Event-driven. No C compiler, no ngspice, no KCL/KVL solver.
 
 > **If you're a human** — see the full docs at 
 
-📖 **Docs:** [evas.tokenzhang.com](https://evas.tokenzhang.com) &nbsp;|&nbsp; [中文](https://evas.tokenzhang.com/zh/)
+📖 **Docs:** [evas.tokenzhang.com](https://evas.tokenzhang.com)
 
 
 > **If you're an AI agent** — load `skills/evas-sim/SKILL.md` (or copy the `skills/evas-sim/`

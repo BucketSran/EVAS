@@ -28,11 +28,7 @@ html_theme_options = {
     "source_repository": "https://github.com/Arcadia-1/EVAS/",
     "source_branch": "main",
     "source_directory": "docs_en/",
-    "announcement": (
-        "📖 This page is in English. "
-        "<a href='/zh/'>切换到中文版 / Switch to Chinese</a>"
-    ),
-    "footer_icons": [
+"footer_icons": [
         {
             "name": "GitHub",
             "url": "https://github.com/Arcadia-1/EVAS",

@@ -73,13 +73,13 @@ def validate_csv(out_dir=None):
         print("FAIL: dout_code has non-integer values")
         failures += 1
 
-    # 截断型 ADC：采样时刻误差应在 (-LSB, 0]，|误差| < 1 LSB
-    # 用 code×VSTEP 代替 vout，避免 DAC transition 延迟引入的误差
+    # Truncating ADC: quantisation error at sample instants must be in (-LSB, 0], |error| < 1 LSB
+    # Use code×VSTEP instead of vout to avoid error introduced by DAC transition delay
     code_int = np.round(code).astype(int)
     sample_mask = np.concatenate(([True], np.diff(code_int) != 0))
     vin_s  = vin[sample_mask]
     code_s = code_int[sample_mask]
-    q_err  = code_s * VSTEP - vin_s   # 截断型：应在 (-LSB, 0]
+    q_err  = code_s * VSTEP - vin_s   # truncating ADC: should be in (-LSB, 0]
     if q_err.max() > 1e-6:
         print(f"FAIL: q_error > 0 at sample instants (max = {q_err.max()*1e3:.2f} mV), expected truncation ≤ 0")
         failures += 1

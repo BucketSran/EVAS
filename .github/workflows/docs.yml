@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   build-and-deploy:
-    name: Build and deploy bilingual Sphinx docs
+    name: Build and deploy Sphinx docs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,13 +18,8 @@ jobs:
           python-version: "3.12"
       - run: pip install -e ".[docs]"
 
-      # Build English docs → root
       - name: Build English docs
         run: sphinx-build -b html docs_en/ docs_en/_build/html
-
-      # Build Chinese docs → /zh/ subdirectory
-      - name: Build Chinese docs
-        run: sphinx-build -b html docs_zh/ docs_en/_build/html/zh
 
       - uses: peaceiris/actions-gh-pages@v4
         with:
