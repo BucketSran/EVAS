@@ -309,3 +309,59 @@ class TestAddSpectreSourceDegenerateCases:
         sim = self._sim()
         warns = _add_spectre_source(sim, src, "0")
         assert warns == []
+
+
+# ===========================================================================
+# save / PWL regressions
+# ===========================================================================
+
+class TestNetlistRegressions:
+
+    def test_save_bus_range_is_expanded(self, tmp_path):
+        scs = tmp_path / "tb_bus_save.scs"
+        scs.write_text(textwrap.dedent(r"""\
+            save vin_i:3f clk_i DOUT\<9\>:0
+        """))
+
+        netlist = parse_spectre(str(scs))
+
+        assert netlist.save_signals == [
+            "vin_i", "clk_i",
+            "DOUT<9>", "DOUT<8>", "DOUT<7>", "DOUT<6>", "DOUT<5>",
+            "DOUT<4>", "DOUT<3>", "DOUT<2>", "DOUT<1>", "DOUT<0>",
+        ]
+        assert netlist.save_formats["vin_i"] == "3f"
+
+    def test_multiline_pwl_wave_is_joined_and_parsed(self, tmp_path):
+        scs = tmp_path / "tb_multiline_pwl.scs"
+        scs.write_text(textwrap.dedent("""\
+            VIN (vin_i 0) vsource type=pwl wave=[
+                0      0.0
+                20.48u 1.0
+            ]
+        """))
+
+        netlist = parse_spectre(str(scs))
+        source = netlist.sources[0]
+
+        assert source.source_type == "pwl"
+        assert source.params["wave"] == pytest.approx([0.0, 0.0, 20.48e-6, 1.0])
+
+    def test_invalid_empty_pwl_reports_error_instead_of_crashing(self, tmp_path):
+        scs = tmp_path / "tb_bad_pwl.scs"
+        log_path = tmp_path / "evas.log"
+        scs.write_text(textwrap.dedent("""\
+            VIN (vin_i 0) vsource type=pwl wave=[
+            ]
+            tran tran stop=1u
+        """))
+
+        from evas.netlist.runner import evas_simulate
+
+        ok = evas_simulate(
+            str(scs),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+        assert ok is False
+        assert "ERROR: Invalid source VIN" in log_path.read_text()

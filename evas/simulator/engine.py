@@ -429,6 +429,11 @@ def sine(offset, amplitude, freq, phase=0.0):
 
 def pwl(times, values):
     """Create a piecewise-linear waveform."""
+    if not times or not values:
+        raise ValueError("PWL waveform requires at least one time/value pair")
+    if len(times) != len(values):
+        raise ValueError("PWL waveform times and values must have the same length")
+
     sorted_t = sorted(set(times))
 
     def wfn(t):

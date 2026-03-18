@@ -269,9 +269,10 @@ def evaluate_expr(expr: str, variables: Dict[str, float]) -> float:
 # ---------------------------------------------------------------------------
 
 def _preprocess_lines(raw_lines: List[str]) -> List[str]:
-    """Strip comments, handle \\ continuation, return clean lines."""
+    """Strip comments, handle \\ continuation and bracket blocks, return clean lines."""
     result = []
     continuation = ''
+    bracket_depth = 0
 
     for raw in raw_lines:
         # Strip trailing whitespace
@@ -292,14 +293,38 @@ def _preprocess_lines(raw_lines: List[str]) -> List[str]:
                     line = line[:i].rstrip()
                     break
 
+        continued = line.endswith('\\')
+        if continued:
+            line = line[:-1].rstrip()
+
+        in_quote = False
+        quote_char = None
+        for ch in line:
+            if in_quote:
+                if ch == quote_char:
+                    in_quote = False
+                continue
+            if ch in ('"', "'"):
+                in_quote = True
+                quote_char = ch
+                continue
+            if ch == '[':
+                bracket_depth += 1
+            elif ch == ']':
+                bracket_depth -= 1
+
         # Handle continuation
-        if line.endswith('\\'):
-            continuation += line[:-1].rstrip() + ' '
+        if continued:
+            continuation += line + ' '
             continue
 
         if continuation:
             line = continuation + line.lstrip()
             continuation = ''
+
+        if bracket_depth > 0:
+            continuation = line.rstrip() + ' '
+            continue
 
         stripped = line.strip()
         if stripped:
@@ -449,15 +474,10 @@ def parse_spectre(filepath: str) -> SpectreNetlist:
         if low.startswith('save'):
             parts = line.split()
             for sig in parts[1:]:
-                sig = _normalize_node_name(sig.strip())
-                if not sig or sig.startswith('options'):
-                    continue
-                if ':' in sig:
-                    name, fmt = sig.split(':', 1)
+                for name, fmt in _expand_save_signal(sig):
                     netlist.save_signals.append(name)
-                    netlist.save_formats[name] = fmt
-                else:
-                    netlist.save_signals.append(sig)
+                    if fmt is not None:
+                        netlist.save_formats[name] = fmt
             idx += 1
             continue
 
@@ -544,6 +564,27 @@ def _normalize_node_name(name: str) -> str:
     return name.replace('\\<', '<').replace('\\>', '>')
 
 
+def _expand_save_signal(token: str) -> List[Tuple[str, Optional[str]]]:
+    """Expand one save token into [(signal, format), ...]."""
+    token = _normalize_node_name(token.strip())
+    if not token or token.startswith('options'):
+        return []
+
+    bus_range = re.fullmatch(r'(.+?<)(-?\d+)(>):(-?\d+)', token)
+    if bus_range:
+        prefix, hi_s, suffix, lo_s = bus_range.groups()
+        hi = int(hi_s)
+        lo = int(lo_s)
+        step = -1 if hi >= lo else 1
+        return [(f"{prefix}{idx}{suffix}", None) for idx in range(hi, lo + step, step)]
+
+    if ':' in token:
+        name, fmt = token.split(':', 1)
+        return [(name, fmt)]
+
+    return [(token, None)]
+
+
 def _extract_nodes(line: str) -> Tuple[str, List[str], str]:
     """Extract (name, nodes, remainder) from a line like 'Vname (n1 n2) rest...'
 
@@ -608,9 +649,8 @@ def _parse_vsource(line: str, netlist: SpectreNetlist,
                 try:
                     val = evaluate_expr(tok, variables)
                 except (ValueError, ZeroDivisionError):
-                    val = None
-            if val is not None:
-                wave_vals.append(val)
+                    raise ValueError(f"Invalid PWL wave token {tok!r} in source {name}")
+            wave_vals.append(val)
         params['wave'] = wave_vals
 
     src = _build_source(name, node_pos, node_neg, params)

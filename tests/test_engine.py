@@ -9,6 +9,7 @@ Covers:
   - CompiledModel    (base-class helpers)
 """
 import math
+import re
 import pytest
 
 from evas.simulator.engine import (
@@ -312,6 +313,14 @@ class TestPwl:
     def test_next_breakpoint_past_last_knot_is_none(self):
         fn = self._make()
         assert fn._next_breakpoint(10e-9) is None
+
+    def test_empty_wave_raises_clear_error(self):
+        with pytest.raises(ValueError, match="at least one time/value pair"):
+            pwl([], [])
+
+    def test_mismatched_lengths_raise_clear_error(self):
+        with pytest.raises(ValueError, match=re.escape("same length")):
+            pwl([0.0], [0.0, 1.0])
 
 
 class TestRamp:

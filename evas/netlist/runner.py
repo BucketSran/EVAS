@@ -137,6 +137,10 @@ def _add_spectre_source(sim: Simulator, src: SpectreSource,
             vals = [v for v in vals if v is not None]
         else:
             vals = []
+        if not vals:
+            raise ValueError(f"{src.name}: PWL wave must contain at least one time/value pair")
+        if len(vals) % 2 != 0:
+            raise ValueError(f"{src.name}: PWL wave must contain an even number of values")
         times = vals[0::2]
         values = vals[1::2]
         sim.add_source(node, pwl(times, values))
@@ -414,10 +418,21 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     sim = Simulator()
 
     for src in netlist.sources:
-        src_warnings = _add_spectre_source(sim, src, netlist.ground)
+        try:
+            src_warnings = _add_spectre_source(sim, src, netlist.ground)
+        except ValueError as e:
+            log.write(f"ERROR: Invalid source {src.name}: {e}")
+            errors += 1
+            continue
         for w in src_warnings:
             log.write(f"WARNING: {w}")
             warnings += 1
+
+    if errors > 0:
+        log.write(f"\nevas completes with {errors} errors, {warnings} warnings.")
+        if log_file:
+            log_file.close()
+        return False
 
     # 4. Instantiate models
     instance_counts: Dict[str, int] = {}
