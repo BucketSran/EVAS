@@ -24,6 +24,7 @@ from evas.simulator.engine import (
     sine,
 )
 from evas.simulator.backend import CompiledModel
+from evas.simulator.backend import CompilationError
 
 
 # ===========================================================================
@@ -1054,3 +1055,57 @@ endmodule
         nv["INP"] = 1.0
         top.evaluate(nv, 1e-9)
         assert nv["OUT"] == pytest.approx(0.0)
+
+
+class TestSpectreRestrictedOperators:
+    def test_conditional_idtmod_is_rejected(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module bad_idt(out, rst, vss);
+output out;
+electrical out;
+input rst;
+electrical rst;
+inout vss;
+electrical vss;
+real x;
+analog begin
+    if (V(rst, vss) > 0.5)
+        x = idtmod(1.0, 0.0, 1.0);
+    else
+        x = 0.0;
+    V(out, vss) <+ x;
+end
+endmodule
+"""
+        mod = parse(src)
+        with pytest.raises(CompilationError, match="idtmod"):
+            compile_module(mod)
+
+    def test_conditional_transition_is_rejected(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module bad_trans(out, sel, vss);
+output out;
+electrical out;
+input sel;
+electrical sel;
+inout vss;
+electrical vss;
+analog begin
+    if (V(sel, vss) > 0.5)
+        V(out, vss) <+ transition(1.0, 0.0, 1p, 1p);
+    else
+        V(out, vss) <+ 0.0;
+end
+endmodule
+"""
+        mod = parse(src)
+        with pytest.raises(CompilationError, match="transition"):
+            compile_module(mod)

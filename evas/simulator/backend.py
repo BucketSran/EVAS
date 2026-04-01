@@ -265,6 +265,8 @@ class _ModuleCompiler:
         # Build the class dynamically
         mod = self.module
 
+        self._validate_spectre_operator_rules()
+
         # Collect info (port lists reserved for future use)
 
         # Build arrays info
@@ -428,6 +430,108 @@ class _ModuleCompiler:
         cls._uses_idtmod = self._uses_idtmod
         cls._generated_code = code  # Store for debugging
         return cls
+
+    def _validate_spectre_operator_rules(self) -> None:
+        """Reject patterns that Spectre VACOMP does not allow."""
+        if not self.module.analog_block:
+            return
+        self._check_stmt_for_restricted_operators(
+            self.module.analog_block.body,
+            conditional_depth=0,
+        )
+
+    def _check_stmt_for_restricted_operators(self, stmt, conditional_depth: int) -> None:
+        if isinstance(stmt, Block):
+            for child in stmt.statements:
+                self._check_stmt_for_restricted_operators(child, conditional_depth)
+            return
+
+        if isinstance(stmt, IfStatement):
+            self._check_stmt_for_restricted_operators(stmt.then_body, conditional_depth + 1)
+            if stmt.else_body is not None:
+                self._check_stmt_for_restricted_operators(stmt.else_body, conditional_depth + 1)
+            return
+
+        if isinstance(stmt, CaseStatement):
+            for item in stmt.items:
+                self._check_stmt_for_restricted_operators(item.body, conditional_depth + 1)
+            return
+
+        if isinstance(stmt, EventStatement):
+            self._check_stmt_for_restricted_operators(stmt.body, conditional_depth)
+            return
+
+        if isinstance(stmt, ForStatement):
+            self._check_stmt_for_restricted_operators(stmt.body, conditional_depth)
+            return
+
+        if conditional_depth <= 0:
+            return
+
+        restricted = self._collect_restricted_calls_from_stmt(stmt)
+        if restricted:
+            ops = ', '.join(sorted(restricted))
+            raise CompilationError(
+                f"Module {self.module.name} uses Spectre-restricted operator(s) "
+                f"{ops} inside a conditionally executed statement. "
+                f"Move these operators out of if/case branches."
+            )
+
+    def _collect_restricted_calls_from_stmt(self, stmt) -> set:
+        restricted = set()
+        if isinstance(stmt, Assignment):
+            restricted |= self._collect_restricted_calls_from_expr(stmt.value)
+        elif isinstance(stmt, Contribution):
+            restricted |= self._collect_restricted_calls_from_expr(stmt.expr)
+        elif isinstance(stmt, SystemTask):
+            for arg in stmt.args:
+                restricted |= self._collect_restricted_calls_from_expr(arg)
+        return restricted
+
+    def _collect_restricted_calls_from_expr(self, expr: Expr) -> set:
+        restricted = set()
+
+        if isinstance(expr, FunctionCall):
+            if expr.name in ('idtmod', 'transition'):
+                restricted.add(expr.name)
+            for arg in expr.args:
+                restricted |= self._collect_restricted_calls_from_expr(arg)
+            return restricted
+
+        if isinstance(expr, BinaryExpr):
+            restricted |= self._collect_restricted_calls_from_expr(expr.left)
+            restricted |= self._collect_restricted_calls_from_expr(expr.right)
+            return restricted
+
+        if isinstance(expr, UnaryExpr):
+            return self._collect_restricted_calls_from_expr(expr.operand)
+
+        if isinstance(expr, TernaryExpr):
+            restricted |= self._collect_restricted_calls_from_expr(expr.cond)
+            restricted |= self._collect_restricted_calls_from_expr(expr.true_expr)
+            restricted |= self._collect_restricted_calls_from_expr(expr.false_expr)
+            return restricted
+
+        if isinstance(expr, ArrayAccess):
+            return self._collect_restricted_calls_from_expr(expr.index)
+
+        if isinstance(expr, BranchAccess):
+            if expr.node1_index is not None:
+                restricted |= self._collect_restricted_calls_from_expr(expr.node1_index)
+            if expr.node1_index2 is not None:
+                restricted |= self._collect_restricted_calls_from_expr(expr.node1_index2)
+            if expr.node2_index is not None:
+                restricted |= self._collect_restricted_calls_from_expr(expr.node2_index)
+            if expr.node2_index2 is not None:
+                restricted |= self._collect_restricted_calls_from_expr(expr.node2_index2)
+            return restricted
+
+        if isinstance(expr, MethodCall):
+            for arg in expr.args:
+                restricted |= self._collect_restricted_calls_from_expr(arg)
+            return restricted
+
+        return restricted
 
     def _is_initial_step_event(self, event) -> bool:
         """Check if event includes initial_step."""
