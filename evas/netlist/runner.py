@@ -408,6 +408,11 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
             log.write(f"WARNING ({module.name}): {w}")
             warnings += 1
 
+    # Provide compiled-module registry for hierarchical Verilog-A instances.
+    # Each class can instantiate child modules from this table at runtime.
+    for _mname, (_cls, _module) in models_by_name.items():
+        _cls._module_registry = models_by_name
+
     if errors > 0:
         log.write(f"\nevas completes with {errors} errors, {warnings} warnings.")
         if log_file:

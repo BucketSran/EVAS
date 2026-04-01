@@ -24,6 +24,8 @@ class CompilationError(Exception):
 
 class CompiledModel:
     """Base class for compiled Verilog-A models."""
+    _module_registry: Dict[str, Any] = {}
+    _module_ports: List[str] = []
 
     def __init__(self):
         self.params: Dict[str, Any] = {}
@@ -41,8 +43,12 @@ class CompiledModel:
         self._temperature: float = 27.0  # degrees Celsius (expressions convert to Kelvin)
         self.timer_states: Dict[str, float] = {}  # key → next_fire_time
         self._bound_step: float = 0.0  # $bound_step limit (0 = no limit)
+        # Lazy-allocated integrator states (only used when idt/idtmod appears)
+        self._idt_states: Optional[Dict[str, Dict[str, float]]] = None
         self._file_handles: Dict[int, Any] = {}  # fd → file object
         self._next_fd: int = 1
+        self._child_models: List["CompiledModel"] = []
+        self._parent_model: Optional["CompiledModel"] = None
 
     def initial_step(self, node_voltages: Dict[str, float], time: float):
         pass
@@ -71,6 +77,10 @@ class CompiledModel:
         for nf in self.timer_states.values():
             if nf > time:
                 bps.append(nf)
+        for child in self._child_models:
+            bp = child.next_breakpoint(time)
+            if bp is not None:
+                bps.append(bp)
         return min(bps) if bps else None
 
     def _check_timer(self, key: str, time: float, period: float) -> bool:
@@ -86,6 +96,9 @@ class CompiledModel:
         """Get voltage of a node, resolving through node_map."""
         # Check if it's a mapped external node
         ext = self.node_map.get(node, node)
+        if isinstance(ext, str) and ext.startswith('@parent:') and self._parent_model is not None:
+            pnode = ext[len('@parent:'):]
+            ext = self._parent_model.node_map.get(pnode, pnode)
         if ext in node_voltages:
             return node_voltages[ext]
         # Check output nodes (self-driven)
@@ -97,6 +110,9 @@ class CompiledModel:
         """Set an output node voltage."""
         self.output_nodes[node] = value
         ext = self.node_map.get(node, node)
+        if isinstance(ext, str) and ext.startswith('@parent:') and self._parent_model is not None:
+            pnode = ext[len('@parent:'):]
+            ext = self._parent_model.node_map.get(pnode, pnode)
         node_voltages[ext] = value
 
     def _transition(self, key: str, time: float, target: float,
@@ -128,6 +144,53 @@ class CompiledModel:
         if fired:
             self._event_time = self.above_detectors[key].t_cross
         return fired
+
+    def _idtmod(self, key: str, time: float, x: float,
+                ic: float = 0.0, mod: float = 1.0) -> float:
+        """
+        Minimal idtmod integrator with trapezoidal update.
+
+        idtmod(x, ic, mod) ≈ ic + ∫x dt wrapped into [0, mod).
+        Notes:
+        - Accuracy depends on external timestep control ($bound_step / tran step).
+        - Multiple evaluations at the same time do not re-integrate.
+        """
+        if self._idt_states is None:
+            self._idt_states = {}
+
+        if key not in self._idt_states:
+            self._idt_states[key] = {
+                "y": float(ic),
+                "last_t": float(time),
+                "last_x": float(x),
+                "last_eval_t": float(time),
+            }
+            y0 = float(ic)
+            if mod is not None and float(mod) != 0.0:
+                m = abs(float(mod))
+                y0 = y0 % m
+                self._idt_states[key]["y"] = y0
+            return y0
+
+        st = self._idt_states[key]
+        if time == st["last_eval_t"]:
+            return st["y"]
+
+        dt = float(time) - float(st["last_t"])
+        if dt > 0.0:
+            st["y"] += 0.5 * (float(x) + st["last_x"]) * dt
+            if mod is not None and float(mod) != 0.0:
+                m = abs(float(mod))
+                st["y"] = st["y"] % m
+            st["last_t"] = float(time)
+            st["last_x"] = float(x)
+        elif dt < 0.0:
+            # Time rollback (e.g., restart): re-seed from current value.
+            st["last_t"] = float(time)
+            st["last_x"] = float(x)
+
+        st["last_eval_t"] = float(time)
+        return st["y"]
 
     def _array_get(self, name: str, idx: int) -> Any:
         if name in self.arrays and idx in self.arrays[name]:
@@ -169,6 +232,8 @@ class CompiledModel:
         for f in self._file_handles.values():
             f.close()
         self._file_handles.clear()
+        for child in self._child_models:
+            child._cleanup_files()
 
 
 def compile_module(module: Module, default_transition: float = None) -> type:
@@ -190,6 +255,8 @@ class _ModuleCompiler:
         self._cross_counter = 0
         self._above_counter = 0
         self._timer_counter = 0
+        self._idt_counter = 0
+        self._uses_idtmod = False
         self._indent = 2
         self._in_loop_var = None  # track if we're inside a for loop
 
@@ -217,6 +284,7 @@ class _ModuleCompiler:
         # Generate code for the class
         lines = []
         lines.append(f"class {mod.name}_Model(CompiledModel):")
+        lines.append(f"    _module_ports = {mod.ports!r}")
         lines.append("    def __init__(self):")
         lines.append("        super().__init__()")
         lines.append(f"        self.default_transition = {self.default_transition}")
@@ -248,12 +316,41 @@ class _ModuleCompiler:
                 for idx in range(lo_idx, hi_idx + 1):
                     lines.append(f"        self.arrays[{name!r}][{idx}] = 0")
 
+        # Initialize hierarchical child instances.
+        for inst in mod.instances:
+            child_var = f"_child_{inst.instance_name}"
+            lines.append(f"        _entry = self._module_registry.get({inst.module_name!r})")
+            lines.append(f"        if _entry is None:")
+            lines.append(f"            raise CompilationError('Unknown child module: {inst.module_name} in {mod.name}.{inst.instance_name}')")
+            lines.append(f"        _child_cls, _child_mod = _entry")
+            lines.append(f"        {child_var} = _child_cls()")
+            lines.append(f"        {child_var}._parent_model = self")
+            lines.append(f"        {child_var}.node_map = {{}}")
+            # Positional and named port connections.
+            for ci, c in enumerate(inst.connections):
+                if c.port_name is not None:
+                    port_expr = repr(c.port_name)
+                else:
+                    port_expr = f"_child_mod.ports[{ci}] if {ci} < len(_child_mod.ports) else None"
+                target = self._compile_instance_target(c.expr)
+                lines.append(f"        _pname = {port_expr!s}")
+                lines.append(f"        if _pname is not None:")
+                lines.append(f"            _target = {target}")
+                lines.append(f"            if _target in self._module_ports:")
+                lines.append(f"                _mapped = f'@parent:{{_target}}'")
+                lines.append(f"            else:")
+                lines.append(f"                _mapped = f'__{inst.instance_name}.{{_target}}'")
+                lines.append(f"            {child_var}.node_map[_pname] = _mapped")
+            lines.append(f"        self._child_models.append({child_var})")
+
         # Generate initial_step method
         lines.append("")
         lines.append("    def initial_step(self, nv, time):")
         lines.append("        if self._initial_step_done:")
         lines.append("            return")
         lines.append("        self._initial_step_done = True")
+        lines.append("        for _ch in self._child_models:")
+        lines.append("            _ch.initial_step(nv, time)")
 
         # Find and compile initial_step event blocks
         if mod.analog_block:
@@ -270,15 +367,27 @@ class _ModuleCompiler:
         self._cross_counter = 0
         self._above_counter = 0
         self._timer_counter = 0
+        self._idt_counter = 0
+        self._uses_idtmod = False
 
         lines.append("")
         lines.append("    def evaluate(self, nv, time):")
         lines.append("        self._event_time = time")
+        lines.append("        self._bound_step = 0.0")
+        lines.append("        for _ch in self._child_models:")
+        lines.append("            _ch.evaluate(nv, time)")
 
         if mod.analog_block:
             for stmt in mod.analog_block.body.statements:
                 stmt_lines = self._compile_statement(stmt, 2)
                 lines.extend(stmt_lines)
+
+        lines.append("        for _ch in self._child_models:")
+        lines.append("            _ch.evaluate(nv, time)")
+        lines.append("        for _ch in self._child_models:")
+        lines.append("            _bs = _ch._bound_step")
+        lines.append("            if _bs > 0.0 and (self._bound_step <= 0.0 or _bs < self._bound_step):")
+        lines.append("                self._bound_step = _bs")
 
         lines.append("        pass")
 
@@ -291,6 +400,8 @@ class _ModuleCompiler:
                     if self._is_final_step_event(stmt.event):
                         body_lines = self._compile_statement(stmt.body, 2)
                         lines.extend(body_lines)
+        lines.append("        for _ch in self._child_models:")
+        lines.append("            _ch.final_step(nv, time)")
         lines.append("        pass")
 
         # Compile the class
@@ -299,6 +410,7 @@ class _ModuleCompiler:
         # Create namespace with required imports
         namespace = {
             'CompiledModel': CompiledModel,
+            'CompilationError': CompilationError,
             'math': math,
             'random': random,
             'pow': pow,
@@ -315,6 +427,7 @@ class _ModuleCompiler:
             )
 
         cls = namespace[f'{mod.name}_Model']
+        cls._uses_idtmod = self._uses_idtmod
         cls._generated_code = code  # Store for debugging
         return cls
 
@@ -689,6 +802,16 @@ class _ModuleCompiler:
             return f"self._get_voltage(f'{node}[{{int({idx})}}]', nv)"
         return f"self._get_voltage({node!r}, nv)"
 
+    def _compile_instance_target(self, expr: Expr) -> str:
+        """Compile instance connection target into a node-name string expression."""
+        if isinstance(expr, Identifier):
+            return repr(expr.name)
+        if isinstance(expr, ArrayAccess):
+            idx = self._compile_expr(expr.index)
+            return f"f'{expr.name}[{{int({idx})}}]'"
+        # Fallback: allow unusual connection expressions as stringified value.
+        return f"str({self._compile_expr(expr)})"
+
     def _compile_function_call(self, expr: FunctionCall) -> str:
         name = expr.name
         args = [self._compile_expr(a) for a in expr.args]
@@ -705,8 +828,18 @@ class _ModuleCompiler:
                 return f"self._transition(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {target}, {delay}, {rise}, {fall})"
             return f"self._transition({base_key!r}, time, {target}, {delay}, {rise}, {fall})"
 
+        if name == 'idtmod':
+            key = f"idtmod_{self._idt_counter}"
+            self._idt_counter += 1
+            self._uses_idtmod = True
+            x = args[0] if len(args) > 0 else "0.0"
+            ic = args[1] if len(args) > 1 else "0.0"
+            mod = args[2] if len(args) > 2 else "1.0"
+            return f"self._idtmod({key!r}, time, {x}, {ic}, {mod})"
+
         if name == 'cross':
             # cross() as a function (in some contexts)
+            base_key = f"cross_fn_{self._cross_counter}"
             self._cross_counter += 1
             val = args[0]
             direction = args[1] if len(args) > 1 else "0"

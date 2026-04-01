@@ -531,6 +531,24 @@ class TestCompiledModelHelpers:
         bp = self.model.next_breakpoint(0.0)
         assert bp == pytest.approx(10e-9)
 
+    def test_idtmod_trapezoid_and_wrap(self):
+        y0 = self.model._idtmod("i0", time=0.0, x=2.0, ic=0.0, mod=1.0)
+        assert y0 == pytest.approx(0.0)
+
+        # +2 * 0.1 = 0.2
+        y1 = self.model._idtmod("i0", time=0.1, x=2.0, ic=0.0, mod=1.0)
+        assert y1 == pytest.approx(0.2)
+
+        # +2 * 0.5 = +1.0, wrapped by mod=1.0 -> back to 0.2
+        y2 = self.model._idtmod("i0", time=0.6, x=2.0, ic=0.0, mod=1.0)
+        assert y2 == pytest.approx(0.2)
+
+    def test_idtmod_same_time_no_double_integrate(self):
+        self.model._idtmod("i1", time=0.0, x=1.0, ic=0.0, mod=1.0)
+        y1 = self.model._idtmod("i1", time=1e-9, x=1.0, ic=0.0, mod=1.0)
+        y2 = self.model._idtmod("i1", time=1e-9, x=1.0, ic=0.0, mod=1.0)
+        assert y2 == pytest.approx(y1)
+
     def test_temperature_default(self):
         assert self.model._temperature == pytest.approx(27.0)
 
@@ -577,6 +595,41 @@ endmodule
         # At 50ns, timer should have fired at 10, 20, 30, 40, 50 → count=5
         final_val = result.signals["out"][-1]
         assert final_val == pytest.approx(5.0, abs=1.0)
+
+
+class TestIdtmodEvent:
+    """Smoke test for idtmod() compilation and runtime behavior."""
+
+    VA_SRC = """\
+`include "disciplines.vams"
+module idtmod_test(out);
+    output voltage out;
+    real f;
+    real ph;
+    analog begin
+        f = 1.0e9;
+        ph = idtmod(f, 0.0, 1.0);
+        V(out) <+ ph;
+    end
+endmodule
+"""
+
+    def test_idtmod_compiles_and_changes_over_time(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+        mod = parse(self.VA_SRC)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=2e-9, tstep=0.5e-9)
+
+        out = result.signals["out"]
+        assert out.max() > out.min()
+        assert out.min() >= -1e-12
+        assert out.max() <= 1.0 + 1e-12
 
 
 class TestFinalStep:
@@ -931,3 +984,73 @@ endmodule
         assert model.state.get("v00") == pytest.approx(0.0)
         # v01 check: dbus[1][1] = 1*2+1 = 3.0
         assert model.output_nodes.get("dbus[1][1]") == pytest.approx(3.0)
+
+
+class TestHierarchicalInstantiation:
+    VA_CHILD = """\
+`include "disciplines.vams"
+module child_inv(out, inp, vdd, vss);
+output out;
+electrical out;
+input inp;
+electrical inp;
+inout vdd, vss;
+electrical vdd, vss;
+analog begin
+    V(out, vss) <+ (V(inp, vss) > 0.5*V(vdd, vss) ? 0.0 : V(vdd, vss));
+end
+endmodule
+"""
+
+    VA_TOP = """\
+`include "disciplines.vams"
+module top_wrap(out, inp, vdd, vss);
+output out;
+electrical out;
+input inp;
+electrical inp;
+inout vdd, vss;
+electrical vdd, vss;
+child_inv u0 (
+    .out(out),
+    .inp(inp),
+    .vdd(vdd),
+    .vss(vss)
+);
+endmodule
+"""
+
+    def test_named_port_instance_parses(self):
+        from evas.compiler.parser import parse
+        mod = parse(self.VA_TOP)
+        assert len(mod.instances) == 1
+        inst = mod.instances[0]
+        assert inst.module_name == "child_inv"
+        assert inst.instance_name == "u0"
+        assert len(inst.connections) == 4
+        assert inst.connections[0].port_name == "out"
+
+    def test_parent_calls_child_evaluate(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        child_mod = parse(self.VA_CHILD)
+        top_mod = parse(self.VA_TOP)
+        ChildCls = compile_module(child_mod)
+        TopCls = compile_module(top_mod)
+        registry = {
+            "child_inv": (ChildCls, child_mod),
+            "top_wrap": (TopCls, top_mod),
+        }
+        ChildCls._module_registry = registry
+        TopCls._module_registry = registry
+
+        top = TopCls()
+        top.node_map = {"out": "OUT", "inp": "INP", "vdd": "VDD", "vss": "VSS"}
+        nv = {"INP": 0.0, "VDD": 1.0, "VSS": 0.0}
+        top.initial_step(nv, 0.0)
+        top.evaluate(nv, 0.0)
+        assert nv["OUT"] == pytest.approx(1.0)
+        nv["INP"] = 1.0
+        top.evaluate(nv, 1e-9)
+        assert nv["OUT"] == pytest.approx(0.0)
