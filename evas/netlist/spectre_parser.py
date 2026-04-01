@@ -56,6 +56,7 @@ class SpectreTran:
     name: str = 'tran'
     refine_factor: int = 16   # step divisor after a cross event
     refine_steps: int = 8     # number of refined steps after a cross event
+    errpreset: str = ''       # e.g. conservative/moderate/liberal
 
 
 @dataclass
@@ -95,6 +96,7 @@ class SpectreNetlist:
     subckts: List[SpectreSubckt] = field(default_factory=list)
     includes: List[SpectreInclude] = field(default_factory=list)
     tran: Optional[SpectreTran] = None
+    simulator_options: Dict[str, Any] = field(default_factory=dict)
     save_signals: List[str] = field(default_factory=list)
     save_formats: Dict[str, str] = field(default_factory=dict)  # sig -> fmt e.g. '6e', '10e', 'd'
     temp: float = 27.0
@@ -410,8 +412,14 @@ def parse_spectre(filepath: str) -> SpectreNetlist:
         line = lines[idx]
         low = line.lower().strip()
 
-        # Skip directives
-        if low.startswith('simulator'):
+        # simulatorOptions
+        if low.startswith('simulatoroptions'):
+            _parse_simulator_options(line, netlist, evaluator_vars)
+            idx += 1
+            continue
+
+        # Skip simulator language directive
+        if low.startswith('simulator '):
             idx += 1
             continue
 
@@ -441,12 +449,6 @@ def parse_spectre(filepath: str) -> SpectreNetlist:
             rest = line[len('ahdl_include'):].strip()
             path = rest.strip('"').strip("'")
             netlist.ahdl_includes.append(AhdlInclude(path=path))
-            idx += 1
-            continue
-
-        # simulatorOptions
-        if low.startswith('simulatoroptions') or low.startswith('simulatorOptions'):
-            _parse_simulator_options(line, netlist, evaluator_vars)
             idx += 1
             continue
 
@@ -517,8 +519,9 @@ def _parse_parameters(line: str, variables: Dict[str, float]):
 
 def _parse_simulator_options(line: str, netlist: SpectreNetlist,
                               variables: Dict[str, float]):
-    """Parse simulatorOptions — extract temp."""
+    """Parse simulatorOptions and keep numeric/text options."""
     params = _parse_named_params(line.split(), 2, variables)
+    netlist.simulator_options.update(params)
     if 'temp' in params:
         netlist.temp = float(params['temp'])
 
@@ -542,6 +545,7 @@ def _parse_tran(line: str, netlist: SpectreNetlist,
 
     refine_factor = int(params.get('refine_factor', 16))
     refine_steps  = int(params.get('refine_steps',  8))
+    errpreset = str(params.get('errpreset', ''))
 
     # Find analysis name (first token that's not a key=value)
     name = 'tran'
@@ -551,7 +555,8 @@ def _parse_tran(line: str, netlist: SpectreNetlist,
             break
 
     netlist.tran = SpectreTran(stop=float(stop), step=float(step), name=name,
-                               refine_factor=refine_factor, refine_steps=refine_steps)
+                               refine_factor=refine_factor, refine_steps=refine_steps,
+                               errpreset=errpreset)
 
 
 def _normalize_node_name(name: str) -> str:

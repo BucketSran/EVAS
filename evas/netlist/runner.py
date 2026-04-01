@@ -483,6 +483,26 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
 
     tstop = netlist.tran.stop
     tstep = netlist.tran.step
+    simopt = netlist.simulator_options or {}
+    reltol = float(simopt.get('reltol', 1e-3))
+    vabstol = float(simopt.get('vabstol', 1e-6))
+    iabstol = float(simopt.get('iabstol', 1e-12))
+    maxstep_opt = simopt.get('maxstep', None)
+    if maxstep_opt is not None:
+        try:
+            tstep = min(float(tstep), float(maxstep_opt))
+        except Exception:
+            pass
+
+    refine_factor = netlist.tran.refine_factor
+    refine_steps = netlist.tran.refine_steps
+    errpreset = str(netlist.tran.__dict__.get('errpreset', simopt.get('errpreset', ''))).lower()
+    if errpreset == 'conservative':
+        refine_factor = max(refine_factor, 32)
+        refine_steps = max(refine_steps, 16)
+    elif errpreset == 'liberal':
+        refine_factor = min(refine_factor, 8)
+        refine_steps = min(refine_steps, 4)
 
     log.write("")
     log.write("*****************************************************")
@@ -493,12 +513,19 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     log.write("    start = 0 s")
     log.write(f"    stop  = {_eng_format(tstop, 's')}")
     log.write(f"    step  = {_eng_format(tstep, 's')}")
+    log.write(f"    reltol = {reltol:g}")
+    log.write(f"    vabstol = {vabstol:g}")
+    log.write(f"    iabstol = {iabstol:g}")
+    log.write(f"    refine_factor = {refine_factor}")
+    log.write(f"    refine_steps  = {refine_steps}")
     log.write("")
 
     t_sim_start = time.time()
     result = sim.run(tstop, tstep=tstep,
-                     refine_factor=netlist.tran.refine_factor,
-                     refine_steps=netlist.tran.refine_steps)
+                     refine_factor=refine_factor,
+                     refine_steps=refine_steps,
+                     reltol=reltol,
+                     vabstol=vabstol)
 
     for pct in range(10, 101, 10):
         t_at = tstop * pct / 100.0

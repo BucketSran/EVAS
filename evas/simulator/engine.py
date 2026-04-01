@@ -258,18 +258,24 @@ class Simulator:
     def run(self, tstop: float, tstep: float = None,
             max_step: float = None,
             refine_factor: int = 16,
-            refine_steps: int = 8) -> SimResult:
+            refine_steps: int = 8,
+            reltol: float = 1e-3,
+            vabstol: float = 1e-6,
+            min_step: float = None) -> SimResult:
         """Run transient simulation with adaptive step control near cross events."""
         if tstep is None:
             tstep = tstop / 10000
         if max_step is None:
             max_step = tstep
+        if min_step is None:
+            min_step = tstep / 4096.0
 
         time = 0.0
         self.time_points = []
         self._step_sizes = []
         refine_steps_left = 0  # countdown of refined steps after cross
         refine_dt = tstep  # current refined step size
+        dynamic_step = tstep  # tolerance-driven adaptive step ceiling
 
         # Initialize node voltages
         for src in self.sources:
@@ -292,10 +298,10 @@ class Simulator:
         # Main simulation loop
         while time < tstop:
             if refine_steps_left > 0:
-                dt = min(refine_dt, tstop - time)
+                dt = min(refine_dt, dynamic_step, max_step, tstop - time)
                 refine_steps_left -= 1
             else:
-                dt = min(tstep, tstop - time)
+                dt = min(dynamic_step, tstep, max_step, tstop - time)
 
             # Check for breakpoints from sources (PWL knees, pulse edges)
             for src in self.sources:
@@ -318,7 +324,10 @@ class Simulator:
                 bs = model._bound_step
                 if bs > 0 and dt > bs:
                     dt = bs
+            if dt < min_step:
+                dt = min_step
 
+            prev_nv = dict(self.node_voltages)
             time += dt
 
             # Update source voltages
@@ -347,6 +356,24 @@ class Simulator:
             if cross_fired and refine_steps_left == 0 and dt > tstep / refine_factor:
                 refine_dt = dt / refine_factor
                 refine_steps_left = refine_steps
+
+            # Tolerance-guided dynamic step adaptation (voltage-domain heuristic).
+            # This is not full LTE/Newton control, but gives user-visible precision control.
+            err_ratio = 0.0
+            for node, vnew in self.node_voltages.items():
+                vold = prev_nv.get(node, vnew)
+                dv = abs(vnew - vold)
+                vref = max(abs(vnew), abs(vold))
+                tol = reltol * vref + vabstol
+                if tol > 0.0:
+                    er = dv / tol
+                    if er > err_ratio:
+                        err_ratio = er
+            if err_ratio > 1.0:
+                scale = min(4.0, max(1.2, math.sqrt(err_ratio)))
+                dynamic_step = max(min_step, dynamic_step / scale)
+            elif err_ratio < 0.2:
+                dynamic_step = min(tstep, dynamic_step * 1.15)
 
             self._record_point(time)
             self._step_sizes.append(dt)

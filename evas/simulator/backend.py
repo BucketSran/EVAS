@@ -383,8 +383,6 @@ class _ModuleCompiler:
                 lines.extend(stmt_lines)
 
         lines.append("        for _ch in self._child_models:")
-        lines.append("            _ch.evaluate(nv, time)")
-        lines.append("        for _ch in self._child_models:")
         lines.append("            _bs = _ch._bound_step")
         lines.append("            if _bs > 0.0 and (self._bound_step <= 0.0 or _bs < self._bound_step):")
         lines.append("                self._bound_step = _bs")
