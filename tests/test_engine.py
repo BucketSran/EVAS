@@ -1109,3 +1109,25 @@ endmodule
         mod = parse(src)
         with pytest.raises(CompilationError, match="transition"):
             compile_module(mod)
+
+    def test_transition_of_continuous_signal_is_rejected(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module bad_transition_continuous(out, vdd, vss);
+output out;
+electrical out;
+inout vdd, vss;
+electrical vdd, vss;
+real vh;
+analog begin
+    vh = V(vdd, vss);
+    V(out, vss) <+ transition(vh, 0.0, 1p, 1p);
+end
+endmodule
+"""
+        mod = parse(src)
+        with pytest.raises(CompilationError, match="piecewise constant"):
+            compile_module(mod)

@@ -435,10 +435,15 @@ class _ModuleCompiler:
         """Reject patterns that Spectre VACOMP does not allow."""
         if not self.module.analog_block:
             return
+        self._event_assigned_vars = set()
+        self._non_event_assigned_vars = set()
+        self._collect_assignment_contexts(self.module.analog_block.body, in_event=False)
+        self._continuous_vars = self._infer_continuous_vars(self.module.analog_block.body)
         self._check_stmt_for_restricted_operators(
             self.module.analog_block.body,
             conditional_depth=0,
         )
+        self._check_transition_targets(self.module.analog_block.body)
 
     def _check_stmt_for_restricted_operators(self, stmt, conditional_depth: int) -> None:
         if isinstance(stmt, Block):
@@ -532,6 +537,263 @@ class _ModuleCompiler:
             return restricted
 
         return restricted
+
+    def _infer_continuous_vars(self, stmt) -> set[str]:
+        continuous_vars = set()
+        changed = True
+        while changed:
+            changed = False
+            for target_name, value_expr in self._iter_assignments(stmt):
+                if target_name not in self._non_event_assigned_vars:
+                    continue
+                if self._expr_is_continuous(value_expr, continuous_vars) and target_name not in continuous_vars:
+                    continuous_vars.add(target_name)
+                    changed = True
+        return continuous_vars
+
+    def _collect_assignment_contexts(self, stmt, in_event: bool) -> None:
+        if isinstance(stmt, Block):
+            for child in stmt.statements:
+                self._collect_assignment_contexts(child, in_event)
+            return
+
+        if isinstance(stmt, EventStatement):
+            self._collect_assignment_contexts(stmt.body, True)
+            return
+
+        if isinstance(stmt, IfStatement):
+            self._collect_assignment_contexts(stmt.then_body, in_event)
+            if stmt.else_body is not None:
+                self._collect_assignment_contexts(stmt.else_body, in_event)
+            return
+
+        if isinstance(stmt, CaseStatement):
+            for item in stmt.items:
+                self._collect_assignment_contexts(item.body, in_event)
+            return
+
+        if isinstance(stmt, ForStatement):
+            self._collect_assignment_contexts(stmt.body, in_event)
+            return
+
+        if isinstance(stmt, Assignment):
+            target = stmt.target
+            if isinstance(target, Identifier):
+                name = target.name
+            elif isinstance(target, ArrayAccess):
+                name = target.name
+            else:
+                return
+            if in_event:
+                self._event_assigned_vars.add(name)
+            else:
+                self._non_event_assigned_vars.add(name)
+
+    def _iter_assignments(self, stmt):
+        if isinstance(stmt, Block):
+            for child in stmt.statements:
+                yield from self._iter_assignments(child)
+            return
+
+        if isinstance(stmt, Assignment):
+            target = stmt.target
+            if isinstance(target, Identifier):
+                yield target.name, stmt.value
+            elif isinstance(target, ArrayAccess):
+                yield target.name, stmt.value
+            return
+
+        if isinstance(stmt, IfStatement):
+            yield from self._iter_assignments(stmt.then_body)
+            if stmt.else_body is not None:
+                yield from self._iter_assignments(stmt.else_body)
+            return
+
+        if isinstance(stmt, CaseStatement):
+            for item in stmt.items:
+                yield from self._iter_assignments(item.body)
+            return
+
+        if isinstance(stmt, EventStatement):
+            yield from self._iter_assignments(stmt.body)
+            return
+
+        if isinstance(stmt, ForStatement):
+            yield from self._iter_assignments(stmt.body)
+            return
+
+    def _expr_is_continuous(self, expr: Expr, continuous_vars: set[str]) -> bool:
+        if isinstance(expr, NumberLiteral):
+            return False
+
+        if isinstance(expr, StringLiteral):
+            return False
+
+        if isinstance(expr, Identifier):
+            return expr.name in continuous_vars
+
+        if isinstance(expr, ArrayAccess):
+            return expr.name in continuous_vars or self._expr_is_continuous(expr.index, continuous_vars)
+
+        if isinstance(expr, BranchAccess):
+            return True
+
+        if isinstance(expr, BinaryExpr):
+            return (
+                self._expr_is_continuous(expr.left, continuous_vars)
+                or self._expr_is_continuous(expr.right, continuous_vars)
+            )
+
+        if isinstance(expr, UnaryExpr):
+            return self._expr_is_continuous(expr.operand, continuous_vars)
+
+        if isinstance(expr, TernaryExpr):
+            return (
+                self._expr_is_continuous(expr.cond, continuous_vars)
+                or self._expr_is_continuous(expr.true_expr, continuous_vars)
+                or self._expr_is_continuous(expr.false_expr, continuous_vars)
+            )
+
+        if isinstance(expr, MethodCall):
+            return any(self._expr_is_continuous(arg, continuous_vars) for arg in expr.args)
+
+        if isinstance(expr, FunctionCall):
+            if expr.name == 'transition':
+                return True
+            if expr.name == 'idtmod':
+                return True
+            return any(self._expr_is_continuous(arg, continuous_vars) for arg in expr.args)
+
+        return False
+
+    def _check_transition_targets(self, stmt) -> None:
+        if isinstance(stmt, Block):
+            for child in stmt.statements:
+                self._check_transition_targets(child)
+            return
+
+        if isinstance(stmt, IfStatement):
+            self._check_transition_targets(stmt.then_body)
+            if stmt.else_body is not None:
+                self._check_transition_targets(stmt.else_body)
+            return
+
+        if isinstance(stmt, CaseStatement):
+            for item in stmt.items:
+                self._check_transition_targets(item.body)
+            return
+
+        if isinstance(stmt, EventStatement):
+            self._check_transition_targets(stmt.body)
+            return
+
+        if isinstance(stmt, ForStatement):
+            self._check_transition_targets(stmt.body)
+            return
+
+        for call in self._iter_function_calls_in_stmt(stmt):
+            if call.name == 'transition' and call.args:
+                if self._transition_target_is_continuous(call.args[0]):
+                    raise CompilationError(
+                        f"Module {self.module.name} applies transition() to a continuous-valued "
+                        f"expression. Spectre expects the transition target to be piecewise constant. "
+                        f"Move continuous scaling outside transition() or contribute the signal directly."
+                    )
+
+    def _transition_target_is_continuous(self, expr: Expr) -> bool:
+        if isinstance(expr, NumberLiteral):
+            return False
+
+        if isinstance(expr, StringLiteral):
+            return False
+
+        if isinstance(expr, Identifier):
+            return expr.name in self._continuous_vars
+
+        if isinstance(expr, ArrayAccess):
+            return expr.name in self._continuous_vars
+
+        if isinstance(expr, BranchAccess):
+            return True
+
+        if isinstance(expr, UnaryExpr):
+            return self._transition_target_is_continuous(expr.operand)
+
+        if isinstance(expr, BinaryExpr):
+            return (
+                self._transition_target_is_continuous(expr.left)
+                or self._transition_target_is_continuous(expr.right)
+            )
+
+        if isinstance(expr, TernaryExpr):
+            return (
+                self._transition_target_is_continuous(expr.true_expr)
+                or self._transition_target_is_continuous(expr.false_expr)
+            )
+
+        if isinstance(expr, MethodCall):
+            return any(self._transition_target_is_continuous(arg) for arg in expr.args)
+
+        if isinstance(expr, FunctionCall):
+            if expr.name in ('idtmod', 'transition'):
+                return True
+            return any(self._transition_target_is_continuous(arg) for arg in expr.args)
+
+        return False
+
+    def _iter_function_calls_in_stmt(self, stmt):
+        if isinstance(stmt, Assignment):
+            yield from self._iter_function_calls_in_expr(stmt.value)
+            return
+
+        if isinstance(stmt, Contribution):
+            yield from self._iter_function_calls_in_expr(stmt.expr)
+            return
+
+        if isinstance(stmt, SystemTask):
+            for arg in stmt.args:
+                yield from self._iter_function_calls_in_expr(arg)
+
+    def _iter_function_calls_in_expr(self, expr: Expr):
+        if isinstance(expr, FunctionCall):
+            yield expr
+            for arg in expr.args:
+                yield from self._iter_function_calls_in_expr(arg)
+            return
+
+        if isinstance(expr, BinaryExpr):
+            yield from self._iter_function_calls_in_expr(expr.left)
+            yield from self._iter_function_calls_in_expr(expr.right)
+            return
+
+        if isinstance(expr, UnaryExpr):
+            yield from self._iter_function_calls_in_expr(expr.operand)
+            return
+
+        if isinstance(expr, TernaryExpr):
+            yield from self._iter_function_calls_in_expr(expr.cond)
+            yield from self._iter_function_calls_in_expr(expr.true_expr)
+            yield from self._iter_function_calls_in_expr(expr.false_expr)
+            return
+
+        if isinstance(expr, ArrayAccess):
+            yield from self._iter_function_calls_in_expr(expr.index)
+            return
+
+        if isinstance(expr, BranchAccess):
+            if expr.node1_index is not None:
+                yield from self._iter_function_calls_in_expr(expr.node1_index)
+            if expr.node1_index2 is not None:
+                yield from self._iter_function_calls_in_expr(expr.node1_index2)
+            if expr.node2_index is not None:
+                yield from self._iter_function_calls_in_expr(expr.node2_index)
+            if expr.node2_index2 is not None:
+                yield from self._iter_function_calls_in_expr(expr.node2_index2)
+            return
+
+        if isinstance(expr, MethodCall):
+            for arg in expr.args:
+                yield from self._iter_function_calls_in_expr(arg)
 
     def _is_initial_step_event(self, event) -> bool:
         """Check if event includes initial_step."""
