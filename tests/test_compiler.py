@@ -675,6 +675,15 @@ class TestParserCaseStatement:
         assert isinstance(stmt.items[0].body, Block)
 
 
+class TestParserWhileStatement:
+
+    def test_while_parses(self):
+        stmts = _stmts("while (x > 5) x = x - 10;")
+        stmt = stmts[0]
+        assert isinstance(stmt, WhileStatement)
+        assert isinstance(stmt.body, Assignment)
+
+
 class TestParserExpressions:
 
     def test_number_literal(self):

@@ -42,7 +42,18 @@ class CompiledModel:
         self._event_time: float = 0.0  # $abstime inside cross/above event bodies
         self._temperature: float = 27.0  # degrees Celsius (expressions convert to Kelvin)
         self.timer_states: Dict[str, float] = {}  # key → next_fire_time
+        self.timer_last_fired: Dict[str, float] = {}  # key → last absolute-time fire target
         self._bound_step: float = 0.0  # $bound_step limit (0 = no limit)
+        self._perf_stats: Dict[str, int] = {
+            "timer_periodic_checks": 0,
+            "timer_periodic_fires": 0,
+            "timer_absolute_checks": 0,
+            "timer_absolute_fires": 0,
+            "timer_reschedules": 0,
+            "timer_breakpoint_hits": 0,
+            "cross_fires": 0,
+            "above_fires": 0,
+        }
         # Lazy-allocated integrator states (only used when idt/idtmod appears)
         self._idt_states: Optional[Dict[str, Dict[str, float]]] = None
         self._file_handles: Dict[int, Any] = {}  # fd → file object
@@ -74,8 +85,12 @@ class CompiledModel:
             if bp is not None and bp > time:
                 bps.append(bp)
         # Timer breakpoints
-        for nf in self.timer_states.values():
+        for key, nf in self.timer_states.items():
+            last_fired = self.timer_last_fired.get(key)
+            if last_fired is not None and abs(last_fired - nf) <= 1e-18:
+                continue
             if nf > time:
+                self._perf_stats["timer_breakpoint_hits"] += 1
                 bps.append(nf)
         for child in self._child_models:
             bp = child.next_breakpoint(time)
@@ -83,14 +98,41 @@ class CompiledModel:
                 bps.append(bp)
         return min(bps) if bps else None
 
-    def _check_timer(self, key: str, time: float, period: float) -> bool:
+    def _check_timer_due(self, key: str, time: float, period: float, start: Optional[float] = None) -> bool:
+        self._perf_stats["timer_periodic_checks"] += 1
+        if period <= 0.0:
+            return False
         if key not in self.timer_states:
-            self.timer_states[key] = period  # first fire at t=period
+            self.timer_states[key] = start if start is not None else period
         next_fire = self.timer_states[key]
-        if time >= next_fire - 1e-18:
-            self.timer_states[key] = next_fire + period
+        return time >= next_fire - 1e-18
+
+    def _reschedule_timer(self, key: str, time: float, period: float):
+        if period <= 0.0 or key not in self.timer_states:
+            return
+        self.timer_states[key] = self.timer_states[key] + period
+        self._perf_stats["timer_reschedules"] += 1
+
+    def _check_timer_at(self, key: str, time: float, target: float) -> bool:
+        self._perf_stats["timer_absolute_checks"] += 1
+        if key not in self.timer_states or abs(self.timer_states[key] - target) > 1e-18:
+            self.timer_states[key] = target
+        armed_target = self.timer_states[key]
+        last_fired = self.timer_last_fired.get(key)
+        if last_fired is not None and abs(last_fired - armed_target) <= 1e-18:
+            return False
+        if time >= armed_target - 1e-18:
+            self.timer_last_fired[key] = armed_target
+            self._perf_stats["timer_absolute_fires"] += 1
             return True
         return False
+
+    def _check_timer(self, key: str, time: float, period: float, start: Optional[float] = None) -> bool:
+        due = self._check_timer_due(key, time, period, start)
+        if due:
+            self._perf_stats["timer_periodic_fires"] += 1
+            self._reschedule_timer(key, time, period)
+        return due
 
     def _get_voltage(self, node: str, node_voltages: Dict[str, float]) -> float:
         """Get voltage of a node, resolving through node_map."""
@@ -134,6 +176,7 @@ class CompiledModel:
             self.cross_detectors[key] = CrossDetector(direction=direction)
         fired = self.cross_detectors[key].check(time, val)
         if fired:
+            self._perf_stats["cross_fires"] += 1
             self._event_time = self.cross_detectors[key].t_cross
         return fired
 
@@ -142,6 +185,7 @@ class CompiledModel:
             self.above_detectors[key] = AboveDetector(direction=direction)
         fired = self.above_detectors[key].check(time, val)
         if fired:
+            self._perf_stats["above_fires"] += 1
             self._event_time = self.above_detectors[key].t_cross
         return fired
 
@@ -470,6 +514,10 @@ class _ModuleCompiler:
             self._check_stmt_for_restricted_operators(stmt.body, conditional_depth)
             return
 
+        if isinstance(stmt, WhileStatement):
+            self._check_stmt_for_restricted_operators(stmt.body, conditional_depth)
+            return
+
         if conditional_depth <= 0:
             return
 
@@ -576,6 +624,10 @@ class _ModuleCompiler:
             self._collect_assignment_contexts(stmt.body, in_event)
             return
 
+        if isinstance(stmt, WhileStatement):
+            self._collect_assignment_contexts(stmt.body, in_event)
+            return
+
         if isinstance(stmt, Assignment):
             target = stmt.target
             if isinstance(target, Identifier):
@@ -619,6 +671,10 @@ class _ModuleCompiler:
             return
 
         if isinstance(stmt, ForStatement):
+            yield from self._iter_assignments(stmt.body)
+            return
+
+        if isinstance(stmt, WhileStatement):
             yield from self._iter_assignments(stmt.body)
             return
 
@@ -688,6 +744,10 @@ class _ModuleCompiler:
             return
 
         if isinstance(stmt, ForStatement):
+            self._check_transition_targets(stmt.body)
+            return
+
+        if isinstance(stmt, WhileStatement):
             self._check_transition_targets(stmt.body)
             return
 
@@ -846,6 +906,9 @@ class _ModuleCompiler:
         elif isinstance(stmt, ForStatement):
             lines.extend(self._compile_for(stmt, indent))
 
+        elif isinstance(stmt, WhileStatement):
+            lines.extend(self._compile_while(stmt, indent))
+
         elif isinstance(stmt, CaseStatement):
             lines.extend(self._compile_case(stmt, indent))
 
@@ -922,12 +985,23 @@ class _ModuleCompiler:
             elif event.event_type == EventType.TIMER:
                 key = f"timer_{self._timer_counter}"
                 self._timer_counter += 1
-                period_expr = self._compile_expr(event.args[0])
-                lines.append(f"{prefix}if self._check_timer({key!r}, time, {period_expr}):")
-                body_lines = self._compile_statement(stmt.body, indent + 1)
-                lines.extend(body_lines)
-                if not body_lines:
-                    lines.append(f"{prefix}    pass")
+                if len(event.args) == 2:
+                    start_expr = self._compile_expr(event.args[0])
+                    period_expr = self._compile_expr(event.args[1])
+                    lines.append(f"{prefix}if self._check_timer_due({key!r}, time, {period_expr}, {start_expr}):")
+                    body_lines = self._compile_statement(stmt.body, indent + 1)
+                    lines.extend(body_lines)
+                    if not body_lines:
+                        lines.append(f"{prefix}    pass")
+                    lines.append(f"{prefix}    self._reschedule_timer({key!r}, time, {period_expr})")
+                else:
+                    target_expr = self._compile_expr(event.args[0])
+                    lines.append(f"{prefix}if self._check_timer_at({key!r}, time, {target_expr}):")
+                    body_lines = self._compile_statement(stmt.body, indent + 1)
+                    lines.extend(body_lines)
+                    if not body_lines:
+                        lines.append(f"{prefix}    pass")
+                    lines.append(f"{prefix}    self.timer_states[{key!r}] = {target_expr}")
                 lines.append(f"{prefix}    self._event_time = time")
 
         elif isinstance(event, CombinedEvent):
@@ -955,8 +1029,13 @@ class _ModuleCompiler:
                 elif e.event_type == EventType.TIMER:
                     key = f"timer_{self._timer_counter}"
                     self._timer_counter += 1
-                    period_expr = self._compile_expr(e.args[0])
-                    conditions.append(f"self._check_timer({key!r}, time, {period_expr})")
+                    if len(e.args) == 2:
+                        start_expr = self._compile_expr(e.args[0])
+                        period_expr = self._compile_expr(e.args[1])
+                        conditions.append(f"self._check_timer({key!r}, time, {period_expr}, {start_expr})")
+                    else:
+                        target_expr = self._compile_expr(e.args[0])
+                        conditions.append(f"self._check_timer_at({key!r}, time, {target_expr})")
 
             if conditions:
                 cond = ' or '.join(conditions)
@@ -1034,6 +1113,16 @@ class _ModuleCompiler:
         lines.append(f"{prefix}self.state[{loop_var!r}] = _loop_{loop_var}")
 
         self._in_loop_var = prev_loop_var
+        return lines
+
+    def _compile_while(self, stmt: WhileStatement, indent) -> List[str]:
+        prefix = '    ' * indent
+        cond = self._compile_expr(stmt.cond)
+        lines = [f"{prefix}while {cond}:"]
+        body_lines = self._compile_statement(stmt.body, indent + 1)
+        lines.extend(body_lines)
+        if not body_lines:
+            lines.append(f"{prefix}    pass")
         return lines
 
     def _compile_case(self, stmt: CaseStatement, indent) -> List[str]:

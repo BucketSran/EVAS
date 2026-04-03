@@ -510,6 +510,10 @@ class Parser:
         if tok.type == TokenType.FOR:
             return self._parse_for_statement()
 
+        # While loop
+        if tok.type == TokenType.WHILE:
+            return self._parse_while_statement()
+
         # Case statement
         if tok.type == TokenType.CASE:
             return self._parse_case_statement()
@@ -543,7 +547,7 @@ class Parser:
         return EventStatement(event=event, body=body)
 
     def _parse_single_event(self) -> EventExpr:
-        """Parse: cross(expr, dir) | above(expr, dir) | initial_step | timer(period) | final_step"""
+        """Parse: cross(expr, dir) | above(expr, dir) | initial_step | timer(period) | timer(start, period) | final_step"""
         tok = self.peek()
 
         if tok.type == TokenType.IDENT:
@@ -578,9 +582,13 @@ class Parser:
             elif tok.value == 'timer':
                 self.advance()
                 self.expect(TokenType.LPAREN)
-                period_expr = self._parse_expression()
+                first_expr = self._parse_expression()
+                if self.match(TokenType.COMMA):
+                    period_expr = self._parse_expression()
+                    self.expect(TokenType.RPAREN)
+                    return EventExpr(EventType.TIMER, [first_expr, period_expr])
                 self.expect(TokenType.RPAREN)
-                return EventExpr(EventType.TIMER, [period_expr])
+                return EventExpr(EventType.TIMER, [first_expr])
 
             elif tok.value == 'final_step':
                 self.advance()
@@ -610,6 +618,14 @@ class Parser:
         self.expect(TokenType.RPAREN)
         body = self._parse_block_or_statement()
         return ForStatement(init=init, cond=cond, update=update, body=body)
+
+    def _parse_while_statement(self) -> WhileStatement:
+        self.expect(TokenType.WHILE)
+        self.expect(TokenType.LPAREN)
+        cond = self._parse_expression()
+        self.expect(TokenType.RPAREN)
+        body = self._parse_block_or_statement()
+        return WhileStatement(cond=cond, body=body)
 
     def _parse_case_statement(self) -> CaseStatement:
         """Parse: case (expr) value: stmt ... default: stmt endcase"""

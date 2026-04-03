@@ -290,7 +290,7 @@ def _write_csv(csv_path: Path, result: SimResult, save_signals: List[str],
         writer = csv.writer(f)
         writer.writerow(['time'] + valid_signals)
         for i in range(len(result.time)):
-            row = [f"{result.time[i]:.6e}"]
+            row = [f"{result.time[i]:.12e}"]
             for sig in valid_signals:
                 v = result.signals[sig][i]
                 if sig.endswith('_code'):
@@ -534,6 +534,23 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     sim_elapsed_ms = (time.time() - t_sim_start) * 1000
     n_steps = len(result.time) - 1
     log.write(f"Number of accepted tran steps = {n_steps}")
+    if getattr(sim, "_perf_stats", None):
+        log.write("Performance counters:")
+        for key, value in sorted(sim._perf_stats.items()):
+            log.write(f"    {key} = {value}")
+    model_perf_lines = []
+    for idx, model in enumerate(sim.models):
+        perf = getattr(model, "_perf_stats", None)
+        if not perf:
+            continue
+        model_name = getattr(model, "__class__", type(model)).__name__
+        model_perf_lines.append(f"    model[{idx}] {model_name}:")
+        for key, value in sorted(perf.items()):
+            model_perf_lines.append(f"        {key} = {value}")
+    if model_perf_lines:
+        log.write("Model event counters:")
+        for line in model_perf_lines:
+            log.write(line)
 
     # Signal range summary
     log.write("")
