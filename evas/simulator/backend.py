@@ -406,9 +406,9 @@ class _ModuleCompiler:
         for inst in mod.instances:
             child_var = f"_child_{inst.instance_name}"
             lines.append(f"        _entry = self._module_registry.get({inst.module_name!r})")
-            lines.append(f"        if _entry is None:")
+            lines.append("        if _entry is None:")
             lines.append(f"            raise CompilationError('Unknown child module: {inst.module_name} in {mod.name}.{inst.instance_name}')")
-            lines.append(f"        _child_cls, _child_mod = _entry")
+            lines.append("        _child_cls, _child_mod = _entry")
             lines.append(f"        {child_var} = _child_cls()")
             lines.append(f"        {child_var}._parent_model = self")
             lines.append(f"        {child_var}.node_map = {{}}")
@@ -420,11 +420,11 @@ class _ModuleCompiler:
                     port_expr = f"_child_mod.ports[{ci}] if {ci} < len(_child_mod.ports) else None"
                 target = self._compile_instance_target(c.expr)
                 lines.append(f"        _pname = {port_expr!s}")
-                lines.append(f"        if _pname is not None:")
+                lines.append("        if _pname is not None:")
                 lines.append(f"            _target = {target}")
-                lines.append(f"            if _target in self._module_ports:")
-                lines.append(f"                _mapped = f'@parent:{{_target}}'")
-                lines.append(f"            else:")
+                lines.append("            if _target in self._module_ports:")
+                lines.append("                _mapped = f'@parent:{_target}'")
+                lines.append("            else:")
                 lines.append(f"                _mapped = f'__{inst.instance_name}.{{_target}}'")
                 lines.append(f"            {child_var}.node_map[_pname] = _mapped")
             lines.append(f"        self._child_models.append({child_var})")
