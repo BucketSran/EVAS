@@ -25,7 +25,7 @@ from evas.compiler.ast_nodes import (
     EventStatement, EventType, ForStatement, FunctionCall, Identifier,
     IfStatement, MethodCall, Module, NumberLiteral, ParamType,
     ParameterDecl, StringLiteral, SystemTask, TernaryExpr, UnaryExpr,
-    VariableDecl, ArrayAccess,
+    VariableDecl, ArrayAccess, WhileStatement,
 )
 
 
