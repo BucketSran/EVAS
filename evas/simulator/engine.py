@@ -72,6 +72,7 @@ class TransitionState:
             else:
                 self.target_val = target
                 self.current_val = target
+                self.active = False
 
     def next_breakpoint(self, time: float) -> Optional[float]:
         """Return next important time for this transition, or None."""
@@ -308,6 +309,9 @@ class Simulator:
         # post-processing (e.g. noise = vout_o - vin_i = 0 - 1 = -1 V).
         for model in self.models:
             model.evaluate(self.node_voltages, 0.0)
+            model._expire_absolute_timers(0.0)
+            if model.post_update_events(self.node_voltages, 0.0):
+                model.refresh_outputs(self.node_voltages, 0.0)
 
         # Record initial state
         self._record_point(0.0)
@@ -359,6 +363,9 @@ class Simulator:
             # Evaluate all models
             for model in self.models:
                 model.evaluate(self.node_voltages, time)
+                model._expire_absolute_timers(time)
+                if model.post_update_events(self.node_voltages, time):
+                    model.refresh_outputs(self.node_voltages, time)
 
             # Check if any cross/above event fired this step
             cross_fired = False

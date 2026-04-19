@@ -107,11 +107,14 @@ class TestTransitionState:
         bp = ts.next_breakpoint(0.0)
         assert bp == pytest.approx(5e-9)
 
-    def test_next_breakpoint_during_ramp_returns_t_end(self):
+    def test_next_breakpoint_during_ramp_returns_midpoint_first(self):
+        # next_breakpoint() now inserts a midpoint at t_begin + 0.5*ramp so that
+        # cross() events can fire mid-ramp on timer-driven transitions.
+        # At time=3ns the midpoint (5ns) is the nearest upcoming breakpoint.
         ts = TransitionState(current_val=0.0)
         ts.set_target(time=0.0, target=1.0, rise=10e-9)
         bp = ts.next_breakpoint(3e-9)
-        assert bp == pytest.approx(10e-9)
+        assert bp == pytest.approx(5e-9)
 
     def test_next_breakpoint_after_ramp_is_none(self):
         ts = TransitionState(current_val=0.0)
@@ -506,13 +509,14 @@ class TestCompiledModelHelpers:
         assert self.model.next_breakpoint(0.0) is None
 
     def test_next_breakpoint_with_active_transition(self):
-        # Plant an active TransitionState directly
+        # Plant an active TransitionState directly.
+        # At time=0.0 the midpoint (5ns) is returned first; t_end (10ns) follows.
         ts = TransitionState(current_val=0.0, target_val=1.0,
                              start_time=0.0, start_val=0.0,
                              rise_time=10e-9, active=True)
         self.model.transitions["t"] = ts
         bp = self.model.next_breakpoint(0.0)
-        assert bp == pytest.approx(10e-9)
+        assert bp == pytest.approx(5e-9)
 
     def test_check_timer_first_fire(self):
         fired = self.model._check_timer("t0", 10e-9, 10e-9)
@@ -1226,10 +1230,12 @@ end
 endmodule
 """
         mod = parse(src)
-        with pytest.raises(CompilationError, match="transition"):
-            compile_module(mod)
+        # Spectre VACOMP accepts transition() inside conditional branches
+        # (only idtmod() is restricted by VACOMP-2154). EVAS now matches this
+        # behaviour: compile_module must succeed without raising.
+        compile_module(mod)
 
-    def test_transition_of_continuous_signal_is_rejected(self):
+    def test_transition_of_continuous_signal_is_accepted(self):
         from evas.compiler.parser import parse
         from evas.simulator.backend import compile_module
 
@@ -1248,5 +1254,49 @@ end
 endmodule
 """
         mod = parse(src)
-        with pytest.raises(CompilationError, match="piecewise constant"):
-            compile_module(mod)
+        # Spectre/Virtuoso accepts continuous-affine transition() targets such as
+        # transition(V(vres_p) + offset * 0.5, 0). EVAS evaluates transition()
+        # dynamically, so the static piecewise-constant guard is removed.
+        # compile_module must succeed without raising.
+        compile_module(mod)
+
+
+class TestInitialStepVisibility:
+    VA_SRC = """\
+`include "disciplines.vams"
+module initial_step_precompute(out, vdd, vss);
+    output voltage out;
+    input voltage vdd;
+    input voltage vss;
+    real vh;
+    real vl;
+    real x;
+    analog begin
+        vh = V(vdd);
+        vl = V(vss);
+        @(initial_step) begin
+            x = 0.5;
+            if (x > vh) x = vh;
+            if (x < vl) x = vl;
+        end
+        V(out) <+ x;
+    end
+endmodule
+"""
+
+    def test_initial_step_sees_preceding_continuous_assignments(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        mod = parse(self.VA_SRC)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.add_source("vdd", dc(0.9))
+        sim.add_source("vss", dc(0.0))
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-10)
+
+        assert result.signals["out"][0] == pytest.approx(0.5, abs=1e-12)
