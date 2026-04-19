@@ -42,7 +42,21 @@ class CompiledModel:
         self._event_time: float = 0.0  # $abstime inside cross/above event bodies
         self._temperature: float = 27.0  # degrees Celsius (expressions convert to Kelvin)
         self.timer_states: Dict[str, float] = {}  # key → next_fire_time
+        self.timer_last_fired: Dict[str, float] = {}  # key → last absolute-time fire target
+        self.timer_kinds: Dict[str, str] = {}  # key → absolute | periodic
         self._bound_step: float = 0.0  # $bound_step limit (0 = no limit)
+        self._perf_stats: Dict[str, int] = {
+            "timer_periodic_checks": 0,
+            "timer_periodic_fires": 0,
+            "timer_periodic_skips": 0,
+            "timer_absolute_checks": 0,
+            "timer_absolute_fires": 0,
+            "timer_absolute_expirations": 0,
+            "timer_reschedules": 0,
+            "timer_breakpoint_hits": 0,
+            "cross_fires": 0,
+            "above_fires": 0,
+        }
         # Lazy-allocated integrator states (only used when idt/idtmod appears)
         self._idt_states: Optional[Dict[str, Dict[str, float]]] = None
         self._file_handles: Dict[int, Any] = {}  # fd → file object
@@ -54,6 +68,12 @@ class CompiledModel:
         pass
 
     def evaluate(self, node_voltages: Dict[str, float], time: float):
+        pass
+
+    def post_update_events(self, node_voltages: Dict[str, float], time: float) -> bool:
+        return False
+
+    def refresh_outputs(self, node_voltages: Dict[str, float], time: float):
         pass
 
     def final_step(self, node_voltages: Dict[str, float], time: float):
@@ -74,8 +94,12 @@ class CompiledModel:
             if bp is not None and bp > time:
                 bps.append(bp)
         # Timer breakpoints
-        for nf in self.timer_states.values():
+        for key, nf in self.timer_states.items():
+            last_fired = self.timer_last_fired.get(key)
+            if last_fired is not None and abs(last_fired - nf) <= 1e-18:
+                continue
             if nf > time:
+                self._perf_stats["timer_breakpoint_hits"] += 1
                 bps.append(nf)
         for child in self._child_models:
             bp = child.next_breakpoint(time)
@@ -83,14 +107,70 @@ class CompiledModel:
                 bps.append(bp)
         return min(bps) if bps else None
 
-    def _check_timer(self, key: str, time: float, period: float) -> bool:
+    def _check_timer_due(self, key: str, time: float, period: float, start: Optional[float] = None) -> bool:
+        self._perf_stats["timer_periodic_checks"] += 1
+        self.timer_kinds[key] = "periodic"
+        if period <= 0.0:
+            return False
         if key not in self.timer_states:
-            self.timer_states[key] = period  # first fire at t=period
+            next_fire = start if start is not None else period
+            if time > next_fire + 1e-18:
+                missed = math.floor((time - next_fire) / period) + 1
+                self.timer_states[key] = next_fire + missed * period
+                self._perf_stats["timer_periodic_skips"] += 1
+                return False
+            self.timer_states[key] = next_fire
         next_fire = self.timer_states[key]
-        if time >= next_fire - 1e-18:
-            self.timer_states[key] = next_fire + period
+        if time > next_fire + 1e-18:
+            missed = math.floor((time - next_fire) / period) + 1
+            self.timer_states[key] = next_fire + missed * period
+            self._perf_stats["timer_periodic_skips"] += 1
+            return False
+        return time >= next_fire - 1e-18
+
+    def _reschedule_timer(self, key: str, time: float, period: float):
+        if period <= 0.0 or key not in self.timer_states:
+            return
+        self.timer_states[key] = self.timer_states[key] + period
+        self._perf_stats["timer_reschedules"] += 1
+
+    def _check_timer_at(self, key: str, time: float, target: float) -> bool:
+        self._perf_stats["timer_absolute_checks"] += 1
+        self.timer_kinds[key] = "absolute"
+        first_seen = key not in self.timer_states
+        if first_seen or abs(self.timer_states[key] - target) > 1e-18:
+            self.timer_states[key] = target
+        if first_seen and time > target + 1e-18:
+            self.timer_last_fired[key] = target
+            self._perf_stats["timer_absolute_expirations"] += 1
+            return False
+        armed_target = self.timer_states[key]
+        last_fired = self.timer_last_fired.get(key)
+        if last_fired is not None and abs(last_fired - armed_target) <= 1e-18:
+            return False
+        if time >= armed_target - 1e-18:
+            self.timer_last_fired[key] = armed_target
+            self._perf_stats["timer_absolute_fires"] += 1
             return True
         return False
+
+    def _check_timer(self, key: str, time: float, period: float, start: Optional[float] = None) -> bool:
+        due = self._check_timer_due(key, time, period, start)
+        if due:
+            self._perf_stats["timer_periodic_fires"] += 1
+            self._reschedule_timer(key, time, period)
+        return due
+
+    def _expire_absolute_timers(self, time: float):
+        for key, armed_target in self.timer_states.items():
+            if self.timer_kinds.get(key) != "absolute":
+                continue
+            last_fired = self.timer_last_fired.get(key)
+            if last_fired is not None and abs(last_fired - armed_target) <= 1e-18:
+                continue
+            if time >= armed_target - 1e-18:
+                self.timer_last_fired[key] = armed_target
+                self._perf_stats["timer_absolute_expirations"] += 1
 
     def _get_voltage(self, node: str, node_voltages: Dict[str, float]) -> float:
         """Get voltage of a node, resolving through node_map."""
@@ -134,6 +214,7 @@ class CompiledModel:
             self.cross_detectors[key] = CrossDetector(direction=direction)
         fired = self.cross_detectors[key].check(time, val)
         if fired:
+            self._perf_stats["cross_fires"] += 1
             self._event_time = self.cross_detectors[key].t_cross
         return fired
 
@@ -142,6 +223,7 @@ class CompiledModel:
             self.above_detectors[key] = AboveDetector(direction=direction)
         fired = self.above_detectors[key].check(time, val)
         if fired:
+            self._perf_stats["above_fires"] += 1
             self._event_time = self.above_detectors[key].t_cross
         return fired
 
@@ -259,6 +341,8 @@ class _ModuleCompiler:
         self._uses_idtmod = False
         self._indent = 2
         self._in_loop_var = None  # track if we're inside a for loop
+        self._event_key_cache: Dict[tuple, str] = {}
+        self._stateful_func_key_cache: Dict[tuple, str] = {}
 
     def compile(self) -> type:
         """Generate and return a compiled model class."""
@@ -353,14 +437,10 @@ class _ModuleCompiler:
         lines.append("        self._initial_step_done = True")
         lines.append("        for _ch in self._child_models:")
         lines.append("            _ch.initial_step(nv, time)")
-
-        # Find and compile initial_step event blocks
         if mod.analog_block:
             for stmt in mod.analog_block.body.statements:
-                if isinstance(stmt, EventStatement):
-                    if self._is_initial_step_event(stmt.event):
-                        body_lines = self._compile_statement(stmt.body, 2)
-                        lines.extend(body_lines)
+                stmt_lines = self._compile_initial_step_statement(stmt, 2)
+                lines.extend(stmt_lines)
 
         lines.append("        pass")  # ensure method has body
 
@@ -371,6 +451,11 @@ class _ModuleCompiler:
         self._timer_counter = 0
         self._idt_counter = 0
         self._uses_idtmod = False
+        self._event_key_cache = {}
+        self._stateful_func_key_cache = {}
+        self._contributed_nodes = set()
+        if mod.analog_block:
+            self._contributed_nodes = self._collect_contributed_nodes(mod.analog_block.body)
 
         lines.append("")
         lines.append("    def evaluate(self, nv, time):")
@@ -389,6 +474,24 @@ class _ModuleCompiler:
         lines.append("            if _bs > 0.0 and (self._bound_step <= 0.0 or _bs < self._bound_step):")
         lines.append("                self._bound_step = _bs")
 
+        lines.append("        pass")
+
+        lines.append("")
+        lines.append("    def post_update_events(self, nv, time):")
+        lines.append("        self._event_time = time")
+        lines.append("        _post_event_fired = False")
+        if mod.analog_block:
+            for stmt in mod.analog_block.body.statements:
+                stmt_lines = self._compile_post_update_statement(stmt, 2)
+                lines.extend(stmt_lines)
+        lines.append("        return _post_event_fired")
+
+        lines.append("")
+        lines.append("    def refresh_outputs(self, nv, time):")
+        if mod.analog_block:
+            for stmt in mod.analog_block.body.statements:
+                stmt_lines = self._compile_refresh_statement(stmt, 2)
+                lines.extend(stmt_lines)
         lines.append("        pass")
 
         # Generate final_step method
@@ -463,10 +566,23 @@ class _ModuleCompiler:
             return
 
         if isinstance(stmt, EventStatement):
+            if conditional_depth > 0:
+                restricted = self._collect_restricted_events_from_event(stmt.event)
+                if restricted:
+                    ops = ', '.join(sorted(restricted))
+                    raise CompilationError(
+                        f"Module {self.module.name} uses Spectre-restricted operator(s) "
+                        f"{ops} inside a conditionally executed statement. "
+                        f"Move these operators out of if/case branches."
+                    )
             self._check_stmt_for_restricted_operators(stmt.body, conditional_depth)
             return
 
         if isinstance(stmt, ForStatement):
+            self._check_stmt_for_restricted_operators(stmt.body, conditional_depth)
+            return
+
+        if isinstance(stmt, WhileStatement):
             self._check_stmt_for_restricted_operators(stmt.body, conditional_depth)
             return
 
@@ -493,11 +609,34 @@ class _ModuleCompiler:
                 restricted |= self._collect_restricted_calls_from_expr(arg)
         return restricted
 
+    def _collect_restricted_events_from_event(self, event) -> set:
+        restricted = set()
+
+        if isinstance(event, EventExpr):
+            if event.event_type == EventType.CROSS:
+                restricted.add('cross')
+            elif event.event_type == EventType.ABOVE:
+                restricted.add('above')
+            return restricted
+
+        if isinstance(event, CombinedEvent):
+            for child in event.events:
+                restricted |= self._collect_restricted_events_from_event(child)
+            return restricted
+
+        return restricted
+
     def _collect_restricted_calls_from_expr(self, expr: Expr) -> set:
         restricted = set()
 
         if isinstance(expr, FunctionCall):
-            if expr.name in ('idtmod', 'transition'):
+            # Spectre accepts transition() inside conditional branches, though it
+            # may emit VACOMP-1116 warnings when the target is continuous.
+            # Keep idtmod() restricted here. A local 2026-04-18 Spectre probe
+            # shows conditional idtmod() is rejected outright with VACOMP-2154,
+            # so relaxing this guard would diverge from Spectre rather than
+            # improve compatibility.
+            if expr.name in ('idtmod',):
                 restricted.add(expr.name)
             for arg in expr.args:
                 restricted |= self._collect_restricted_calls_from_expr(arg)
@@ -576,6 +715,10 @@ class _ModuleCompiler:
             self._collect_assignment_contexts(stmt.body, in_event)
             return
 
+        if isinstance(stmt, WhileStatement):
+            self._collect_assignment_contexts(stmt.body, in_event)
+            return
+
         if isinstance(stmt, Assignment):
             target = stmt.target
             if isinstance(target, Identifier):
@@ -619,6 +762,10 @@ class _ModuleCompiler:
             return
 
         if isinstance(stmt, ForStatement):
+            yield from self._iter_assignments(stmt.body)
+            return
+
+        if isinstance(stmt, WhileStatement):
             yield from self._iter_assignments(stmt.body)
             return
 
@@ -691,6 +838,10 @@ class _ModuleCompiler:
             self._check_transition_targets(stmt.body)
             return
 
+        if isinstance(stmt, WhileStatement):
+            self._check_transition_targets(stmt.body)
+            return
+
         for call in self._iter_function_calls_in_stmt(stmt):
             if call.name == 'transition' and call.args:
                 if self._transition_target_is_continuous(call.args[0]):
@@ -701,44 +852,12 @@ class _ModuleCompiler:
                     )
 
     def _transition_target_is_continuous(self, expr: Expr) -> bool:
-        if isinstance(expr, NumberLiteral):
-            return False
-
-        if isinstance(expr, StringLiteral):
-            return False
-
-        if isinstance(expr, Identifier):
-            return expr.name in self._continuous_vars
-
-        if isinstance(expr, ArrayAccess):
-            return expr.name in self._continuous_vars
-
-        if isinstance(expr, BranchAccess):
-            return True
-
-        if isinstance(expr, UnaryExpr):
-            return self._transition_target_is_continuous(expr.operand)
-
-        if isinstance(expr, BinaryExpr):
-            return (
-                self._transition_target_is_continuous(expr.left)
-                or self._transition_target_is_continuous(expr.right)
-            )
-
-        if isinstance(expr, TernaryExpr):
-            return (
-                self._transition_target_is_continuous(expr.true_expr)
-                or self._transition_target_is_continuous(expr.false_expr)
-            )
-
-        if isinstance(expr, MethodCall):
-            return any(self._transition_target_is_continuous(arg) for arg in expr.args)
-
-        if isinstance(expr, FunctionCall):
-            if expr.name in ('idtmod', 'transition'):
-                return True
-            return any(self._transition_target_is_continuous(arg) for arg in expr.args)
-
+        # Spectre/Virtuoso accepts a wider transition() target surface than the
+        # earlier EVAS guard assumed, including continuous-affine expressions
+        # such as `transition(V(vres_p) + dither_diff * 0.5, 0)`. EVAS evaluates
+        # transition() dynamically at runtime, so blocking these forms at compile
+        # time creates benchmark/example mismatches rather than protecting a hard
+        # simulator limitation.
         return False
 
     def _iter_function_calls_in_stmt(self, stmt):
@@ -795,6 +914,98 @@ class _ModuleCompiler:
             for arg in expr.args:
                 yield from self._iter_function_calls_in_expr(arg)
 
+    def _collect_contributed_nodes(self, stmt) -> set[str]:
+        nodes: set[str] = set()
+
+        if isinstance(stmt, Block):
+            for s in stmt.statements:
+                nodes.update(self._collect_contributed_nodes(s))
+            return nodes
+
+        if isinstance(stmt, Contribution):
+            nodes.add(stmt.branch.node1)
+            if stmt.branch.node2 is not None:
+                nodes.add(stmt.branch.node2)
+            return nodes
+
+        if isinstance(stmt, EventStatement):
+            nodes.update(self._collect_contributed_nodes(stmt.body))
+            return nodes
+
+        if isinstance(stmt, IfStatement):
+            nodes.update(self._collect_contributed_nodes(stmt.then_body))
+            if stmt.else_body is not None:
+                nodes.update(self._collect_contributed_nodes(stmt.else_body))
+            return nodes
+
+        if isinstance(stmt, WhileStatement):
+            nodes.update(self._collect_contributed_nodes(stmt.body))
+            return nodes
+
+        if isinstance(stmt, ForStatement):
+            nodes.update(self._collect_contributed_nodes(stmt.body))
+            return nodes
+
+        if isinstance(stmt, CaseStatement):
+            for item in stmt.items:
+                nodes.update(self._collect_contributed_nodes(item.body))
+            return nodes
+
+        return nodes
+
+    def _expr_references_nodes(self, expr: Expr, nodes: set[str]) -> bool:
+        if not nodes:
+            return False
+
+        if isinstance(expr, Identifier):
+            return expr.name in nodes
+
+        if isinstance(expr, ArrayAccess):
+            return expr.name in nodes or self._expr_references_nodes(expr.index, nodes)
+
+        if isinstance(expr, BinaryExpr):
+            return (
+                self._expr_references_nodes(expr.left, nodes)
+                or self._expr_references_nodes(expr.right, nodes)
+            )
+
+        if isinstance(expr, UnaryExpr):
+            return self._expr_references_nodes(expr.operand, nodes)
+
+        if isinstance(expr, TernaryExpr):
+            return (
+                self._expr_references_nodes(expr.cond, nodes)
+                or self._expr_references_nodes(expr.true_expr, nodes)
+                or self._expr_references_nodes(expr.false_expr, nodes)
+            )
+
+        if isinstance(expr, FunctionCall):
+            return any(self._expr_references_nodes(arg, nodes) for arg in expr.args)
+
+        if isinstance(expr, BranchAccess):
+            return (
+                expr.node1 in nodes
+                or (expr.node2 is not None and expr.node2 in nodes)
+                or (expr.node1_index is not None and self._expr_references_nodes(expr.node1_index, nodes))
+                or (expr.node1_index2 is not None and self._expr_references_nodes(expr.node1_index2, nodes))
+                or (expr.node2_index is not None and self._expr_references_nodes(expr.node2_index, nodes))
+                or (expr.node2_index2 is not None and self._expr_references_nodes(expr.node2_index2, nodes))
+            )
+
+        if isinstance(expr, MethodCall):
+            return any(self._expr_references_nodes(arg, nodes) for arg in expr.args)
+
+        return False
+
+    def _event_requires_post_update(self, event) -> bool:
+        if not isinstance(event, EventExpr):
+            return False
+        if event.event_type not in (EventType.CROSS, EventType.ABOVE):
+            return False
+        if not hasattr(self, "_contributed_nodes"):
+            return False
+        return self._expr_references_nodes(event.args[0], self._contributed_nodes)
+
     def _is_initial_step_event(self, event) -> bool:
         """Check if event includes initial_step."""
         if isinstance(event, EventExpr) and event.event_type == EventType.INITIAL_STEP:
@@ -846,6 +1057,9 @@ class _ModuleCompiler:
         elif isinstance(stmt, ForStatement):
             lines.extend(self._compile_for(stmt, indent))
 
+        elif isinstance(stmt, WhileStatement):
+            lines.extend(self._compile_while(stmt, indent))
+
         elif isinstance(stmt, CaseStatement):
             lines.extend(self._compile_case(stmt, indent))
 
@@ -881,6 +1095,99 @@ class _ModuleCompiler:
 
         return lines
 
+    def _compile_initial_step_statement(self, stmt, indent) -> List[str]:
+        """Compile analog statements as seen during the initial_step pass."""
+        prefix = '    ' * indent
+        lines = []
+
+        if isinstance(stmt, Block):
+            for s in stmt.statements:
+                lines.extend(self._compile_initial_step_statement(s, indent))
+
+        elif isinstance(stmt, EventStatement):
+            if self._is_initial_step_event(stmt.event):
+                lines.extend(self._compile_initial_step_statement(stmt.body, indent))
+
+        elif isinstance(stmt, Contribution):
+            lines.extend(self._compile_contribution(stmt, indent))
+
+        elif isinstance(stmt, Assignment):
+            lines.extend(self._compile_assignment(stmt, indent))
+
+        elif isinstance(stmt, IfStatement):
+            cond = self._compile_expr(stmt.cond)
+            lines.append(f"{prefix}if {cond}:")
+            body_lines = self._compile_initial_step_statement(stmt.then_body, indent + 1)
+            lines.extend(body_lines)
+            if not body_lines:
+                lines.append(f"{prefix}    pass")
+            if stmt.else_body:
+                lines.append(f"{prefix}else:")
+                else_lines = self._compile_initial_step_statement(stmt.else_body, indent + 1)
+                lines.extend(else_lines)
+                if not else_lines:
+                    lines.append(f"{prefix}    pass")
+
+        elif isinstance(stmt, WhileStatement):
+            cond = self._compile_expr(stmt.cond)
+            lines.append(f"{prefix}while {cond}:")
+            body_lines = self._compile_initial_step_statement(stmt.body, indent + 1)
+            lines.extend(body_lines)
+            if not body_lines:
+                lines.append(f"{prefix}    pass")
+
+        elif isinstance(stmt, ForStatement):
+            loop_var = None
+            if isinstance(stmt.init.target, Identifier):
+                loop_var = stmt.init.target.name
+            elif isinstance(stmt.init.target, ArrayAccess):
+                loop_var = stmt.init.target.name
+            if loop_var is None:
+                return lines
+
+            init_val = self._compile_expr(stmt.init.value)
+            prev_loop_var = self._in_loop_var
+            self._in_loop_var = loop_var
+
+            lines.append(f"{prefix}self.state[{loop_var!r}] = {init_val}")
+            lines.append(f"{prefix}_loop_{loop_var} = {init_val}")
+            cond_code = self._compile_expr_with_loop_var(stmt.cond, loop_var)
+            lines.append(f"{prefix}while {cond_code}:")
+            lines.append(f"{prefix}    self.state[{loop_var!r}] = _loop_{loop_var}")
+            body_lines = self._compile_initial_step_statement_with_loop_var(stmt.body, indent + 1, loop_var)
+            lines.extend(body_lines)
+            update_code = self._compile_expr_with_loop_var(stmt.update.value, loop_var)
+            lines.append(f"{prefix}    _loop_{loop_var} = {update_code}")
+            lines.append(f"{prefix}self.state[{loop_var!r}] = _loop_{loop_var}")
+
+            self._in_loop_var = prev_loop_var
+
+        elif isinstance(stmt, CaseStatement):
+            sel = self._compile_expr(stmt.expr)
+            first = True
+            default_lines = None
+            for item in stmt.items:
+                body_lines = self._compile_initial_step_statement(item.body, indent + 1)
+                if not body_lines:
+                    continue
+                if not item.values:
+                    default_lines = body_lines
+                    continue
+                cond_parts = [f"({sel} == {self._compile_expr(v)})" for v in item.values]
+                cond = ' or '.join(cond_parts)
+                keyword = 'if' if first else 'elif'
+                lines.append(f"{prefix}{keyword} {cond}:")
+                lines.extend(body_lines)
+                first = False
+            if default_lines is not None:
+                if first:
+                    lines.extend(default_lines)
+                else:
+                    lines.append(f"{prefix}else:")
+                    lines.extend(default_lines)
+
+        return lines
+
     def _compile_event_statement(self, stmt: EventStatement, indent) -> List[str]:
         prefix = '    ' * indent
         lines = []
@@ -896,8 +1203,9 @@ class _ModuleCompiler:
                 return []
 
             elif event.event_type == EventType.CROSS:
-                key = f"cross_{self._cross_counter}"
-                self._cross_counter += 1
+                if self._event_requires_post_update(event):
+                    return []
+                key = self._alloc_event_key("cross", event)
                 expr = self._compile_expr(event.args[0])
                 direction = event.direction if event.direction is not None else 0
                 lines.append(f"{prefix}if self._check_cross({key!r}, time, {expr}, {direction}):")
@@ -908,8 +1216,9 @@ class _ModuleCompiler:
                 lines.append(f"{prefix}    self._event_time = time")
 
             elif event.event_type == EventType.ABOVE:
-                key = f"above_{self._above_counter}"
-                self._above_counter += 1
+                if self._event_requires_post_update(event):
+                    return []
+                key = self._alloc_event_key("above", event)
                 expr = self._compile_expr(event.args[0])
                 direction = event.direction if event.direction is not None else 1
                 lines.append(f"{prefix}if self._check_above({key!r}, time, {expr}, {direction}):")
@@ -920,14 +1229,24 @@ class _ModuleCompiler:
                 lines.append(f"{prefix}    self._event_time = time")
 
             elif event.event_type == EventType.TIMER:
-                key = f"timer_{self._timer_counter}"
-                self._timer_counter += 1
-                period_expr = self._compile_expr(event.args[0])
-                lines.append(f"{prefix}if self._check_timer({key!r}, time, {period_expr}):")
-                body_lines = self._compile_statement(stmt.body, indent + 1)
-                lines.extend(body_lines)
-                if not body_lines:
-                    lines.append(f"{prefix}    pass")
+                key = self._alloc_event_key("timer", event)
+                if len(event.args) == 2:
+                    start_expr = self._compile_expr(event.args[0])
+                    period_expr = self._compile_expr(event.args[1])
+                    lines.append(f"{prefix}if self._check_timer_due({key!r}, time, {period_expr}, {start_expr}):")
+                    body_lines = self._compile_statement(stmt.body, indent + 1)
+                    lines.extend(body_lines)
+                    if not body_lines:
+                        lines.append(f"{prefix}    pass")
+                    lines.append(f"{prefix}    self._reschedule_timer({key!r}, time, {period_expr})")
+                else:
+                    target_expr = self._compile_expr(event.args[0])
+                    lines.append(f"{prefix}if self._check_timer_at({key!r}, time, {target_expr}):")
+                    body_lines = self._compile_statement(stmt.body, indent + 1)
+                    lines.extend(body_lines)
+                    if not body_lines:
+                        lines.append(f"{prefix}    pass")
+                    lines.append(f"{prefix}    self.timer_states[{key!r}] = {target_expr}")
                 lines.append(f"{prefix}    self._event_time = time")
 
         elif isinstance(event, CombinedEvent):
@@ -941,22 +1260,28 @@ class _ModuleCompiler:
                     # In evaluate, final_step never fires
                     continue
                 elif e.event_type == EventType.CROSS:
-                    key = f"cross_{self._cross_counter}"
-                    self._cross_counter += 1
+                    if self._event_requires_post_update(e):
+                        continue
+                    key = self._alloc_event_key("cross", e)
                     expr = self._compile_expr(e.args[0])
                     direction = e.direction if e.direction is not None else 0
                     conditions.append(f"self._check_cross({key!r}, time, {expr}, {direction})")
                 elif e.event_type == EventType.ABOVE:
-                    key = f"above_{self._above_counter}"
-                    self._above_counter += 1
+                    if self._event_requires_post_update(e):
+                        continue
+                    key = self._alloc_event_key("above", e)
                     expr = self._compile_expr(e.args[0])
                     direction = e.direction if e.direction is not None else 1
                     conditions.append(f"self._check_above({key!r}, time, {expr}, {direction})")
                 elif e.event_type == EventType.TIMER:
-                    key = f"timer_{self._timer_counter}"
-                    self._timer_counter += 1
-                    period_expr = self._compile_expr(e.args[0])
-                    conditions.append(f"self._check_timer({key!r}, time, {period_expr})")
+                    key = self._alloc_event_key("timer", e)
+                    if len(e.args) == 2:
+                        start_expr = self._compile_expr(e.args[0])
+                        period_expr = self._compile_expr(e.args[1])
+                        conditions.append(f"self._check_timer({key!r}, time, {period_expr}, {start_expr})")
+                    else:
+                        target_expr = self._compile_expr(e.args[0])
+                        conditions.append(f"self._check_timer_at({key!r}, time, {target_expr})")
 
             if conditions:
                 cond = ' or '.join(conditions)
@@ -967,6 +1292,348 @@ class _ModuleCompiler:
                     lines.append(f"{prefix}    pass")
                 lines.append(f"{prefix}    self._event_time = time")
 
+        return lines
+
+    def _alloc_event_key(self, kind: str, event) -> str:
+        cache_key = (kind, id(event))
+        if cache_key in self._event_key_cache:
+            return self._event_key_cache[cache_key]
+        if kind == "cross":
+            key = f"cross_{self._cross_counter}"
+            self._cross_counter += 1
+        elif kind == "above":
+            key = f"above_{self._above_counter}"
+            self._above_counter += 1
+        elif kind == "timer":
+            key = f"timer_{self._timer_counter}"
+            self._timer_counter += 1
+        else:
+            raise ValueError(f"unknown event key kind: {kind}")
+        self._event_key_cache[cache_key] = key
+        return key
+
+    def _alloc_stateful_func_key(self, kind: str, expr) -> str:
+        cache_key = (kind, id(expr))
+        if cache_key in self._stateful_func_key_cache:
+            return self._stateful_func_key_cache[cache_key]
+        if kind == "transition":
+            key = f"trans_{self._trans_counter}"
+            self._trans_counter += 1
+        elif kind == "idtmod":
+            key = f"idtmod_{self._idt_counter}"
+            self._idt_counter += 1
+        else:
+            raise ValueError(f"unknown stateful func key kind: {kind}")
+        self._stateful_func_key_cache[cache_key] = key
+        return key
+
+    def _has_post_update_event(self, stmt) -> bool:
+        if isinstance(stmt, Block):
+            return any(self._has_post_update_event(s) for s in stmt.statements)
+        if isinstance(stmt, EventStatement):
+            event = stmt.event
+            if isinstance(event, EventExpr):
+                return self._event_requires_post_update(event)
+            if isinstance(event, CombinedEvent):
+                return any(
+                    self._event_requires_post_update(e)
+                    for e in event.events
+                )
+            return False
+        if isinstance(stmt, IfStatement):
+            return self._has_post_update_event(stmt.then_body) or (
+                stmt.else_body is not None and self._has_post_update_event(stmt.else_body)
+            )
+        if isinstance(stmt, WhileStatement):
+            return self._has_post_update_event(stmt.body)
+        if isinstance(stmt, ForStatement):
+            return self._has_post_update_event(stmt.body)
+        if isinstance(stmt, CaseStatement):
+            return any(self._has_post_update_event(item.body) for item in stmt.items)
+        return False
+
+    def _has_refresh_logic(self, stmt) -> bool:
+        if isinstance(stmt, Block):
+            return any(self._has_refresh_logic(s) for s in stmt.statements)
+        if isinstance(stmt, (Contribution, Assignment)):
+            return True
+        if isinstance(stmt, IfStatement):
+            return self._has_refresh_logic(stmt.then_body) or (
+                stmt.else_body is not None and self._has_refresh_logic(stmt.else_body)
+            )
+        if isinstance(stmt, WhileStatement):
+            return self._has_refresh_logic(stmt.body)
+        if isinstance(stmt, ForStatement):
+            return self._has_refresh_logic(stmt.body)
+        if isinstance(stmt, CaseStatement):
+            return any(self._has_refresh_logic(item.body) for item in stmt.items)
+        return False
+
+    def _compile_post_update_statement(self, stmt, indent) -> List[str]:
+        prefix = '    ' * indent
+        lines = []
+
+        if not self._has_post_update_event(stmt):
+            return lines
+
+        if isinstance(stmt, Block):
+            for s in stmt.statements:
+                lines.extend(self._compile_post_update_statement(s, indent))
+            return lines
+
+        if isinstance(stmt, EventStatement):
+            return self._compile_post_update_event_statement(stmt, indent)
+
+        if isinstance(stmt, IfStatement):
+            cond = self._compile_expr(stmt.cond)
+            then_lines = self._compile_post_update_statement(stmt.then_body, indent + 1)
+            else_lines = self._compile_post_update_statement(stmt.else_body, indent + 1) if stmt.else_body else []
+            if then_lines:
+                lines.append(f"{prefix}if {cond}:")
+                lines.extend(then_lines)
+            if else_lines:
+                if not then_lines:
+                    lines.append(f"{prefix}if not ({cond}):")
+                else:
+                    lines.append(f"{prefix}else:")
+                lines.extend(else_lines)
+            return lines
+
+        if isinstance(stmt, WhileStatement):
+            cond = self._compile_expr(stmt.cond)
+            body_lines = self._compile_post_update_statement(stmt.body, indent + 1)
+            if body_lines:
+                lines.append(f"{prefix}while {cond}:")
+                lines.extend(body_lines)
+            return lines
+
+        if isinstance(stmt, CaseStatement):
+            sel = self._compile_expr(stmt.expr)
+            first = True
+            default_lines = None
+            for item in stmt.items:
+                body_lines = self._compile_post_update_statement(item.body, indent + 1)
+                if not body_lines:
+                    continue
+                if not item.values:
+                    default_lines = body_lines
+                    continue
+                cond_parts = [f"({sel} == {self._compile_expr(v)})" for v in item.values]
+                cond = ' or '.join(cond_parts)
+                keyword = 'if' if first else 'elif'
+                lines.append(f"{prefix}{keyword} {cond}:")
+                lines.extend(body_lines)
+                first = False
+            if default_lines is not None:
+                if first:
+                    lines.extend(default_lines)
+                else:
+                    lines.append(f"{prefix}else:")
+                    lines.extend(default_lines)
+            return lines
+
+        if isinstance(stmt, ForStatement):
+            return self._compile_post_update_for(stmt, indent)
+
+        return lines
+
+    def _compile_post_update_event_statement(self, stmt: EventStatement, indent) -> List[str]:
+        prefix = '    ' * indent
+        lines = []
+        event = stmt.event
+
+        if isinstance(event, EventExpr):
+            if event.event_type == EventType.CROSS:
+                if not self._event_requires_post_update(event):
+                    return lines
+                key = self._alloc_event_key("cross", event)
+                expr = self._compile_expr(event.args[0])
+                direction = event.direction if event.direction is not None else 0
+                lines.append(f"{prefix}if self._check_cross({key!r}, time, {expr}, {direction}):")
+                body_lines = self._compile_statement(stmt.body, indent + 1)
+                lines.extend(body_lines)
+                if not body_lines:
+                    lines.append(f"{prefix}    pass")
+                lines.append(f"{prefix}    self._event_time = time")
+                lines.append(f"{prefix}    _post_event_fired = True")
+            elif event.event_type == EventType.ABOVE:
+                if not self._event_requires_post_update(event):
+                    return lines
+                key = self._alloc_event_key("above", event)
+                expr = self._compile_expr(event.args[0])
+                direction = event.direction if event.direction is not None else 1
+                lines.append(f"{prefix}if self._check_above({key!r}, time, {expr}, {direction}):")
+                body_lines = self._compile_statement(stmt.body, indent + 1)
+                lines.extend(body_lines)
+                if not body_lines:
+                    lines.append(f"{prefix}    pass")
+                lines.append(f"{prefix}    self._event_time = time")
+                lines.append(f"{prefix}    _post_event_fired = True")
+            return lines
+
+        if isinstance(event, CombinedEvent):
+            conditions = []
+            for e in event.events:
+                if not isinstance(e, EventExpr):
+                    continue
+                if e.event_type == EventType.CROSS:
+                    if not self._event_requires_post_update(e):
+                        continue
+                    key = self._alloc_event_key("cross", e)
+                    expr = self._compile_expr(e.args[0])
+                    direction = e.direction if e.direction is not None else 0
+                    conditions.append(f"self._check_cross({key!r}, time, {expr}, {direction})")
+                elif e.event_type == EventType.ABOVE:
+                    if not self._event_requires_post_update(e):
+                        continue
+                    key = self._alloc_event_key("above", e)
+                    expr = self._compile_expr(e.args[0])
+                    direction = e.direction if e.direction is not None else 1
+                    conditions.append(f"self._check_above({key!r}, time, {expr}, {direction})")
+            if conditions:
+                cond = ' or '.join(conditions)
+                lines.append(f"{prefix}if {cond}:")
+                body_lines = self._compile_statement(stmt.body, indent + 1)
+                lines.extend(body_lines)
+                if not body_lines:
+                    lines.append(f"{prefix}    pass")
+                lines.append(f"{prefix}    self._event_time = time")
+                lines.append(f"{prefix}    _post_event_fired = True")
+        return lines
+
+    def _compile_refresh_statement(self, stmt, indent) -> List[str]:
+        prefix = '    ' * indent
+        lines = []
+
+        if not self._has_refresh_logic(stmt):
+            return lines
+
+        if isinstance(stmt, Block):
+            for s in stmt.statements:
+                lines.extend(self._compile_refresh_statement(s, indent))
+            return lines
+
+        if isinstance(stmt, Contribution):
+            return self._compile_contribution(stmt, indent)
+
+        if isinstance(stmt, Assignment):
+            return self._compile_assignment(stmt, indent)
+
+        if isinstance(stmt, IfStatement):
+            cond = self._compile_expr(stmt.cond)
+            then_lines = self._compile_refresh_statement(stmt.then_body, indent + 1)
+            else_lines = self._compile_refresh_statement(stmt.else_body, indent + 1) if stmt.else_body else []
+            if then_lines:
+                lines.append(f"{prefix}if {cond}:")
+                lines.extend(then_lines)
+            if else_lines:
+                if not then_lines:
+                    lines.append(f"{prefix}if not ({cond}):")
+                else:
+                    lines.append(f"{prefix}else:")
+                lines.extend(else_lines)
+            return lines
+
+        if isinstance(stmt, WhileStatement):
+            cond = self._compile_expr(stmt.cond)
+            body_lines = self._compile_refresh_statement(stmt.body, indent + 1)
+            if body_lines:
+                lines.append(f"{prefix}while {cond}:")
+                lines.extend(body_lines)
+            return lines
+
+        if isinstance(stmt, CaseStatement):
+            sel = self._compile_expr(stmt.expr)
+            first = True
+            default_lines = None
+            for item in stmt.items:
+                body_lines = self._compile_refresh_statement(item.body, indent + 1)
+                if not body_lines:
+                    continue
+                if not item.values:
+                    default_lines = body_lines
+                    continue
+                cond_parts = [f"({sel} == {self._compile_expr(v)})" for v in item.values]
+                cond = ' or '.join(cond_parts)
+                keyword = 'if' if first else 'elif'
+                lines.append(f"{prefix}{keyword} {cond}:")
+                lines.extend(body_lines)
+                first = False
+            if default_lines is not None:
+                if first:
+                    lines.extend(default_lines)
+                else:
+                    lines.append(f"{prefix}else:")
+                    lines.extend(default_lines)
+            return lines
+
+        if isinstance(stmt, ForStatement):
+            return self._compile_refresh_for(stmt, indent)
+
+        return lines
+
+    def _compile_post_update_for(self, stmt: ForStatement, indent) -> List[str]:
+        prefix = '    ' * indent
+        lines = []
+
+        loop_var = None
+        if isinstance(stmt.init.target, Identifier):
+            loop_var = stmt.init.target.name
+        elif isinstance(stmt.init.target, ArrayAccess):
+            loop_var = stmt.init.target.name
+
+        if loop_var is None:
+            return [f"{prefix}pass  # could not compile for loop"]
+
+        init_val = self._compile_expr(stmt.init.value)
+
+        prev_loop_var = self._in_loop_var
+        self._in_loop_var = loop_var
+
+        lines.append(f"{prefix}self.state[{loop_var!r}] = {init_val}")
+        lines.append(f"{prefix}_loop_{loop_var} = {init_val}")
+        cond_code2 = self._compile_expr_with_loop_var(stmt.cond, loop_var)
+        lines.append(f"{prefix}while {cond_code2}:")
+        lines.append(f"{prefix}    self.state[{loop_var!r}] = _loop_{loop_var}")
+        body_lines = self._compile_post_update_statement_with_loop_var(stmt.body, indent + 1, loop_var)
+        lines.extend(body_lines)
+        update_code2 = self._compile_expr_with_loop_var(stmt.update.value, loop_var)
+        lines.append(f"{prefix}    _loop_{loop_var} = {update_code2}")
+        lines.append(f"{prefix}self.state[{loop_var!r}] = _loop_{loop_var}")
+
+        self._in_loop_var = prev_loop_var
+        return lines
+
+    def _compile_refresh_for(self, stmt: ForStatement, indent) -> List[str]:
+        prefix = '    ' * indent
+        lines = []
+
+        loop_var = None
+        if isinstance(stmt.init.target, Identifier):
+            loop_var = stmt.init.target.name
+        elif isinstance(stmt.init.target, ArrayAccess):
+            loop_var = stmt.init.target.name
+
+        if loop_var is None:
+            return [f"{prefix}pass  # could not compile for loop"]
+
+        init_val = self._compile_expr(stmt.init.value)
+
+        prev_loop_var = self._in_loop_var
+        self._in_loop_var = loop_var
+
+        lines.append(f"{prefix}self.state[{loop_var!r}] = {init_val}")
+        lines.append(f"{prefix}_loop_{loop_var} = {init_val}")
+        cond_code2 = self._compile_expr_with_loop_var(stmt.cond, loop_var)
+        lines.append(f"{prefix}while {cond_code2}:")
+        lines.append(f"{prefix}    self.state[{loop_var!r}] = _loop_{loop_var}")
+        body_lines = self._compile_refresh_statement_with_loop_var(stmt.body, indent + 1, loop_var)
+        lines.extend(body_lines)
+        update_code2 = self._compile_expr_with_loop_var(stmt.update.value, loop_var)
+        lines.append(f"{prefix}    _loop_{loop_var} = {update_code2}")
+        lines.append(f"{prefix}self.state[{loop_var!r}] = _loop_{loop_var}")
+
+        self._in_loop_var = prev_loop_var
         return lines
 
     def _compile_contribution(self, stmt: Contribution, indent) -> List[str]:
@@ -1034,6 +1701,16 @@ class _ModuleCompiler:
         lines.append(f"{prefix}self.state[{loop_var!r}] = _loop_{loop_var}")
 
         self._in_loop_var = prev_loop_var
+        return lines
+
+    def _compile_while(self, stmt: WhileStatement, indent) -> List[str]:
+        prefix = '    ' * indent
+        cond = self._compile_expr(stmt.cond)
+        lines = [f"{prefix}while {cond}:"]
+        body_lines = self._compile_statement(stmt.body, indent + 1)
+        lines.extend(body_lines)
+        if not body_lines:
+            lines.append(f"{prefix}    pass")
         return lines
 
     def _compile_case(self, stmt: CaseStatement, indent) -> List[str]:
@@ -1181,8 +1858,7 @@ class _ModuleCompiler:
         args = [self._compile_expr(a) for a in expr.args]
 
         if name == 'transition':
-            base_key = f"trans_{self._trans_counter}"
-            self._trans_counter += 1
+            base_key = self._alloc_stateful_func_key("transition", expr)
             target = args[0] if len(args) > 0 else "0.0"
             delay = args[1] if len(args) > 1 else "0.0"
             rise = args[2] if len(args) > 2 else "0.0"
@@ -1193,8 +1869,7 @@ class _ModuleCompiler:
             return f"self._transition({base_key!r}, time, {target}, {delay}, {rise}, {fall})"
 
         if name == 'idtmod':
-            key = f"idtmod_{self._idt_counter}"
-            self._idt_counter += 1
+            key = self._alloc_stateful_func_key("idtmod", expr)
             self._uses_idtmod = True
             x = args[0] if len(args) > 0 else "0.0"
             ic = args[1] if len(args) > 1 else "0.0"
@@ -1281,6 +1956,33 @@ class _ModuleCompiler:
                 f"_loop_{loop_var}"
             )
             new_lines.append(new_line)
+        return new_lines
+
+    def _compile_post_update_statement_with_loop_var(self, stmt, indent, loop_var) -> List[str]:
+        lines = self._compile_post_update_statement(stmt, indent)
+        new_lines = []
+        for line in lines:
+            new_lines.append(
+                line.replace(f"self.state[{loop_var!r}]", f"_loop_{loop_var}")
+            )
+        return new_lines
+
+    def _compile_refresh_statement_with_loop_var(self, stmt, indent, loop_var) -> List[str]:
+        lines = self._compile_refresh_statement(stmt, indent)
+        new_lines = []
+        for line in lines:
+            new_lines.append(
+                line.replace(f"self.state[{loop_var!r}]", f"_loop_{loop_var}")
+            )
+        return new_lines
+
+    def _compile_initial_step_statement_with_loop_var(self, stmt, indent, loop_var) -> List[str]:
+        lines = self._compile_initial_step_statement(stmt, indent)
+        new_lines = []
+        for line in lines:
+            new_lines.append(
+                line.replace(f"self.state[{loop_var!r}]", f"_loop_{loop_var}")
+            )
         return new_lines
 
     def _eval_expr_static(self, expr: Expr) -> Any:

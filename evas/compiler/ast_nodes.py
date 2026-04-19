@@ -165,6 +165,11 @@ class ForStatement:
     body: 'Statement'
 
 @dataclass
+class WhileStatement:
+    cond: Expr
+    body: 'Statement'
+
+@dataclass
 class CaseItem:
     """One branch: value_expr [, value_expr]: statement"""
     values: List[Expr]          # empty list means 'default'
@@ -182,7 +187,7 @@ class SystemTask:
     args: List[Expr]
 
 Statement = Union[Assignment, Contribution, EventStatement, Block,
-                  IfStatement, ForStatement, CaseStatement, SystemTask]
+                  IfStatement, ForStatement, WhileStatement, CaseStatement, SystemTask]
 
 
 # --- Declaration nodes ---

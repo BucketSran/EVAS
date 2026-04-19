@@ -72,6 +72,7 @@ class TransitionState:
             else:
                 self.target_val = target
                 self.current_val = target
+                self.active = False
 
     def next_breakpoint(self, time: float) -> Optional[float]:
         """Return next important time for this transition, or None."""
@@ -85,6 +86,11 @@ class TransitionState:
         breakpoints = []
         if t_begin > time:
             breakpoints.append(t_begin)
+        # Add a midpoint breakpoint so cross() can observe timer-driven
+        # transition edges before the full ramp completes.
+        t_mid = t_begin + 0.5 * ramp_time
+        if t_mid > time and t_mid < t_end:
+            breakpoints.append(t_mid)
         if t_end > time:
             breakpoints.append(t_end)
         return min(breakpoints) if breakpoints else None
@@ -241,6 +247,7 @@ class Simulator:
         self.models: List = []  # compiled model instances
         self.recorded_signals: Dict[str, List[float]] = {}
         self.time_points: List[float] = []
+        self._perf_stats: Dict[str, int] = {}
 
     def add_source(self, node: str, waveform: Callable[[float], float]):
         """Add a voltage source to the simulation."""
@@ -276,6 +283,18 @@ class Simulator:
         refine_steps_left = 0  # countdown of refined steps after cross
         refine_dt = tstep  # current refined step size
         dynamic_step = tstep  # tolerance-driven adaptive step ceiling
+        self._perf_stats = {
+            "source_breakpoint_clamps": 0,
+            "model_breakpoint_clamps": 0,
+            "bound_step_clamps": 0,
+            "min_step_clamps": 0,
+            "cross_refine_triggers": 0,
+            "cross_event_steps": 0,
+            "dynamic_step_shrinks": 0,
+            "dynamic_step_grows": 0,
+            "err_ratio_skipped_outputs": 0,
+            "steps_total": 0,
+        }
 
         # Initialize node voltages
         for src in self.sources:
@@ -290,6 +309,9 @@ class Simulator:
         # post-processing (e.g. noise = vout_o - vin_i = 0 - 1 = -1 V).
         for model in self.models:
             model.evaluate(self.node_voltages, 0.0)
+            model._expire_absolute_timers(0.0)
+            if model.post_update_events(self.node_voltages, 0.0):
+                model.refresh_outputs(self.node_voltages, 0.0)
 
         # Record initial state
         self._record_point(0.0)
@@ -308,6 +330,7 @@ class Simulator:
                 bp = src.next_breakpoint(time)
                 if bp is not None and bp > time and bp < time + dt:
                     dt = bp - time
+                    self._perf_stats["source_breakpoint_clamps"] += 1
                     if dt < 1e-18:
                         dt = 1e-18
 
@@ -316,6 +339,7 @@ class Simulator:
                 bp = model.next_breakpoint(time)
                 if bp is not None and bp > time and bp < time + dt:
                     dt = bp - time
+                    self._perf_stats["model_breakpoint_clamps"] += 1
                     if dt < 1e-18:
                         dt = 1e-18
 
@@ -324,8 +348,10 @@ class Simulator:
                 bs = model._bound_step
                 if bs > 0 and dt > bs:
                     dt = bs
+                    self._perf_stats["bound_step_clamps"] += 1
             if dt < min_step:
                 dt = min_step
+                self._perf_stats["min_step_clamps"] += 1
 
             prev_nv = dict(self.node_voltages)
             time += dt
@@ -337,6 +363,9 @@ class Simulator:
             # Evaluate all models
             for model in self.models:
                 model.evaluate(self.node_voltages, time)
+                model._expire_absolute_timers(time)
+                if model.post_update_events(self.node_voltages, time):
+                    model.refresh_outputs(self.node_voltages, time)
 
             # Check if any cross/above event fired this step
             cross_fired = False
@@ -356,11 +385,20 @@ class Simulator:
             if cross_fired and refine_steps_left == 0 and dt > tstep / refine_factor:
                 refine_dt = dt / refine_factor
                 refine_steps_left = refine_steps
+                self._perf_stats["cross_refine_triggers"] += 1
+            if cross_fired:
+                self._perf_stats["cross_event_steps"] += 1
 
             # Tolerance-guided dynamic step adaptation (voltage-domain heuristic).
             # This is not full LTE/Newton control, but gives user-visible precision control.
             err_ratio = 0.0
+            model_output_nodes = set()
+            for model in self.models:
+                model_output_nodes.update(model.output_nodes.keys())
             for node, vnew in self.node_voltages.items():
+                if node in model_output_nodes:
+                    self._perf_stats["err_ratio_skipped_outputs"] += 1
+                    continue
                 vold = prev_nv.get(node, vnew)
                 dv = abs(vnew - vold)
                 vref = max(abs(vnew), abs(vold))
@@ -372,11 +410,14 @@ class Simulator:
             if err_ratio > 1.0:
                 scale = min(4.0, max(1.2, math.sqrt(err_ratio)))
                 dynamic_step = max(min_step, dynamic_step / scale)
+                self._perf_stats["dynamic_step_shrinks"] += 1
             elif err_ratio < 0.2:
                 dynamic_step = min(tstep, dynamic_step * 1.15)
+                self._perf_stats["dynamic_step_grows"] += 1
 
             self._record_point(time)
             self._step_sizes.append(dt)
+            self._perf_stats["steps_total"] += 1
 
         # Fire final_step events
         for model in self.models:
