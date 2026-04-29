@@ -596,6 +596,13 @@ class TestParserEventStatements:
         stmt = stmts[0]
         assert stmt.event.direction == -1
 
+    def test_cross_event_with_tolerances(self):
+        stmts = _stmts("@(cross(V(a) - 0.45, 1, 2p, 1m)) x = 1;")
+        stmt = stmts[0]
+        assert stmt.event.direction == 1
+        assert stmt.event.time_tol_expr is not None
+        assert stmt.event.expr_tol_expr is not None
+
     def test_above_event(self):
         stmts = _stmts("@(above(V(a) - 0.45)) x = 1;")
         stmt = stmts[0]

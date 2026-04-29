@@ -25,6 +25,8 @@ V(node1, node2) <+
 # combined: @(event1 or event2)
 # --- Operators ---
 transition()
+slew()
+last_crossing()
 `default_transition
 # --- Variables & Parameters ---
 parameter (real, integer, string)
@@ -78,9 +80,7 @@ laplace_zp()
 flicker_noise()
 white_noise()
 KCL-based solving
-last_crossing()
 analysis()
 branch
 nature / discipline (custom)
-slew()
 limexp()

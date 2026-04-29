@@ -26,12 +26,14 @@ class CompiledModel:
     """Base class for compiled Verilog-A models."""
     _module_registry: Dict[str, Any] = {}
     _module_ports: List[str] = []
+    _cmp_eps: float = 1e-12
 
     def __init__(self):
         self.params: Dict[str, Any] = {}
         self.state: Dict[str, Any] = {}
         self.arrays: Dict[str, Dict[int, Any]] = {}
         self.transitions: Dict[str, TransitionState] = {}
+        self.slew_states: Dict[str, Dict[str, float]] = {}
         self.cross_detectors: Dict[str, CrossDetector] = {}
         self.above_detectors: Dict[str, AboveDetector] = {}
         self.output_nodes: Dict[str, float] = {}
@@ -63,6 +65,9 @@ class CompiledModel:
         self._next_fd: int = 1
         self._child_models: List["CompiledModel"] = []
         self._parent_model: Optional["CompiledModel"] = None
+        # Per-instance deterministic RNG streams.
+        self._rng_default = random.Random(0)
+        self._rng_streams: Dict[int, random.Random] = {}
 
     def initial_step(self, node_voltages: Dict[str, float], time: float):
         pass
@@ -110,38 +115,45 @@ class CompiledModel:
     def _check_timer_due(self, key: str, time: float, period: float, start: Optional[float] = None) -> bool:
         self._perf_stats["timer_periodic_checks"] += 1
         self.timer_kinds[key] = "periodic"
-        if period <= 0.0:
+        p = float(period)
+        if p <= 0.0 or not math.isfinite(p):
             return False
         if key not in self.timer_states:
-            next_fire = start if start is not None else period
+            next_fire = float(start) if start is not None else p
+            if not math.isfinite(next_fire):
+                next_fire = p
             if time > next_fire + 1e-18:
-                missed = math.floor((time - next_fire) / period) + 1
-                self.timer_states[key] = next_fire + missed * period
+                missed = math.floor((time - next_fire) / p) + 1
+                self.timer_states[key] = next_fire + missed * p
                 self._perf_stats["timer_periodic_skips"] += 1
                 return False
             self.timer_states[key] = next_fire
         next_fire = self.timer_states[key]
         if time > next_fire + 1e-18:
-            missed = math.floor((time - next_fire) / period) + 1
-            self.timer_states[key] = next_fire + missed * period
+            missed = math.floor((time - next_fire) / p) + 1
+            self.timer_states[key] = next_fire + missed * p
             self._perf_stats["timer_periodic_skips"] += 1
             return False
         return time >= next_fire - 1e-18
 
     def _reschedule_timer(self, key: str, time: float, period: float):
-        if period <= 0.0 or key not in self.timer_states:
+        p = float(period)
+        if p <= 0.0 or not math.isfinite(p) or key not in self.timer_states:
             return
-        self.timer_states[key] = self.timer_states[key] + period
+        self.timer_states[key] = self.timer_states[key] + p
         self._perf_stats["timer_reschedules"] += 1
 
     def _check_timer_at(self, key: str, time: float, target: float) -> bool:
         self._perf_stats["timer_absolute_checks"] += 1
         self.timer_kinds[key] = "absolute"
+        tgt = float(target)
+        if not math.isfinite(tgt):
+            return False
         first_seen = key not in self.timer_states
-        if first_seen or abs(self.timer_states[key] - target) > 1e-18:
-            self.timer_states[key] = target
-        if first_seen and time > target + 1e-18:
-            self.timer_last_fired[key] = target
+        if first_seen or abs(self.timer_states[key] - tgt) > 1e-18:
+            self.timer_states[key] = tgt
+        if first_seen and time > tgt + 1e-18:
+            self.timer_last_fired[key] = tgt
             self._perf_stats["timer_absolute_expirations"] += 1
             return False
         armed_target = self.timer_states[key]
@@ -171,6 +183,30 @@ class CompiledModel:
             if time >= armed_target - 1e-18:
                 self.timer_last_fired[key] = armed_target
                 self._perf_stats["timer_absolute_expirations"] += 1
+
+    @classmethod
+    def _cmp_gt(cls, left: Any, right: Any) -> bool:
+        return float(left) > float(right) + cls._cmp_eps
+
+    @classmethod
+    def _cmp_lt(cls, left: Any, right: Any) -> bool:
+        return float(left) < float(right) - cls._cmp_eps
+
+    @classmethod
+    def _cmp_ge(cls, left: Any, right: Any) -> bool:
+        return float(left) >= float(right) - cls._cmp_eps
+
+    @classmethod
+    def _cmp_le(cls, left: Any, right: Any) -> bool:
+        return float(left) <= float(right) + cls._cmp_eps
+
+    @staticmethod
+    def _int_div(left: Any, right: Any) -> int:
+        """Verilog-style integer division, truncating toward zero."""
+        r = int(right)
+        if r == 0:
+            return 0
+        return int(int(left) / r)
 
     def _get_voltage(self, node: str, node_voltages: Dict[str, float]) -> float:
         """Get voltage of a node, resolving through node_map."""
@@ -209,14 +245,67 @@ class CompiledModel:
         ts.set_target(time, target, delay, rise, fall, self.default_transition)
         return ts.evaluate(time)
 
-    def _check_cross(self, key: str, time: float, val: float, direction: int = 0) -> bool:
+    def _slew(self, key: str, time: float, target: float,
+              maxrise: float, maxfall: float) -> float:
+        """Evaluate a slew-rate limiter.
+
+        This is a transient behavioral approximation:
+        - maxrise/maxfall are interpreted as V/s limits.
+        - maxrise<=0 or maxfall<=0 means "no limit" in that direction.
+        """
+        t = float(time)
+        tgt = float(target)
+        mr = float(maxrise)
+        mf = float(maxfall)
+
+        if key not in self.slew_states:
+            self.slew_states[key] = {"value": tgt, "last_t": t}
+            return tgt
+
+        st = self.slew_states[key]
+        cur = float(st["value"])
+        dt = t - float(st["last_t"])
+        if dt <= 0.0:
+            # Same-time re-evaluation: only allow immediate move for unlimited slope.
+            if (tgt >= cur and mr <= 0.0) or (tgt < cur and mf <= 0.0):
+                st["value"] = tgt
+                return tgt
+            return cur
+
+        delta = tgt - cur
+        if delta >= 0.0:
+            if mr <= 0.0:
+                nxt = tgt
+            else:
+                nxt = cur + min(delta, mr * dt)
+        else:
+            if mf <= 0.0:
+                nxt = tgt
+            else:
+                nxt = cur - min(-delta, mf * dt)
+
+        st["value"] = nxt
+        st["last_t"] = t
+        return nxt
+
+    def _check_cross(self, key: str, time: float, val: float, direction: int = 0,
+                     time_tol: float = 0.0, expr_tol: float = 1e-12) -> bool:
         if key not in self.cross_detectors:
             self.cross_detectors[key] = CrossDetector(direction=direction)
-        fired = self.cross_detectors[key].check(time, val)
+        fired = self.cross_detectors[key].check(time, val, time_tol=time_tol, expr_tol=expr_tol)
         if fired:
             self._perf_stats["cross_fires"] += 1
             self._event_time = self.cross_detectors[key].t_cross
         return fired
+
+    def _last_crossing(self, key: str, time: float, val: float, direction: int = 0,
+                       time_tol: float = 0.0, expr_tol: float = 1e-12) -> float:
+        """Return most recent crossing time (approximation for last_crossing())."""
+        if key not in self.cross_detectors:
+            self.cross_detectors[key] = CrossDetector(direction=direction)
+        cd = self.cross_detectors[key]
+        cd.check(time, val, time_tol=time_tol, expr_tol=expr_tol)
+        return cd.t_cross
 
     def _check_above(self, key: str, time: float, val: float, direction: int = 1) -> bool:
         if key not in self.above_detectors:
@@ -302,13 +391,24 @@ class CompiledModel:
             self._file_handles[fd].close()
             del self._file_handles[fd]
 
-    def _fstrobe(self, fd: int, fmt: str, *args):
-        if fd in self._file_handles:
-            try:
-                msg = (fmt % args) if args else fmt
-            except Exception as e:
-                msg = f"{fmt}  [format error: {e}]"
+    def _fstrobe(self, target: Any, fmt: str, *args):
+        try:
+            msg = (fmt % args) if args else fmt
+        except Exception as e:
+            msg = f"{fmt}  [format error: {e}]"
+
+        try:
+            fd = int(target)
+        except (TypeError, ValueError):
+            fd = None
+
+        if fd is not None and fd in self._file_handles:
             self._file_handles[fd].write(msg + '\n')
+            return
+
+        if isinstance(target, str):
+            with open(target, 'a') as f:
+                f.write(msg + '\n')
 
     def _cleanup_files(self):
         for f in self._file_handles.values():
@@ -316,6 +416,29 @@ class CompiledModel:
         self._file_handles.clear()
         for child in self._child_models:
             child._cleanup_files()
+
+    def _seed_to_stream(self, seed: Optional[float]) -> random.Random:
+        if seed is None:
+            return self._rng_default
+        try:
+            sid = int(float(seed))
+        except Exception:
+            return self._rng_default
+        if sid not in self._rng_streams:
+            self._rng_streams[sid] = random.Random(sid)
+        return self._rng_streams[sid]
+
+    def _rand_normal(self, seed: Optional[float], mean: float, std: float) -> float:
+        rng = self._seed_to_stream(seed)
+        return rng.gauss(float(mean), float(std))
+
+    def _rand_uniform(self, seed: Optional[float], lo: float, hi: float) -> float:
+        rng = self._seed_to_stream(seed)
+        return rng.uniform(float(lo), float(hi))
+
+    def _rand_int32(self, seed: Optional[float] = None) -> int:
+        rng = self._seed_to_stream(seed)
+        return rng.randint(-2147483648, 2147483647)
 
 
 def compile_module(module: Module, default_transition: float = None) -> type:
@@ -338,11 +461,15 @@ class _ModuleCompiler:
         self._above_counter = 0
         self._timer_counter = 0
         self._idt_counter = 0
+        self._slew_counter = 0
+        self._last_cross_counter = 0
         self._uses_idtmod = False
         self._indent = 2
         self._in_loop_var = None  # track if we're inside a for loop
         self._event_key_cache: Dict[tuple, str] = {}
         self._stateful_func_key_cache: Dict[tuple, str] = {}
+        self._param_types = {p.name: p.param_type for p in module.parameters}
+        self._var_types = {v.name: v.var_type for v in module.variables}
 
     def compile(self) -> type:
         """Generate and return a compiled model class."""
@@ -378,6 +505,8 @@ class _ModuleCompiler:
         # Initialize parameters
         for p in mod.parameters:
             val = self._eval_expr_static(p.default_value)
+            if p.param_type == ParamType.INTEGER:
+                val = int(val)
             lines.append(f"        self.params[{p.name!r}] = {val!r}")
 
         # Initialize scalar state variables
@@ -450,6 +579,8 @@ class _ModuleCompiler:
         self._above_counter = 0
         self._timer_counter = 0
         self._idt_counter = 0
+        self._slew_counter = 0
+        self._last_cross_counter = 0
         self._uses_idtmod = False
         self._event_key_cache = {}
         self._stateful_func_key_cache = {}
@@ -1087,11 +1218,11 @@ class _ModuleCompiler:
                     fmt_expr = self._compile_expr(stmt.args[1])
                     rest = ', '.join(self._compile_expr(a) for a in stmt.args[2:])
                     if rest:
-                        lines.append(f"{prefix}self._fstrobe(int({fd}), {fmt_expr}, {rest})")
+                        lines.append(f"{prefix}self._fstrobe({fd}, {fmt_expr}, {rest})")
                     else:
-                        lines.append(f"{prefix}self._fstrobe(int({fd}), {fmt_expr})")
+                        lines.append(f"{prefix}self._fstrobe({fd}, {fmt_expr})")
                 else:
-                    lines.append(f"{prefix}self._fstrobe(int({fd}), '')")
+                    lines.append(f"{prefix}self._fstrobe({fd}, '')")
 
         return lines
 
@@ -1206,9 +1337,7 @@ class _ModuleCompiler:
                 if self._event_requires_post_update(event):
                     return []
                 key = self._alloc_event_key("cross", event)
-                expr = self._compile_expr(event.args[0])
-                direction = event.direction if event.direction is not None else 0
-                lines.append(f"{prefix}if self._check_cross({key!r}, time, {expr}, {direction}):")
+                lines.append(f"{prefix}if {self._compile_cross_call(event, key)}:")
                 body_lines = self._compile_statement(stmt.body, indent + 1)
                 lines.extend(body_lines)
                 if not body_lines:
@@ -1263,9 +1392,7 @@ class _ModuleCompiler:
                     if self._event_requires_post_update(e):
                         continue
                     key = self._alloc_event_key("cross", e)
-                    expr = self._compile_expr(e.args[0])
-                    direction = e.direction if e.direction is not None else 0
-                    conditions.append(f"self._check_cross({key!r}, time, {expr}, {direction})")
+                    conditions.append(self._compile_cross_call(e, key))
                 elif e.event_type == EventType.ABOVE:
                     if self._event_requires_post_update(e):
                         continue
@@ -1312,6 +1439,17 @@ class _ModuleCompiler:
         self._event_key_cache[cache_key] = key
         return key
 
+    def _compile_cross_call(self, event: EventExpr, key: str) -> str:
+        expr = self._compile_expr(event.args[0])
+        direction = event.direction if event.direction is not None else 0
+        time_tol = "0.0"
+        expr_tol = "1e-12"
+        if event.time_tol_expr is not None:
+            time_tol = self._compile_expr(event.time_tol_expr)
+        if event.expr_tol_expr is not None:
+            expr_tol = self._compile_expr(event.expr_tol_expr)
+        return f"self._check_cross({key!r}, time, {expr}, {direction}, {time_tol}, {expr_tol})"
+
     def _alloc_stateful_func_key(self, kind: str, expr) -> str:
         cache_key = (kind, id(expr))
         if cache_key in self._stateful_func_key_cache:
@@ -1319,6 +1457,12 @@ class _ModuleCompiler:
         if kind == "transition":
             key = f"trans_{self._trans_counter}"
             self._trans_counter += 1
+        elif kind == "slew":
+            key = f"slew_{self._slew_counter}"
+            self._slew_counter += 1
+        elif kind == "last_crossing":
+            key = f"last_cross_{self._last_cross_counter}"
+            self._last_cross_counter += 1
         elif kind == "idtmod":
             key = f"idtmod_{self._idt_counter}"
             self._idt_counter += 1
@@ -1447,9 +1591,7 @@ class _ModuleCompiler:
                 if not self._event_requires_post_update(event):
                     return lines
                 key = self._alloc_event_key("cross", event)
-                expr = self._compile_expr(event.args[0])
-                direction = event.direction if event.direction is not None else 0
-                lines.append(f"{prefix}if self._check_cross({key!r}, time, {expr}, {direction}):")
+                lines.append(f"{prefix}if {self._compile_cross_call(event, key)}:")
                 body_lines = self._compile_statement(stmt.body, indent + 1)
                 lines.extend(body_lines)
                 if not body_lines:
@@ -1480,9 +1622,7 @@ class _ModuleCompiler:
                     if not self._event_requires_post_update(e):
                         continue
                     key = self._alloc_event_key("cross", e)
-                    expr = self._compile_expr(e.args[0])
-                    direction = e.direction if e.direction is not None else 0
-                    conditions.append(f"self._check_cross({key!r}, time, {expr}, {direction})")
+                    conditions.append(self._compile_cross_call(e, key))
                 elif e.event_type == EventType.ABOVE:
                     if not self._event_requires_post_update(e):
                         continue
@@ -1641,6 +1781,9 @@ class _ModuleCompiler:
         branch = stmt.branch
         node = branch.node1
         expr = self._compile_expr(stmt.expr)
+        if branch.node2 is not None:
+            node2_expr = self._compile_node_voltage(branch.node2, branch.node2_index, branch.node2_index2)
+            expr = f"(({node2_expr}) + ({expr}))"
 
         if branch.node1_index is not None:
             # Dynamic array-indexed port: V(DOUT[i]) <+ or V(DOUT[i][j]) <+
@@ -1658,14 +1801,28 @@ class _ModuleCompiler:
 
         if isinstance(stmt.target, Identifier):
             name = stmt.target.name
+            if self._is_integer_variable(name):
+                val = f"int({val})"
             return [f"{prefix}self.state[{name!r}] = {val}"]
 
         elif isinstance(stmt.target, ArrayAccess):
             name = stmt.target.name
             idx = self._compile_expr(stmt.target.index)
+            if self._is_integer_variable(name):
+                val = f"int({val})"
             return [f"{prefix}self._array_set({name!r}, int({idx}), {val})"]
 
         return [f"{prefix}pass  # unknown assignment target"]
+
+    def _is_integer_variable(self, name: str) -> bool:
+        for variable in self.module.variables:
+            if variable.name == name:
+                return (
+                    variable.var_type == ParamType.INTEGER
+                    or getattr(variable.var_type, "name", "") == "INTEGER"
+                    or variable.var_type in {"integer", "genvar"}
+                )
+        return False
 
     def _compile_for(self, stmt: ForStatement, indent) -> List[str]:
         prefix = '    ' * indent
@@ -1782,6 +1939,8 @@ class _ModuleCompiler:
             left = self._compile_expr(expr.left)
             right = self._compile_expr(expr.right)
             op = expr.op
+            if op == '/' and self._expr_is_integer(expr):
+                return f"self._int_div(({left}), ({right}))"
             if op == '^':
                 # In Verilog-A, ^ is XOR for integers
                 return f"(int({left}) ^ int({right}))"
@@ -1797,6 +1956,14 @@ class _ModuleCompiler:
                 return f"(({left}) and ({right}))"
             if op == '||':
                 return f"(({left}) or ({right}))"
+            if op == '>':
+                return f"self._cmp_gt(({left}), ({right}))"
+            if op == '<':
+                return f"self._cmp_lt(({left}), ({right}))"
+            if op == '>=':
+                return f"self._cmp_ge(({left}), ({right}))"
+            if op == '<=':
+                return f"self._cmp_le(({left}), ({right}))"
             return f"({left} {op} {right})"
 
         if isinstance(expr, UnaryExpr):
@@ -1833,6 +2000,56 @@ class _ModuleCompiler:
 
         return "0.0"
 
+    def _expr_is_integer(self, expr: Expr) -> bool:
+        """Return True for expressions that Spectre evaluates in integer context."""
+        integer_like, has_typed_integer = self._expr_integer_kind(expr)
+        return integer_like and has_typed_integer
+
+    def _expr_integer_kind(self, expr: Expr) -> tuple[bool, bool]:
+        """Return (integer_like, contains_declared_integer)."""
+        if isinstance(expr, NumberLiteral):
+            raw = getattr(expr, "raw", None)
+            if raw:
+                token = raw.lstrip("+-")
+                is_plain_integer = (
+                    token.isdigit()
+                    and "." not in token
+                    and "e" not in token.lower()
+                )
+                return is_plain_integer, False
+            return float(expr.value).is_integer(), False
+
+        if isinstance(expr, Identifier):
+            if self._param_types.get(expr.name) == ParamType.INTEGER:
+                return True, True
+            if self._var_types.get(expr.name) == ParamType.INTEGER:
+                return True, True
+            return False, False
+
+        if isinstance(expr, ArrayAccess):
+            if self._var_types.get(expr.name) == ParamType.INTEGER:
+                return True, True
+            return False, False
+
+        if isinstance(expr, UnaryExpr):
+            return self._expr_integer_kind(expr.operand)
+
+        if isinstance(expr, BinaryExpr):
+            if expr.op in {'%', '<<', '>>', '&', '|', '^'}:
+                return True, True
+            if expr.op in {'+', '-', '*', '/'}:
+                left_like, left_typed = self._expr_integer_kind(expr.left)
+                right_like, right_typed = self._expr_integer_kind(expr.right)
+                return left_like and right_like, left_typed or right_typed
+            return False, False
+
+        if isinstance(expr, TernaryExpr):
+            true_like, true_typed = self._expr_integer_kind(expr.true_expr)
+            false_like, false_typed = self._expr_integer_kind(expr.false_expr)
+            return true_like and false_like, true_typed or false_typed
+
+        return False, False
+
     def _compile_node_voltage(self, node: str, index_expr=None, index_expr2=None) -> str:
         """Compile a node voltage reference."""
         if index_expr is not None:
@@ -1868,6 +2085,15 @@ class _ModuleCompiler:
                 return f"self._transition(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {target}, {delay}, {rise}, {fall})"
             return f"self._transition({base_key!r}, time, {target}, {delay}, {rise}, {fall})"
 
+        if name == 'slew':
+            base_key = self._alloc_stateful_func_key("slew", expr)
+            target = args[0] if len(args) > 0 else "0.0"
+            maxrise = args[1] if len(args) > 1 else "0.0"
+            maxfall = args[2] if len(args) > 2 else maxrise
+            if self._in_loop_var:
+                return f"self._slew(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {target}, {maxrise}, {maxfall})"
+            return f"self._slew({base_key!r}, time, {target}, {maxrise}, {maxfall})"
+
         if name == 'idtmod':
             key = self._alloc_stateful_func_key("idtmod", expr)
             self._uses_idtmod = True
@@ -1878,11 +2104,20 @@ class _ModuleCompiler:
 
         if name == 'cross':
             # cross() as a function (in some contexts)
-            base_key = f"cross_fn_{self._cross_counter}"
-            self._cross_counter += 1
+            base_key = self._alloc_stateful_func_key("last_crossing", expr) + "_fn"
             val = args[0]
             direction = args[1] if len(args) > 1 else "0"
-            return f"self._check_cross({base_key!r}, time, {val}, {direction})"
+            time_tol = args[2] if len(args) > 2 else "0.0"
+            expr_tol = args[3] if len(args) > 3 else "1e-12"
+            return f"self._check_cross({base_key!r}, time, {val}, {direction}, {time_tol}, {expr_tol})"
+
+        if name == 'last_crossing':
+            key = self._alloc_stateful_func_key("last_crossing", expr)
+            val = args[0] if len(args) > 0 else "0.0"
+            direction = args[1] if len(args) > 1 else "0"
+            time_tol = args[2] if len(args) > 2 else "0.0"
+            expr_tol = args[3] if len(args) > 3 else "1e-12"
+            return f"self._last_crossing({key!r}, time, {val}, {direction}, {time_tol}, {expr_tol})"
 
         if name == 'ln':
             return f"math.log({args[0]})"
@@ -1909,16 +2144,31 @@ class _ModuleCompiler:
         if name == 'ceil':
             return f"math.ceil({args[0]})"
         if name == '$rdist_normal':
-            # $rdist_normal(seed, mean, std_dev) — ignore seed, use random.gauss
-            mean = args[1] if len(args) > 1 else "0.0"
-            std  = args[2] if len(args) > 2 else "1.0"
-            return f"random.gauss({mean}, {std})"
+            # $rdist_normal(seed, mean, std_dev)
+            # Also accept $rdist_normal(mean, std_dev) as a seedless shorthand.
+            if len(args) >= 3:
+                seed, mean, std = args[0], args[1], args[2]
+            elif len(args) == 2:
+                seed, mean, std = "None", args[0], args[1]
+            elif len(args) == 1:
+                seed, mean, std = "None", args[0], "1.0"
+            else:
+                seed, mean, std = "None", "0.0", "1.0"
+            return f"self._rand_normal({seed}, {mean}, {std})"
         if name == '$random':
-            return "random.randint(-2147483648, 2147483647)"
+            seed = args[0] if len(args) > 0 else "None"
+            return f"self._rand_int32({seed})"
         if name == '$dist_uniform':
-            lo = args[1] if len(args) > 1 else "0.0"
-            hi = args[2] if len(args) > 2 else "1.0"
-            return f"random.uniform({lo}, {hi})"
+            # $dist_uniform(seed, lo, hi) or shorthand $dist_uniform(lo, hi)
+            if len(args) >= 3:
+                seed, lo, hi = args[0], args[1], args[2]
+            elif len(args) == 2:
+                seed, lo, hi = "None", args[0], args[1]
+            elif len(args) == 1:
+                seed, lo, hi = "None", "0.0", args[0]
+            else:
+                seed, lo, hi = "None", "0.0", "1.0"
+            return f"self._rand_uniform({seed}, {lo}, {hi})"
         if name == '$fopen':
             filename = args[0] if len(args) > 0 else "'output.txt'"
             mode = args[1] if len(args) > 1 else "'w'"

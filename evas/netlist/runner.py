@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, TextIO
 
 import numpy as np
 
+from evas.compiler import ast_nodes as va_ast
 from evas.compiler.parser import parse as parse_va
 from evas.compiler.preprocessor import preprocess
 from evas.simulator.backend import compile_module
@@ -27,6 +28,35 @@ from .spectre_parser import (
 
 VERSION = '0.1.0'
 
+_EVAS_PROFILE_PRESETS = {
+    # Focus on runtime.
+    "fast": {"refine_factor": 8, "refine_steps": 4, "reltol_min": 5e-3},
+    # Keep current default behavior.
+    "balanced": {"refine_factor": 16, "refine_steps": 8, "reltol_min": 1e-3},
+    # Focus on edge timing / crossing precision.
+    "precision": {"refine_factor": 32, "refine_steps": 16, "reltol_max": 1e-4},
+}
+
+_SUPPLY_PORT_NAMES = {
+    "vdd", "vdda", "vddd", "vcc", "avdd", "dvdd",
+    "vss", "vssa", "vssd", "gnd", "gnda", "gndd", "vee",
+}
+
+
+def _apply_evas_profile(profile: str, refine_factor: int, refine_steps: int, reltol: float):
+    p = (profile or "").strip().lower()
+    if p not in _EVAS_PROFILE_PRESETS:
+        return refine_factor, refine_steps, reltol, ""
+    cfg = _EVAS_PROFILE_PRESETS[p]
+    rf = int(cfg["refine_factor"])
+    rs = int(cfg["refine_steps"])
+    rt = float(reltol)
+    if "reltol_min" in cfg:
+        rt = max(rt, float(cfg["reltol_min"]))
+    if "reltol_max" in cfg:
+        rt = min(rt, float(cfg["reltol_max"]))
+    return rf, rs, rt, p
+
 
 # ---------------------------------------------------------------------------
 # VA model compilation
@@ -40,10 +70,169 @@ def _compile_va(va_path: str, source_dir: str = None):
     pp_src, defines, default_trans = preprocess(source, source_dir=source_dir)
     module = parse_va(pp_src)
     module.defines = defines
+    _validate_va_spectre_compat(module)
     if default_trans is None:
         default_trans = 1e-12
     cls = compile_module(module, default_trans)
     return cls, module
+
+
+def _expr_has_call(expr, call_name: str) -> bool:
+    """Return True if an expression tree contains a call by name."""
+    if expr is None:
+        return False
+    if isinstance(expr, va_ast.FunctionCall):
+        if expr.name.lower() == call_name.lower():
+            return True
+        return any(_expr_has_call(arg, call_name) for arg in expr.args)
+    if isinstance(expr, va_ast.MethodCall):
+        return any(_expr_has_call(arg, call_name) for arg in expr.args)
+    if isinstance(expr, va_ast.BinaryExpr):
+        return (_expr_has_call(expr.left, call_name) or
+                _expr_has_call(expr.right, call_name))
+    if isinstance(expr, va_ast.UnaryExpr):
+        return _expr_has_call(expr.operand, call_name)
+    if isinstance(expr, va_ast.TernaryExpr):
+        return (_expr_has_call(expr.cond, call_name) or
+                _expr_has_call(expr.true_expr, call_name) or
+                _expr_has_call(expr.false_expr, call_name))
+    if isinstance(expr, va_ast.ArrayAccess):
+        return _expr_has_call(expr.index, call_name)
+    if isinstance(expr, va_ast.BranchAccess):
+        return (_expr_has_call(expr.node1_index, call_name) or
+                _expr_has_call(expr.node2_index, call_name) or
+                _expr_has_call(expr.node1_index2, call_name) or
+                _expr_has_call(expr.node2_index2, call_name))
+    return False
+
+
+def _assignment_target_name(assign) -> Optional[str]:
+    target = getattr(assign, "target", None)
+    if isinstance(target, va_ast.Identifier):
+        return target.name
+    if isinstance(target, va_ast.ArrayAccess):
+        return target.name
+    return None
+
+
+def _validate_transition_statement(stmt, conditional_depth: int = 0,
+                                   genvar_names: Optional[set] = None) -> None:
+    """Reject transition() where Spectre's analog-operator rules reject it."""
+    if genvar_names is None:
+        genvar_names = set()
+    if stmt is None:
+        return
+    if isinstance(stmt, va_ast.Block):
+        for child in stmt.statements:
+            _validate_transition_statement(child, conditional_depth, genvar_names)
+        return
+    if isinstance(stmt, va_ast.Contribution):
+        if conditional_depth > 0 and _expr_has_call(stmt.expr, "transition"):
+            raise ValueError(
+                "Spectre-incompatible Verilog-A: transition() contribution "
+                "is inside a conditional/event/loop/case statement"
+            )
+        return
+    if isinstance(stmt, va_ast.Assignment):
+        if conditional_depth > 0 and _expr_has_call(stmt.value, "transition"):
+            raise ValueError(
+                "Spectre-incompatible Verilog-A: transition() expression "
+                "is inside a conditional/event/loop/case statement"
+            )
+        return
+    if isinstance(stmt, va_ast.SystemTask):
+        return
+    if isinstance(stmt, va_ast.EventStatement):
+        _validate_transition_statement(stmt.body, conditional_depth, genvar_names)
+        return
+    if isinstance(stmt, va_ast.IfStatement):
+        _validate_transition_statement(stmt.then_body, conditional_depth, genvar_names)
+        _validate_transition_statement(stmt.else_body, conditional_depth, genvar_names)
+        return
+    if isinstance(stmt, va_ast.ForStatement):
+        loop_var = _assignment_target_name(stmt.init)
+        loop_depth = conditional_depth if loop_var in genvar_names else conditional_depth + 1
+        _validate_transition_statement(stmt.body, loop_depth, genvar_names)
+        return
+    if isinstance(stmt, va_ast.WhileStatement):
+        _validate_transition_statement(stmt.body, conditional_depth + 1, genvar_names)
+        return
+    if isinstance(stmt, va_ast.CaseStatement):
+        for item in stmt.items:
+            _validate_transition_statement(item.body, conditional_depth + 1, genvar_names)
+
+
+def _iter_contributions(stmt):
+    """Yield Contribution nodes from a statement tree."""
+    if stmt is None:
+        return
+    if isinstance(stmt, va_ast.Block):
+        for child in stmt.statements:
+            yield from _iter_contributions(child)
+    elif isinstance(stmt, va_ast.Contribution):
+        yield stmt
+    elif isinstance(stmt, va_ast.EventStatement):
+        yield from _iter_contributions(stmt.body)
+    elif isinstance(stmt, va_ast.IfStatement):
+        yield from _iter_contributions(stmt.then_body)
+        yield from _iter_contributions(stmt.else_body)
+    elif isinstance(stmt, va_ast.ForStatement):
+        yield from _iter_contributions(stmt.body)
+    elif isinstance(stmt, va_ast.WhileStatement):
+        yield from _iter_contributions(stmt.body)
+    elif isinstance(stmt, va_ast.CaseStatement):
+        for item in stmt.items:
+            yield from _iter_contributions(item.body)
+
+
+def _contributed_voltage_ports(module) -> set:
+    """Collect Verilog-A port names driven by V(port) <+ contributions."""
+    if module.analog_block is None:
+        return set()
+    ports = set(module.ports)
+    driven = set()
+    for contrib in _iter_contributions(module.analog_block.body):
+        branch = contrib.branch
+        if branch.access_type.upper() != "V":
+            continue
+        if branch.node1 in ports:
+            driven.add(branch.node1)
+    return driven
+
+
+def _validate_va_spectre_compat(module) -> None:
+    """Run small Spectre-compatibility checks that EVAS can validate locally."""
+    if module.analog_block is not None:
+        genvar_names = {v.name for v in module.variables if getattr(v, "is_genvar", False)}
+        _validate_transition_statement(module.analog_block.body, genvar_names=genvar_names)
+
+
+def _source_constrained_nodes(netlist: SpectreNetlist) -> set:
+    nodes = set()
+    for src in netlist.sources:
+        nodes.add(src.node_pos)
+        if src.node_neg != netlist.ground:
+            nodes.add(src.node_neg)
+    nodes.discard(netlist.ground)
+    return nodes
+
+
+def _validate_supply_drive_conflicts(instance, module, node_map: Dict[str, str],
+                                     source_nodes: set) -> None:
+    """Reject a common Spectre rigid-branch-loop pattern.
+
+    A behavioral module should not hard-drive supply-like ports that are already
+    constrained by external voltage sources in the testbench.
+    """
+    for port in _contributed_voltage_ports(module):
+        if port.lower() not in _SUPPLY_PORT_NAMES:
+            continue
+        ext_node = node_map.get(port)
+        if ext_node in source_nodes:
+            raise ValueError(
+                f"instance {instance.name} of {module.name} drives supply port "
+                f"{port!r} mapped to externally sourced node {ext_node!r}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -146,8 +335,8 @@ def _add_spectre_source(sim: Simulator, src: SpectreSource,
         sim.add_source(node, pwl(times, values))
 
     elif stype in ('sin', 'sine'):
-        offset = float(params.get('sinedc', params.get('dc', 0.0)))
-        ampl = float(params.get('ampl', 0.0))
+        offset = float(params.get('sinedc', params.get('offset', params.get('dc', 0.0))))
+        ampl = float(params.get('ampl', params.get('mag', params.get('amplitude', 0.0))))
         freq = float(params.get('freq', 0.0))
 
         if freq <= 0:
@@ -157,7 +346,7 @@ def _add_spectre_source(sim: Simulator, src: SpectreSource,
             return warn
 
         if ampl == 0:
-            warn.append(f"{src.name}: sine ampl=0 — treated as DC {offset} V")
+            warn.append(f"{src.name}: sine amplitude=0 — treated as DC {offset} V")
             sim.add_source(node, dc(offset))
             return warn
 
@@ -401,7 +590,12 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
                       f"(original path not found, used scs directory fallback)")
             warnings += 1
 
-        cls, module = _compile_va(str(va_path))
+        try:
+            cls, module = _compile_va(str(va_path))
+        except Exception as e:
+            log.write(f"ERROR: Failed to compile Verilog-A file {va_path.name}: {e}")
+            errors += 1
+            continue
         models_by_name[module.name] = (cls, module)
         log.write(f"Compiled Verilog-A module: {module.name}")
         for w in module.warnings:
@@ -441,6 +635,7 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
 
     # 4. Instantiate models
     instance_counts: Dict[str, int] = {}
+    source_nodes = _source_constrained_nodes(netlist)
     for inst in netlist.instances:
         if inst.model_name not in models_by_name:
             log.write(f"ERROR: Model {inst.model_name} not found "
@@ -450,12 +645,22 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
 
         cls, module = models_by_name[inst.model_name]
         model = cls()
-        model.node_map = _build_node_map(inst, module)
+        node_map = _build_node_map(inst, module)
+        try:
+            _validate_supply_drive_conflicts(inst, module, node_map, source_nodes)
+        except ValueError as e:
+            log.write(f"ERROR: Spectre-incompatible instance {inst.name}: {e}")
+            errors += 1
+            continue
+        model.node_map = node_map
         # Case-insensitive param update: netlist keys are lowercased, model keys
         # preserve the original VA case. Match by lowercase to update correctly.
         lower_to_model_key = {k.lower(): k for k in model.params}
+        param_types = {p.name.lower(): p.param_type for p in module.parameters}
         for k, v in inst.params.items():
             model_key = lower_to_model_key.get(k.lower(), k)
+            if param_types.get(model_key.lower()) == va_ast.ParamType.INTEGER:
+                v = int(float(v))
             model.params[model_key] = v
         sim.add_model(model)
         instance_counts[inst.model_name] = instance_counts.get(inst.model_name, 0) + 1
@@ -504,6 +709,11 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         refine_factor = min(refine_factor, 8)
         refine_steps = min(refine_steps, 4)
 
+    evas_profile = str(simopt.get('evas_profile', '')).lower()
+    refine_factor, refine_steps, reltol, applied_profile = _apply_evas_profile(
+        evas_profile, refine_factor, refine_steps, reltol
+    )
+
     log.write("")
     log.write("*****************************************************")
     log.write(f"Transient Analysis `{netlist.tran.name}': "
@@ -518,6 +728,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     log.write(f"    iabstol = {iabstol:g}")
     log.write(f"    refine_factor = {refine_factor}")
     log.write(f"    refine_steps  = {refine_steps}")
+    if applied_profile:
+        log.write(f"    evas_profile = {applied_profile}")
     log.write("")
 
     t_sim_start = time.time()

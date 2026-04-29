@@ -107,8 +107,10 @@ class CrossDetector:
     direction: int = 0  # +1=rising, -1=falling, 0=both
     last_triggered: bool = False  # set by check(), read by simulator
     t_cross: float = 0.0  # interpolated exact crossing time
+    last_cross_time: float = -1.0  # debounced last-trigger timestamp
 
-    def check(self, time: float, val: float) -> bool:
+    def check(self, time: float, val: float,
+              time_tol: float = 0.0, expr_tol: float = 1e-12) -> bool:
         """Check if a zero crossing occurred. Returns True if triggered."""
         if not self.initialized:
             self.pprev_val = self.prev_val = val
@@ -117,11 +119,11 @@ class CrossDetector:
             self.last_triggered = False
             return False
 
-        _tol = 1e-12  # guard against floating-point rounding at exact crossings
+        e_tol = abs(float(expr_tol)) if expr_tol is not None else 1e-12
         triggered = False
-        if self.direction >= 0 and self.prev_val < 0 and val >= -_tol:
+        if self.direction >= 0 and self.prev_val < -e_tol and val >= -e_tol:
             triggered = True  # Rising
-        if self.direction <= 0 and self.prev_val > 0 and val <= _tol:
+        if self.direction <= 0 and self.prev_val > e_tol and val <= e_tol:
             if self.direction == 0 or self.direction == -1:
                 triggered = True  # Falling
 
@@ -129,13 +131,18 @@ class CrossDetector:
             dv = val - self.prev_val
             frac = max(0.0, min(1.0, -self.prev_val / dv)) if abs(dv) > 1e-30 else 0.0
             self.t_cross = self.prev_time + frac * (time - self.prev_time)
+            t_tol = max(0.0, float(time_tol or 0.0))
+            if self.last_cross_time >= 0.0 and abs(self.t_cross - self.last_cross_time) <= t_tol:
+                triggered = False
+            else:
+                self.last_cross_time = self.t_cross
             # Clamp val to the post-crossing side to prevent immediate re-trigger.
             # Falling: prev_val was >0, val near 0 — ensure stored val is <= 0.
             # Rising:  prev_val was <0, val near 0 — ensure stored val is >= 0.
             if self.prev_val > 0:
-                val = min(val, 0.0)
+                val = min(val, e_tol)
             else:
-                val = max(val, 0.0)
+                val = max(val, -e_tol)
 
         self.pprev_val = self.prev_val
         self.pprev_time = self.prev_time
@@ -156,13 +163,14 @@ class CrossDetector:
             return self.prev_time + (-self.prev_val / rate)
         return None
 
-    def would_cross(self, val: float) -> bool:
+    def would_cross(self, val: float, expr_tol: float = 1e-12) -> bool:
         """Check if a crossing would occur without updating state."""
         if not self.initialized:
             return False
-        if self.direction >= 0 and self.prev_val < 0 and val >= -1e-12:
+        e_tol = abs(float(expr_tol)) if expr_tol is not None else 1e-12
+        if self.direction >= 0 and self.prev_val < -e_tol and val >= -e_tol:
             return True
-        if self.direction <= 0 and self.prev_val > 0 and val <= 1e-12:
+        if self.direction <= 0 and self.prev_val > e_tol and val <= e_tol:
             if self.direction == 0 or self.direction == -1:
                 return True
         return False
@@ -185,8 +193,12 @@ class AboveDetector:
             self.pprev_val = self.prev_val = val
             self.pprev_time = self.prev_time = time
             self.initialized = True
-            self.last_triggered = False
-            return False
+            triggered = self.direction >= 0 and val >= -1e-12
+            self.last_triggered = triggered
+            if triggered:
+                self.t_cross = time
+                self.prev_val = max(val, 0.0)
+            return triggered
 
         triggered = False
         if self.direction >= 0 and self.prev_val < 0 and val >= -1e-12:
@@ -501,6 +513,12 @@ def pwl(times, values):
         raise ValueError("PWL waveform requires at least one time/value pair")
     if len(times) != len(values):
         raise ValueError("PWL waveform times and values must have the same length")
+    for i in range(1, len(times)):
+        if times[i] <= times[i - 1]:
+            raise ValueError(
+                "PWL waveform times must be strictly increasing "
+                f"(t[{i - 1}]={times[i - 1]!r}, t[{i}]={times[i]!r})"
+            )
 
     sorted_t = sorted(set(times))
 
@@ -510,7 +528,7 @@ def pwl(times, values):
         if t >= times[-1]:
             return values[-1]
         for i in range(len(times) - 1):
-            if times[i] <= t <= times[i + 1]:
+            if times[i] <= t < times[i + 1]:
                 frac = (t - times[i]) / (times[i + 1] - times[i])
                 return values[i] + frac * (values[i + 1] - values[i])
         return values[-1]

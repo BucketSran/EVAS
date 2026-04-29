@@ -440,6 +440,7 @@ class Parser:
         """Parse: real|integer|genvar name[range] [= init] [, name] ;"""
         type_tok = self.advance()
         var_type = ParamType.REAL if type_tok.type == TokenType.REAL else ParamType.INTEGER
+        is_genvar = type_tok.type == TokenType.GENVAR
 
         while True:
             name = self.expect(TokenType.IDENT).value
@@ -466,7 +467,7 @@ class Parser:
 
             vd = VariableDecl(name=name, var_type=var_type, is_array=is_array,
                               array_hi=array_hi, array_lo=array_lo,
-                              init_values=init_values)
+                              init_values=init_values, is_genvar=is_genvar)
             module.variables.append(vd)
 
             if not self.match(TokenType.COMMA):
@@ -547,7 +548,19 @@ class Parser:
         return EventStatement(event=event, body=body)
 
     def _parse_single_event(self) -> EventExpr:
-        """Parse: cross(expr, dir) | above(expr, dir) | initial_step | timer(period) | timer(start, period) | final_step"""
+        """Parse event expressions.
+
+        Supported forms include:
+        - cross(expr)
+        - cross(expr, dir)
+        - cross(expr, dir, time_tol)
+        - cross(expr, dir, time_tol, expr_tol)
+        - above(expr, dir)
+        - initial_step
+        - timer(period)
+        - timer(start, period)
+        - final_step
+        """
         tok = self.peek()
 
         if tok.type == TokenType.IDENT:
@@ -556,12 +569,20 @@ class Parser:
                 self.expect(TokenType.LPAREN)
                 expr = self._parse_expression()
                 direction = None
+                time_tol_expr = None
+                expr_tol_expr = None
                 if self.match(TokenType.COMMA):
                     dir_expr = self._parse_expression()
                     direction = self._eval_const(dir_expr)
+                    if self.match(TokenType.COMMA):
+                        time_tol_expr = self._parse_expression()
+                        if self.match(TokenType.COMMA):
+                            expr_tol_expr = self._parse_expression()
                 self.expect(TokenType.RPAREN)
                 return EventExpr(EventType.CROSS, [expr],
-                                 direction=int(direction) if direction else None)
+                                 direction=int(direction) if direction else None,
+                                 time_tol_expr=time_tol_expr,
+                                 expr_tol_expr=expr_tol_expr)
 
             elif tok.value == 'above':
                 self.advance()
@@ -822,7 +843,8 @@ class Parser:
             operand = self._parse_unary()
             # Optimize: -number → NumberLiteral(-value)
             if isinstance(operand, NumberLiteral):
-                return NumberLiteral(-operand.value)
+                raw = f"-{operand.raw}" if operand.raw else None
+                return NumberLiteral(-operand.value, raw)
             return UnaryExpr('-', operand)
         if self.match(TokenType.BANG):
             operand = self._parse_unary()
@@ -840,7 +862,7 @@ class Parser:
         # Number literal
         if tok.type == TokenType.NUMBER:
             self.advance()
-            return NumberLiteral(float(tok.value))
+            return NumberLiteral(float(tok.value), tok.raw or tok.value)
 
         # String literal
         if tok.type == TokenType.STRING:

@@ -91,8 +91,10 @@ They are the best reference for how to wire up common patterns:
 |---------|--------|
 | `V(node) <+`, `V(a,b)` differential | ✅ |
 | `@(cross(...))`, `@(above(...))`, `@(initial_step)` | ✅ |
+| `cross(expr, dir, time_tol, expr_tol)` event tolerances | ✅ (behavioral approximation) |
 | `@(timer(period))`, `@(final_step)` | ✅ |
 | `transition()` with delay / rise / fall | ✅ |
+| `slew(x, maxrise, maxfall)` transient limiter | ✅ (behavioral approximation) |
 | `for`, `if/else`, `case/endcase`, `begin/end` | ✅ |
 | arrays, parameters (real / integer / string) | ✅ |
 | `` `include ``, `` `define ``, `` `default_transition `` | ✅ |
@@ -101,9 +103,21 @@ They are the best reference for how to wire up common patterns:
 | `$bound_step()` | ✅ |
 | `$fopen()`, `$fclose()`, `$fstrobe()`, `$fwrite()`, `$fdisplay()` | ✅ |
 | `$display`, `$strobe`, `$random`, `$dist_uniform()`, `$rdist_normal()` | ✅ |
+| `last_crossing(expr, dir, time_tol, expr_tol)` | ✅ (most-recent event-time approximation) |
 | `I() <+`, `ddt()`, `idt()`, `q() <+` | not supported by design |
 | AC/DC analysis, transistors | not supported by design |
 | Spectre `subckt` hierarchy | not yet implemented |
+
+### Accuracy Profiles
+
+You can set `simulatorOptions options evas_profile=<mode>` in `.scs`:
+
+- `fast`: lower refinement (`refine_factor=8`, `refine_steps=4`) for faster runtime
+- `balanced`: default EVAS behavior (`16`, `8`)
+- `precision`: higher refinement (`32`, `16`) for tighter event/cross timing
+
+`errpreset=conservative/liberal` is still respected; `evas_profile` applies an explicit EVAS-side override when set.
+Practical correspondence: `fast ≈ liberal`, `balanced ≈ moderate`, `precision ≈ conservative` (guidance only, not solver-equivalence claim).
 
 ## CSV output format
 
