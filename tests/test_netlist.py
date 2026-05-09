@@ -330,6 +330,21 @@ class TestAddSpectreSourceDegenerateCases:
         assert sim.sources[-1].waveform(0.0) == pytest.approx(0.45)
         assert sim.sources[-1].waveform(0.25 / 73e6) == pytest.approx(0.85)
 
+    def test_sine_offset_param_is_not_waveform_dc(self):
+        """`offset=` is not Spectre's sine waveform DC; use `sinedc=` instead."""
+        src = SpectreSource(
+            name="Vin",
+            node_pos="vin",
+            node_neg="0",
+            source_type="sine",
+            params={"type": "sine", "freq": 100e6, "ampl": 0.2, "offset": 0.45},
+        )
+        sim = self._sim()
+        warns = _add_spectre_source(sim, src, "0")
+        assert warns == []
+        assert sim.sources[-1].waveform(0.0) == pytest.approx(0.0)
+        assert sim.sources[-1].waveform(0.25 / 100e6) == pytest.approx(0.2)
+
     def test_pwl_duplicate_times_are_rejected_like_spectre(self):
         src = SpectreSource(
             name="Vin",

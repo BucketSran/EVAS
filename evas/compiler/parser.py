@@ -390,7 +390,7 @@ class Parser:
         self.match(TokenType.SEMI)
 
     def _parse_parameter_decl(self, module: Module):
-        """Parse: parameter [real|integer] name = value [from range] ;"""
+        """Parse: parameter [real|integer|string] name = value [from range] ;"""
         self.expect(TokenType.PARAMETER)
 
         param_type = ParamType.REAL
@@ -398,6 +398,9 @@ class Parser:
             param_type = ParamType.REAL
         elif self.match(TokenType.INTEGER):
             param_type = ParamType.INTEGER
+        elif self.at(TokenType.IDENT) and self.peek().value == 'string':
+            self.advance()
+            param_type = ParamType.STRING
 
         name = self.expect(TokenType.IDENT).value
 

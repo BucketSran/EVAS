@@ -335,7 +335,10 @@ def _add_spectre_source(sim: Simulator, src: SpectreSource,
         sim.add_source(node, pwl(times, values))
 
     elif stype in ('sin', 'sine'):
-        offset = float(params.get('sinedc', params.get('offset', params.get('dc', 0.0))))
+        # Match Spectre sine-source semantics: waveform DC offset is `sinedc`
+        # (with `dc` kept for existing Spectre-style alias support).  Real
+        # Spectre does not treat `offset=` as the transient sine DC component.
+        offset = float(params.get('sinedc', params.get('dc', 0.0)))
         ampl = float(params.get('ampl', params.get('mag', params.get('amplitude', 0.0))))
         freq = float(params.get('freq', 0.0))
 
@@ -661,6 +664,9 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
             model_key = lower_to_model_key.get(k.lower(), k)
             if param_types.get(model_key.lower()) == va_ast.ParamType.INTEGER:
                 v = int(float(v))
+            elif param_types.get(model_key.lower()) == va_ast.ParamType.STRING and isinstance(v, str):
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in {'"', "'"}:
+                    v = v[1:-1]
             model.params[model_key] = v
         sim.add_model(model)
         instance_counts[inst.model_name] = instance_counts.get(inst.model_name, 0) + 1
@@ -737,7 +743,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
                      refine_factor=refine_factor,
                      refine_steps=refine_steps,
                      reltol=reltol,
-                     vabstol=vabstol)
+                     vabstol=vabstol,
+                     record_step=tstep)
 
     for pct in range(10, 101, 10):
         t_at = tstop * pct / 100.0

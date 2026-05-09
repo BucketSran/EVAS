@@ -47,6 +47,13 @@ class CompiledModel:
         self.timer_last_fired: Dict[str, float] = {}  # key → last absolute-time fire target
         self.timer_kinds: Dict[str, str] = {}  # key → absolute | periodic
         self._bound_step: float = 0.0  # $bound_step limit (0 = no limit)
+        self._transition_breakpoint_min_ramp: float = 0.0
+        self._event_context_active: bool = False
+        self._step_prev_node_voltages: Dict[str, float] = {}
+        self._step_curr_node_voltages: Dict[str, float] = {}
+        self._step_prev_time: float = 0.0
+        self._step_time: float = 0.0
+        self._event_interpolated_nodes: set[str] = set()
         self._perf_stats: Dict[str, int] = {
             "timer_periodic_checks": 0,
             "timer_periodic_fires": 0,
@@ -84,10 +91,22 @@ class CompiledModel:
     def final_step(self, node_voltages: Dict[str, float], time: float):
         pass
 
+    def _prepare_step(self, prev_node_voltages: Dict[str, float],
+                      curr_node_voltages: Dict[str, float],
+                      prev_time: float, time: float):
+        """Cache step endpoints so event bodies can read values at t_cross."""
+        self._step_prev_node_voltages = dict(prev_node_voltages)
+        self._step_curr_node_voltages = dict(curr_node_voltages)
+        self._step_prev_time = float(prev_time)
+        self._step_time = float(time)
+        for child in self._child_models:
+            child._prepare_step(prev_node_voltages, curr_node_voltages, prev_time, time)
+
     def next_breakpoint(self, time: float) -> Optional[float]:
         bps = []
+        min_ramp = getattr(self, "_transition_breakpoint_min_ramp", 0.0)
         for ts in self.transitions.values():
-            bp = ts.next_breakpoint(time)
+            bp = ts.next_breakpoint(time, min_ramp)
             if bp is not None:
                 bps.append(bp)
         for cd in self.cross_detectors.values():
@@ -134,7 +153,11 @@ class CompiledModel:
             self.timer_states[key] = next_fire + missed * p
             self._perf_stats["timer_periodic_skips"] += 1
             return False
-        return time >= next_fire - 1e-18
+        due = time >= next_fire - 1e-18
+        if due:
+            self._event_time = time
+            self._event_interpolated_nodes = set()
+        return due
 
     def _reschedule_timer(self, key: str, time: float, period: float):
         p = float(period)
@@ -163,6 +186,8 @@ class CompiledModel:
         if time >= armed_target - 1e-18:
             self.timer_last_fired[key] = armed_target
             self._perf_stats["timer_absolute_fires"] += 1
+            self._event_time = time
+            self._event_interpolated_nodes = set()
             return True
         return False
 
@@ -215,6 +240,20 @@ class CompiledModel:
         if isinstance(ext, str) and ext.startswith('@parent:') and self._parent_model is not None:
             pnode = ext[len('@parent:'):]
             ext = self._parent_model.node_map.get(pnode, pnode)
+        if (
+            self._event_context_active
+            and isinstance(ext, str)
+            and (node in self._event_interpolated_nodes or ext in self._event_interpolated_nodes)
+        ):
+            if ext in self._step_prev_node_voltages and ext in self._step_curr_node_voltages:
+                t0 = self._step_prev_time
+                t1 = self._step_time
+                if t1 > t0 + 1e-30:
+                    frac = (float(self._event_time) - t0) / (t1 - t0)
+                    frac = max(0.0, min(1.0, frac))
+                    v0 = self._step_prev_node_voltages[ext]
+                    v1 = self._step_curr_node_voltages[ext]
+                    return v0 + frac * (v1 - v0)
         if ext in node_voltages:
             return node_voltages[ext]
         # Check output nodes (self-driven)
@@ -289,13 +328,15 @@ class CompiledModel:
         return nxt
 
     def _check_cross(self, key: str, time: float, val: float, direction: int = 0,
-                     time_tol: float = 0.0, expr_tol: float = 1e-12) -> bool:
+                     time_tol: float = 0.0, expr_tol: float = 1e-12,
+                     interp_nodes: Optional[List[str]] = None) -> bool:
         if key not in self.cross_detectors:
             self.cross_detectors[key] = CrossDetector(direction=direction)
         fired = self.cross_detectors[key].check(time, val, time_tol=time_tol, expr_tol=expr_tol)
         if fired:
             self._perf_stats["cross_fires"] += 1
             self._event_time = self.cross_detectors[key].t_cross
+            self._event_interpolated_nodes = set(interp_nodes or [])
         return fired
 
     def _last_crossing(self, key: str, time: float, val: float, direction: int = 0,
@@ -314,6 +355,7 @@ class CompiledModel:
         if fired:
             self._perf_stats["above_fires"] += 1
             self._event_time = self.above_detectors[key].t_cross
+            self._event_interpolated_nodes = set()
         return fired
 
     def _idtmod(self, key: str, time: float, x: float,
@@ -1338,10 +1380,12 @@ class _ModuleCompiler:
                     return []
                 key = self._alloc_event_key("cross", event)
                 lines.append(f"{prefix}if {self._compile_cross_call(event, key)}:")
+                lines.append(f"{prefix}    self._event_context_active = True")
                 body_lines = self._compile_statement(stmt.body, indent + 1)
                 lines.extend(body_lines)
                 if not body_lines:
                     lines.append(f"{prefix}    pass")
+                lines.append(f"{prefix}    self._event_context_active = False")
                 lines.append(f"{prefix}    self._event_time = time")
 
             elif event.event_type == EventType.ABOVE:
@@ -1351,10 +1395,12 @@ class _ModuleCompiler:
                 expr = self._compile_expr(event.args[0])
                 direction = event.direction if event.direction is not None else 1
                 lines.append(f"{prefix}if self._check_above({key!r}, time, {expr}, {direction}):")
+                lines.append(f"{prefix}    self._event_context_active = True")
                 body_lines = self._compile_statement(stmt.body, indent + 1)
                 lines.extend(body_lines)
                 if not body_lines:
                     lines.append(f"{prefix}    pass")
+                lines.append(f"{prefix}    self._event_context_active = False")
                 lines.append(f"{prefix}    self._event_time = time")
 
             elif event.event_type == EventType.TIMER:
@@ -1363,18 +1409,24 @@ class _ModuleCompiler:
                     start_expr = self._compile_expr(event.args[0])
                     period_expr = self._compile_expr(event.args[1])
                     lines.append(f"{prefix}if self._check_timer_due({key!r}, time, {period_expr}, {start_expr}):")
+                    lines.append(f"{prefix}    self._event_interpolated_nodes = set()")
+                    lines.append(f"{prefix}    self._event_context_active = True")
                     body_lines = self._compile_statement(stmt.body, indent + 1)
                     lines.extend(body_lines)
                     if not body_lines:
                         lines.append(f"{prefix}    pass")
+                    lines.append(f"{prefix}    self._event_context_active = False")
                     lines.append(f"{prefix}    self._reschedule_timer({key!r}, time, {period_expr})")
                 else:
                     target_expr = self._compile_expr(event.args[0])
                     lines.append(f"{prefix}if self._check_timer_at({key!r}, time, {target_expr}):")
+                    lines.append(f"{prefix}    self._event_interpolated_nodes = set()")
+                    lines.append(f"{prefix}    self._event_context_active = True")
                     body_lines = self._compile_statement(stmt.body, indent + 1)
                     lines.extend(body_lines)
                     if not body_lines:
                         lines.append(f"{prefix}    pass")
+                    lines.append(f"{prefix}    self._event_context_active = False")
                     lines.append(f"{prefix}    self.timer_states[{key!r}] = {target_expr}")
                 lines.append(f"{prefix}    self._event_time = time")
 
@@ -1413,10 +1465,12 @@ class _ModuleCompiler:
             if conditions:
                 cond = ' or '.join(conditions)
                 lines.append(f"{prefix}if {cond}:")
+                lines.append(f"{prefix}    self._event_context_active = True")
                 body_lines = self._compile_statement(stmt.body, indent + 1)
                 lines.extend(body_lines)
                 if not body_lines:
                     lines.append(f"{prefix}    pass")
+                lines.append(f"{prefix}    self._event_context_active = False")
                 lines.append(f"{prefix}    self._event_time = time")
 
         return lines
@@ -1448,7 +1502,37 @@ class _ModuleCompiler:
             time_tol = self._compile_expr(event.time_tol_expr)
         if event.expr_tol_expr is not None:
             expr_tol = self._compile_expr(event.expr_tol_expr)
-        return f"self._check_cross({key!r}, time, {expr}, {direction}, {time_tol}, {expr_tol})"
+        interp_nodes = sorted(self._collect_branch_nodes_from_expr(event.args[0]))
+        return f"self._check_cross({key!r}, time, {expr}, {direction}, {time_tol}, {expr_tol}, {interp_nodes!r})"
+
+    def _collect_branch_nodes_from_expr(self, expr: Expr) -> set[str]:
+        nodes: set[str] = set()
+        if isinstance(expr, BranchAccess):
+            nodes.add(expr.node1)
+            if expr.node2:
+                nodes.add(expr.node2)
+            return nodes
+        if isinstance(expr, BinaryExpr):
+            return self._collect_branch_nodes_from_expr(expr.left) | self._collect_branch_nodes_from_expr(expr.right)
+        if isinstance(expr, UnaryExpr):
+            return self._collect_branch_nodes_from_expr(expr.operand)
+        if isinstance(expr, TernaryExpr):
+            return (
+                self._collect_branch_nodes_from_expr(expr.cond)
+                | self._collect_branch_nodes_from_expr(expr.true_expr)
+                | self._collect_branch_nodes_from_expr(expr.false_expr)
+            )
+        if isinstance(expr, FunctionCall):
+            for arg in expr.args:
+                nodes |= self._collect_branch_nodes_from_expr(arg)
+            return nodes
+        if isinstance(expr, ArrayAccess):
+            return self._collect_branch_nodes_from_expr(expr.index)
+        if isinstance(expr, MethodCall):
+            for arg in expr.args:
+                nodes |= self._collect_branch_nodes_from_expr(arg)
+            return nodes
+        return nodes
 
     def _alloc_stateful_func_key(self, kind: str, expr) -> str:
         cache_key = (kind, id(expr))
@@ -1592,10 +1676,12 @@ class _ModuleCompiler:
                     return lines
                 key = self._alloc_event_key("cross", event)
                 lines.append(f"{prefix}if {self._compile_cross_call(event, key)}:")
+                lines.append(f"{prefix}    self._event_context_active = True")
                 body_lines = self._compile_statement(stmt.body, indent + 1)
                 lines.extend(body_lines)
                 if not body_lines:
                     lines.append(f"{prefix}    pass")
+                lines.append(f"{prefix}    self._event_context_active = False")
                 lines.append(f"{prefix}    self._event_time = time")
                 lines.append(f"{prefix}    _post_event_fired = True")
             elif event.event_type == EventType.ABOVE:
@@ -1605,10 +1691,12 @@ class _ModuleCompiler:
                 expr = self._compile_expr(event.args[0])
                 direction = event.direction if event.direction is not None else 1
                 lines.append(f"{prefix}if self._check_above({key!r}, time, {expr}, {direction}):")
+                lines.append(f"{prefix}    self._event_context_active = True")
                 body_lines = self._compile_statement(stmt.body, indent + 1)
                 lines.extend(body_lines)
                 if not body_lines:
                     lines.append(f"{prefix}    pass")
+                lines.append(f"{prefix}    self._event_context_active = False")
                 lines.append(f"{prefix}    self._event_time = time")
                 lines.append(f"{prefix}    _post_event_fired = True")
             return lines
@@ -1633,10 +1721,12 @@ class _ModuleCompiler:
             if conditions:
                 cond = ' or '.join(conditions)
                 lines.append(f"{prefix}if {cond}:")
+                lines.append(f"{prefix}    self._event_context_active = True")
                 body_lines = self._compile_statement(stmt.body, indent + 1)
                 lines.extend(body_lines)
                 if not body_lines:
                     lines.append(f"{prefix}    pass")
+                lines.append(f"{prefix}    self._event_context_active = False")
                 lines.append(f"{prefix}    self._event_time = time")
                 lines.append(f"{prefix}    _post_event_fired = True")
         return lines
@@ -2072,6 +2162,12 @@ class _ModuleCompiler:
 
     def _compile_function_call(self, expr: FunctionCall) -> str:
         name = expr.name
+        math_aliases = {
+            'ln', 'log', 'exp', 'sqrt', 'abs', 'pow', 'min', 'max',
+            'sin', 'cos', 'floor', 'ceil',
+        }
+        if name.startswith('$') and name[1:] in math_aliases:
+            name = name[1:]
         args = [self._compile_expr(a) for a in expr.args]
 
         if name == 'transition':
@@ -2079,7 +2175,7 @@ class _ModuleCompiler:
             target = args[0] if len(args) > 0 else "0.0"
             delay = args[1] if len(args) > 1 else "0.0"
             rise = args[2] if len(args) > 2 else "0.0"
-            fall = args[3] if len(args) > 3 else "0.0"
+            fall = args[3] if len(args) > 3 else rise
             if self._in_loop_var:
                 # Dynamic key per loop iteration
                 return f"self._transition(f'{base_key}_{{int(_loop_{self._in_loop_var})}}', time, {target}, {delay}, {rise}, {fall})"
