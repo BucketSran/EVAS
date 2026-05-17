@@ -7,11 +7,18 @@ import importlib.util
 from pathlib import Path
 
 import numpy as np
-import pytest
 
+from evas.cli import _list_examples
 from evas.netlist.runner import evas_simulate
 
 EXAMPLES = Path(__file__).parent.parent / "evas" / "examples"
+EXPECTED_EXAMPLES = [
+    "adc_dac_ideal_4b",
+    "clk_div",
+    "comparator",
+    "digital_basics",
+    "noise_gen",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +70,10 @@ def _run_validate(tmp_path: Path, tb_rel: str, fn_name: str, tb_dir: str,
     assert failures == 0, f"{fn_name} reported {failures} failure(s)"
 
 
+def test_bundled_example_set_is_smoke_subset():
+    assert _list_examples() == EXPECTED_EXAMPLES
+
+
 # ---------------------------------------------------------------------------
 # Functional: adc_dac_ideal_4b — 4-bit ADC→DAC round-trip
 # ---------------------------------------------------------------------------
@@ -100,10 +111,6 @@ def test_clk_div(tmp_path):
     _run_validate(tmp_path, "clk_div/tb_clk_div.scs", "validate_csv", "clk_div")
 
 
-def test_clk_burst_gen(tmp_path):
-    _run_validate(tmp_path, "clk_burst_gen/tb_clk_burst_gen.scs", "validate_csv", "clk_burst_gen")
-
-
 # ---------------------------------------------------------------------------
 # Functional: comparators
 # ---------------------------------------------------------------------------
@@ -129,59 +136,6 @@ def test_cmp_offset_search(tmp_path):
 def test_cmp_delay(tmp_path):
     _run_validate(tmp_path, "comparator/tb_cmp_delay.scs",
                   "validate_csv", "comparator", "validate_cmp_delay.py")
-
-
-# ---------------------------------------------------------------------------
-# Functional: DACs
-# ---------------------------------------------------------------------------
-
-def test_dac_binary_clk_4b(tmp_path):
-    _run_validate(tmp_path, "dac_binary_clk_4b/tb_dac_binary_clk_4b.scs",
-                  "validate_csv", "dac_binary_clk_4b")
-
-
-def test_dac_therm_16b(tmp_path):
-    _run_validate(tmp_path, "dac_therm_16b/tb_dac_therm_16b.scs",
-                  "validate_csv", "dac_therm_16b")
-
-
-# ---------------------------------------------------------------------------
-# Functional: encoding / bus drivers
-# ---------------------------------------------------------------------------
-
-def test_d2b_4b(tmp_path):
-    _run_validate(tmp_path, "d2b_4b/tb_d2b_4b.scs", "validate_csv", "d2b_4b")
-
-
-# ---------------------------------------------------------------------------
-# Functional: algorithmic / sequenced
-# ---------------------------------------------------------------------------
-
-def test_ramp_gen(tmp_path):
-    _simulate("ramp_gen/tb_ramp_gen.scs", tmp_path)
-    mod = _load_validate("ramp_gen")
-    assert mod is not None
-    assert mod.validate_csv(out_dir=tmp_path) == 0
-    assert mod.validate_txt(out_dir=tmp_path) == 0
-
-
-def test_dwa_ptr_gen(tmp_path):
-    _run_validate(tmp_path, "dwa_ptr_gen/tb_dwa_ptr_gen.scs", "validate_csv", "dwa_ptr_gen",
-                  "validate_dwa_ptr_gen.py")
-
-
-def test_dwa_ptr_gen_no_overlap(tmp_path):
-    _run_validate(tmp_path, "dwa_ptr_gen/tb_dwa_ptr_gen_no_overlap.scs", "validate_csv", "dwa_ptr_gen",
-                  "validate_dwa_ptr_gen_no_overlap.py")
-
-
-def test_lfsr(tmp_path):
-    _run_validate(tmp_path, "lfsr/tb_lfsr.scs", "validate_csv", "lfsr")
-
-
-def test_sar_adc_dac_weighted_8b(tmp_path):
-    _run_validate(tmp_path, "sar_adc_dac_weighted_8b/tb_sar_adc_dac_weighted_8b.scs",
-                  "validate_csv", "sar_adc_dac_weighted_8b")
 
 
 # ---------------------------------------------------------------------------

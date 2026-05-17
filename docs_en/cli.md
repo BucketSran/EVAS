@@ -17,7 +17,7 @@ Copy a bundled example to the current directory and simulate it.
 ```bash
 evas run clk_div
 evas run digital_basics
-evas run sar_adc_dac_weighted_8b
+evas run noise_gen
 ```
 
 Multi-testbench examples (e.g. `adc_dac_ideal_4b`, `digital_basics`) use
@@ -31,8 +31,7 @@ evas run digital_basics --tb tb_not_gate.scs
 Output goes to `./output/<name>/`. Analysis plots (if an `analyze_<name>.py`
 script is present) are saved there as well.
 
-**Environment variable:** `EVAS_OUTPUT_DIR` is set automatically for the
-analysis script so it can locate simulation results.
+Analysis scripts receive the output directory directly from `evas run`.
 
 ## `evas simulate <file.scs>`
 

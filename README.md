@@ -31,8 +31,10 @@ EVAS simulates **voltage-mode, event-driven** Verilog-A behavioral models. You p
 2. **A `.scs` testbench netlist** — voltage sources, `ahdl_include`, and a `tran` statement
 3. **Run `evas simulate`** — get `tran.csv` waveforms and optional plots
 
-The bundled examples are starting points. For your own design, copy the closest example
-directory, swap in your `.va`, adjust the stimulus sources and `save` list, and run.
+The bundled examples are a compact smoke-test set. For your own design, copy the
+closest example directory, swap in your `.va`, adjust the stimulus sources and
+`save` list, and run. The larger verification example library belongs with the
+agent workflow in `veriloga-skills/evas-sim`.
 
 ## Installation
 
@@ -70,18 +72,14 @@ save clk:2e out:6f
 
 ### Testbench structure reference
 
-The 14 bundled example groups contain 27 `.va` modules and their testbenches.
-They are the best reference for how to wire up common patterns:
+The bundled examples contain five small groups and their testbenches. They are
+the in-package reference for common wiring patterns:
 
 | Pattern needed | Look at |
 |---------------|---------|
-| Clocked digital logic | `clk_div`, `digital_basics`, `lfsr` |
+| Clocked digital logic | `clk_div`, `digital_basics` |
 | Comparator with feedback | `comparator/cmp_offset_search` |
-| SAR / successive-approximation loop | `sar_adc_dac_weighted_8b` |
-| DAC (binary or thermometer) | `dac_binary_clk_4b`, `dac_therm_16b` |
 | ADC + sample-hold | `adc_dac_ideal_4b` |
-| Voltage → digital bus (analog to bits) | `dwa_ptr_gen/v2b_4b` |
-| DWA / data-weighted averaging | `dwa_ptr_gen` |
 | Noise / random stimulus | `noise_gen` |
 | Multi-cycle edge timing | `comparator/cmp_delay`, `edge_interval_timer` |
 
@@ -135,24 +133,17 @@ save vin:10e vout:6f clk:2e dout:d
 
 ## Bundled examples (reference only)
 
-14 groups, 27 Verilog-A modules — use them as templates, not as the target.
+Five groups ship with the PyPI package for install verification, CLI sanity
+checks, and small starting templates. The full workflow-oriented example set is
+maintained outside this simulator package in `veriloga-skills/evas-sim`.
 
 | Group | Verilog-A modules | Notes |
 |-------|------------------|-------|
 | `clk_div` | `clk_div` | |
-| `clk_burst_gen` | `clk_burst_gen` | |
 | `digital_basics` | `and_gate`, `or_gate`, `not_gate`, `dff_rst`, `inverter` | |
-| `lfsr` | `lfsr` | |
 | `noise_gen` | `noise_gen` | |
-| `ramp_gen` | `ramp_gen` | |
-| `edge_interval_timer` | `edge_interval_timer` | also reused in `comparator` |
-| `d2b_4b` | `d2b_4b` | thermometer-to-binary decoder |
-| `dac_binary_clk_4b` | `dac_binary_clk_4b` | |
-| `dac_therm_16b` | `dac_therm_16b` | |
 | `adc_dac_ideal_4b` | `adc_ideal_4b`, `dac_ideal_4b`, `sh_ideal` | 3 stimuli: ramp / sine / 1000-pt sine |
-| `comparator` | `cmp_ideal`, `cmp_strongarm`, `cmp_offset_search`, `cmp_delay` | 4 sub-examples |
-| `dwa_ptr_gen` | `dwa_ptr_gen`, `dwa_ptr_gen_no_overlap`, `v2b_4b` | 100 MHz; `v2b_4b` = voltage→4-bit ADC |
-| `sar_adc_dac_weighted_8b` | `sar_adc_weighted_8b`, `dac_weighted_8b`, `sh_ideal` | 8-bit SAR; DNL/INL |
+| `comparator` | `cmp_ideal`, `cmp_strongarm`, `cmp_offset_search`, `cmp_delay`, `edge_interval_timer` | 4 sub-examples |
 
 ## Contributing
 

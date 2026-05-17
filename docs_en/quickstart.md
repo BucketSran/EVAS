@@ -9,7 +9,7 @@ evas run clk_div
 ```
 
 This will:
-1. Copy the `clk_div` Verilog-A model and Spectre testbench into `./clk_div/`
+1. Copy the `clk_div` Verilog-A model and Spectre testbench into `./evas-run/clk_div/`
 2. Simulate the netlist; outputs go to `./output/clk_div/`
 3. Run the analysis script, saving `analyze_clk_div.png`
 

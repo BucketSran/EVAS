@@ -44,6 +44,9 @@ include = ["evas*"]
 "evas.examples" = ["**/*"]
 "evas.vams"     = ["*.vams"]
 
+[tool.setuptools.exclude-package-data]
+"*" = ["__pycache__/*", "**/__pycache__/*", "*.pyc", "**/*.pyc"]
+
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 ignore = ["E501", "F403", "F405"]

@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Changed — Examples
+- Reduced the EVAS bundled example set to five smoke-test groups: `digital_basics`, `clk_div`, `comparator`, `adc_dac_ideal_4b`, and `noise_gen`.
+- Removed the larger workflow-oriented example groups from this simulator package; those assets are intended to live with `veriloga-skills/evas-sim`.
+
 ## [0.3.0] — 2026-03-16
 
 ### Added — Language Features

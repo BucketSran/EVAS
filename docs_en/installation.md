@@ -25,4 +25,4 @@ pip install -e ".[dev]"
 evas list
 ```
 
-You should see all 15 bundled example names printed.
+You should see the 5 bundled example groups printed.
