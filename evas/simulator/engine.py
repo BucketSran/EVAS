@@ -74,7 +74,7 @@ class TransitionState:
                 self.current_val = target
                 self.active = False
 
-    def next_breakpoint(self, time: float) -> Optional[float]:
+    def next_breakpoint(self, time: float, min_ramp_time: float = 0.0) -> Optional[float]:
         """Return next important time for this transition, or None."""
         if not self.active:
             return None
@@ -86,11 +86,15 @@ class TransitionState:
         breakpoints = []
         if t_begin > time:
             breakpoints.append(t_begin)
-        # Add a midpoint breakpoint so cross() can observe timer-driven
-        # transition edges before the full ramp completes.
-        t_mid = t_begin + 0.5 * ramp_time
-        if t_mid > time and t_mid < t_end:
-            breakpoints.append(t_mid)
+        # Add interior breakpoints only for transitions long enough to be
+        # observable at the current tran maxstep. Very short transition()
+        # filters are solver-internal smoothing; forcing their midpoints into
+        # tran.csv can create non-Spectre-like digital bus glitches.
+        if ramp_time > max(0.0, min_ramp_time):
+            for frac in (0.25, 0.5, 0.75):
+                t_inner = t_begin + frac * ramp_time
+                if t_inner > time and t_inner < t_end:
+                    breakpoints.append(t_inner)
         if t_end > time:
             breakpoints.append(t_end)
         return min(breakpoints) if breakpoints else None
@@ -107,35 +111,83 @@ class CrossDetector:
     direction: int = 0  # +1=rising, -1=falling, 0=both
     last_triggered: bool = False  # set by check(), read by simulator
     t_cross: float = 0.0  # interpolated exact crossing time
+    last_cross_time: float = -1.0  # debounced last-trigger timestamp
+    pending_touch_direction: int = 0  # +1/-1 after touching zero from below/above
+    pending_touch_time: float = 0.0
 
-    def check(self, time: float, val: float) -> bool:
+    def check(self, time: float, val: float,
+              time_tol: float = 0.0, expr_tol: float = 1e-12) -> bool:
         """Check if a zero crossing occurred. Returns True if triggered."""
         if not self.initialized:
             self.pprev_val = self.prev_val = val
             self.pprev_time = self.prev_time = time
             self.initialized = True
             self.last_triggered = False
+            self.pending_touch_direction = 0
             return False
 
-        _tol = 1e-12  # guard against floating-point rounding at exact crossings
+        e_tol = abs(float(expr_tol)) if expr_tol is not None else 1e-12
         triggered = False
-        if self.direction >= 0 and self.prev_val < 0 and val >= -_tol:
-            triggered = True  # Rising
-        if self.direction <= 0 and self.prev_val > 0 and val <= _tol:
-            if self.direction == 0 or self.direction == -1:
-                triggered = True  # Falling
+        trigger_direction = 0
+        cross_time = 0.0
 
-        if triggered:
+        def interpolate_cross_time() -> float:
             dv = val - self.prev_val
             frac = max(0.0, min(1.0, -self.prev_val / dv)) if abs(dv) > 1e-30 else 0.0
-            self.t_cross = self.prev_time + frac * (time - self.prev_time)
-            # Clamp val to the post-crossing side to prevent immediate re-trigger.
-            # Falling: prev_val was >0, val near 0 — ensure stored val is <= 0.
-            # Rising:  prev_val was <0, val near 0 — ensure stored val is >= 0.
-            if self.prev_val > 0:
-                val = min(val, 0.0)
+            return self.prev_time + frac * (time - self.prev_time)
+
+        # Spectre treats a monotonic approach that lands exactly on the
+        # threshold as a crossing.  Do not wait for a later sample to move
+        # beyond zero; otherwise pulse tops at exactly vth miss @cross events.
+        if self.pending_touch_direction > 0:
+            if val > e_tol and self.direction >= 0:
+                triggered = True
+                trigger_direction = 1
+                cross_time = self.pending_touch_time
+            if val > e_tol or val < -e_tol:
+                self.pending_touch_direction = 0
+        elif self.pending_touch_direction < 0:
+            if val < -e_tol and self.direction <= 0:
+                triggered = True
+                trigger_direction = -1
+                cross_time = self.pending_touch_time
+            if val > e_tol or val < -e_tol:
+                self.pending_touch_direction = 0
+
+        if not triggered and self.pending_touch_direction == 0:
+            if self.direction >= 0 and self.prev_val < -e_tol:
+                if val > e_tol:
+                    triggered = True
+                    trigger_direction = 1
+                    cross_time = interpolate_cross_time()
+                elif abs(val) <= e_tol:
+                    triggered = True
+                    trigger_direction = 1
+                    cross_time = interpolate_cross_time()
+            if self.direction <= 0 and self.prev_val > e_tol:
+                if val < -e_tol:
+                    triggered = True
+                    trigger_direction = -1
+                    cross_time = interpolate_cross_time()
+                elif abs(val) <= e_tol:
+                    triggered = True
+                    trigger_direction = -1
+                    cross_time = interpolate_cross_time()
+
+        if triggered:
+            self.t_cross = cross_time
+            t_tol = max(0.0, float(time_tol or 0.0))
+            if self.last_cross_time >= 0.0 and abs(self.t_cross - self.last_cross_time) <= t_tol:
+                triggered = False
             else:
-                val = max(val, 0.0)
+                self.last_cross_time = self.t_cross
+            self.pending_touch_direction = 0
+            # Clamp val to the post-crossing side to prevent immediate re-trigger.
+            sign_eps = max(e_tol, 1e-18)
+            if trigger_direction < 0:
+                val = min(val, -sign_eps)
+            elif trigger_direction > 0:
+                val = max(val, sign_eps)
 
         self.pprev_val = self.prev_val
         self.pprev_time = self.prev_time
@@ -146,6 +198,10 @@ class CrossDetector:
 
     def next_breakpoint(self) -> Optional[float]:
         """Predict the next zero-crossing time by linear extrapolation."""
+        if self.pending_touch_direction != 0:
+            probe_time = self.pending_touch_time + 1e-18
+            if self.prev_time < probe_time:
+                return probe_time
         dt = self.prev_time - self.pprev_time
         if dt <= 1e-30:
             return None
@@ -156,15 +212,19 @@ class CrossDetector:
             return self.prev_time + (-self.prev_val / rate)
         return None
 
-    def would_cross(self, val: float) -> bool:
+    def would_cross(self, val: float, expr_tol: float = 1e-12) -> bool:
         """Check if a crossing would occur without updating state."""
         if not self.initialized:
             return False
-        if self.direction >= 0 and self.prev_val < 0 and val >= -1e-12:
+        e_tol = abs(float(expr_tol)) if expr_tol is not None else 1e-12
+        if self.pending_touch_direction > 0 and self.direction >= 0 and val > e_tol:
             return True
-        if self.direction <= 0 and self.prev_val > 0 and val <= 1e-12:
-            if self.direction == 0 or self.direction == -1:
-                return True
+        if self.pending_touch_direction < 0 and self.direction <= 0 and val < -e_tol:
+            return True
+        if self.direction >= 0 and self.prev_val < -e_tol and val >= -e_tol:
+            return True
+        if self.direction <= 0 and self.prev_val > e_tol and val <= e_tol:
+            return True
         return False
 
 
@@ -185,8 +245,12 @@ class AboveDetector:
             self.pprev_val = self.prev_val = val
             self.pprev_time = self.prev_time = time
             self.initialized = True
-            self.last_triggered = False
-            return False
+            triggered = self.direction >= 0 and val >= -1e-12
+            self.last_triggered = triggered
+            if triggered:
+                self.t_cross = time
+                self.prev_val = max(val, 0.0)
+            return triggered
 
         triggered = False
         if self.direction >= 0 and self.prev_val < 0 and val >= -1e-12:
@@ -268,7 +332,8 @@ class Simulator:
             refine_steps: int = 8,
             reltol: float = 1e-3,
             vabstol: float = 1e-6,
-            min_step: float = None) -> SimResult:
+            min_step: float = None,
+            record_step: float = None) -> SimResult:
         """Run transient simulation with adaptive step control near cross events."""
         if tstep is None:
             tstep = tstop / 10000
@@ -283,6 +348,7 @@ class Simulator:
         refine_steps_left = 0  # countdown of refined steps after cross
         refine_dt = tstep  # current refined step size
         dynamic_step = tstep  # tolerance-driven adaptive step ceiling
+        next_record_time = float(record_step) if record_step and record_step > 0 else None
         self._perf_stats = {
             "source_breakpoint_clamps": 0,
             "model_breakpoint_clamps": 0,
@@ -292,13 +358,26 @@ class Simulator:
             "cross_event_steps": 0,
             "dynamic_step_shrinks": 0,
             "dynamic_step_grows": 0,
+            "output_step_clamps": 0,
             "err_ratio_skipped_outputs": 0,
             "steps_total": 0,
         }
+        transition_breakpoint_min_ramp = 0.15 * max_step
+
+        def _set_transition_breakpoint_threshold(model):
+            if hasattr(model, "_transition_breakpoint_min_ramp"):
+                model._transition_breakpoint_min_ramp = transition_breakpoint_min_ramp
+            for child in getattr(model, "_child_models", []) or []:
+                _set_transition_breakpoint_threshold(child)
+
+        for model in self.models:
+            _set_transition_breakpoint_threshold(model)
 
         # Initialize node voltages
         for src in self.sources:
             self.node_voltages[src.node] = src.waveform(0.0)
+        for model in self.models:
+            model._prepare_step(self.node_voltages, self.node_voltages, 0.0, 0.0)
 
         # Fire initial_step events
         for model in self.models:
@@ -319,6 +398,7 @@ class Simulator:
 
         # Main simulation loop
         while time < tstop:
+            force_record_point = False
             if refine_steps_left > 0:
                 dt = min(refine_dt, dynamic_step, max_step, tstop - time)
                 refine_steps_left -= 1
@@ -330,6 +410,7 @@ class Simulator:
                 bp = src.next_breakpoint(time)
                 if bp is not None and bp > time and bp < time + dt:
                     dt = bp - time
+                    force_record_point = True
                     self._perf_stats["source_breakpoint_clamps"] += 1
                     if dt < 1e-18:
                         dt = 1e-18
@@ -339,6 +420,7 @@ class Simulator:
                 bp = model.next_breakpoint(time)
                 if bp is not None and bp > time and bp < time + dt:
                     dt = bp - time
+                    force_record_point = True
                     self._perf_stats["model_breakpoint_clamps"] += 1
                     if dt < 1e-18:
                         dt = 1e-18
@@ -348,11 +430,20 @@ class Simulator:
                 bs = model._bound_step
                 if bs > 0 and dt > bs:
                     dt = bs
+                    force_record_point = True
                     self._perf_stats["bound_step_clamps"] += 1
+
+            if next_record_time is not None:
+                if next_record_time > time and next_record_time < time + dt:
+                    dt = next_record_time - time
+                    force_record_point = True
+                    self._perf_stats["output_step_clamps"] += 1
+
             if dt < min_step:
                 dt = min_step
                 self._perf_stats["min_step_clamps"] += 1
 
+            prev_time = time
             prev_nv = dict(self.node_voltages)
             time += dt
 
@@ -362,6 +453,7 @@ class Simulator:
 
             # Evaluate all models
             for model in self.models:
+                model._prepare_step(prev_nv, self.node_voltages, prev_time, time)
                 model.evaluate(self.node_voltages, time)
                 model._expire_absolute_timers(time)
                 if model.post_update_events(self.node_voltages, time):
@@ -387,6 +479,7 @@ class Simulator:
                 refine_steps_left = refine_steps
                 self._perf_stats["cross_refine_triggers"] += 1
             if cross_fired:
+                force_record_point = True
                 self._perf_stats["cross_event_steps"] += 1
 
             # Tolerance-guided dynamic step adaptation (voltage-domain heuristic).
@@ -415,8 +508,21 @@ class Simulator:
                 dynamic_step = min(tstep, dynamic_step * 1.15)
                 self._perf_stats["dynamic_step_grows"] += 1
 
-            self._record_point(time)
-            self._step_sizes.append(dt)
+            if next_record_time is None:
+                should_record = True
+            else:
+                should_record = (
+                    force_record_point
+                    or time >= next_record_time - 1e-18
+                    or time >= tstop - 1e-18
+                )
+
+            if should_record:
+                self._record_point(time)
+                self._step_sizes.append(dt)
+                if next_record_time is not None:
+                    while next_record_time <= time + 1e-18:
+                        next_record_time += record_step
             self._perf_stats["steps_total"] += 1
 
         # Fire final_step events
@@ -448,7 +554,14 @@ class Simulator:
 def pulse(v_lo, v_hi, period, duty=0.5, rise=1e-12, fall=1e-12, delay=0.0):
     """Create a pulse waveform function."""
     t_hi = period * duty
-    knees = sorted([0.0, rise, t_hi, t_hi + fall])
+    # Include edge interior breakpoints so source-driven @cross events are
+    # scheduled in chronological order when multiple sources switch together.
+    knees = {0.0, rise, t_hi, t_hi + fall}
+    if rise > 0:
+        knees.add(0.5 * rise)
+    if fall > 0:
+        knees.add(t_hi + 0.5 * fall)
+    knees = sorted(knees)
 
     def wfn(t):
         t_eff = t - delay
@@ -501,6 +614,12 @@ def pwl(times, values):
         raise ValueError("PWL waveform requires at least one time/value pair")
     if len(times) != len(values):
         raise ValueError("PWL waveform times and values must have the same length")
+    for i in range(1, len(times)):
+        if times[i] <= times[i - 1]:
+            raise ValueError(
+                "PWL waveform times must be strictly increasing "
+                f"(t[{i - 1}]={times[i - 1]!r}, t[{i}]={times[i]!r})"
+            )
 
     sorted_t = sorted(set(times))
 
@@ -510,7 +629,7 @@ def pwl(times, values):
         if t >= times[-1]:
             return values[-1]
         for i in range(len(times) - 1):
-            if times[i] <= t <= times[i + 1]:
+            if times[i] <= t < times[i + 1]:
                 frac = (t - times[i]) / (times[i + 1] - times[i])
                 return values[i] + frac * (values[i + 1] - values[i])
         return values[-1]

@@ -59,6 +59,7 @@ class UnaryOp(Enum):
 @dataclass
 class NumberLiteral:
     value: float
+    raw: Optional[str] = None
 
 @dataclass
 class StringLiteral:
@@ -136,6 +137,10 @@ class EventExpr:
     event_type: EventType
     args: List[Expr] = field(default_factory=list)
     direction: Optional[int] = None  # +1, -1, or None
+    # Optional Spectre-style cross() tolerance knobs.
+    # Stored as expressions so parameterized tolerance is allowed.
+    time_tol_expr: Optional['Expr'] = None
+    expr_tol_expr: Optional['Expr'] = None
 
 @dataclass
 class CombinedEvent:
@@ -219,6 +224,7 @@ class VariableDecl:
     array_hi: Optional[int] = None
     array_lo: Optional[int] = None
     init_values: Optional[List[Expr]] = None
+    is_genvar: bool = False
 
 @dataclass
 class AnalogBlock:

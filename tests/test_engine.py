@@ -107,14 +107,20 @@ class TestTransitionState:
         bp = ts.next_breakpoint(0.0)
         assert bp == pytest.approx(5e-9)
 
-    def test_next_breakpoint_during_ramp_returns_midpoint_first(self):
-        # next_breakpoint() now inserts a midpoint at t_begin + 0.5*ramp so that
-        # cross() events can fire mid-ramp on timer-driven transitions.
-        # At time=3ns the midpoint (5ns) is the nearest upcoming breakpoint.
+    def test_next_breakpoint_during_ramp_returns_inner_point_first(self):
+        # Long transition() ramps expose interior points so cross() events and
+        # output threshold checks can observe the edge before the ramp completes.
+        # At time=3ns the midpoint (5ns) is the nearest upcoming interior point.
         ts = TransitionState(current_val=0.0)
         ts.set_target(time=0.0, target=1.0, rise=10e-9)
         bp = ts.next_breakpoint(3e-9)
         assert bp == pytest.approx(5e-9)
+
+    def test_next_breakpoint_skips_short_ramp_inner_points(self):
+        ts = TransitionState(current_val=0.0)
+        ts.set_target(time=0.0, target=1.0, rise=10e-12)
+        bp = ts.next_breakpoint(0.0, min_ramp_time=20e-12)
+        assert bp == pytest.approx(10e-12)
 
     def test_next_breakpoint_after_ramp_is_none(self):
         ts = TransitionState(current_val=0.0)
@@ -168,10 +174,25 @@ class TestCrossDetector:
         assert cd.check(0.0, 0.5) is False  # rising → should NOT fire
         assert cd.check(0.0, -0.5) is True  # falling → should fire
 
-    def test_exact_zero_crossing_rising(self):
+    def test_exact_zero_touch_from_one_side_triggers_at_touch(self):
         cd = CrossDetector(direction=0)
         cd.check(0.0, -1e-10)
-        assert cd.check(0.0, 0.0) is True   # val == 0 counts as "above zero"
+        assert cd.check(1e-9, 0.0) is True
+        assert cd.t_cross == pytest.approx(1e-9)
+
+    def test_exact_zero_touch_returning_same_side_still_triggers_once(self):
+        cd = CrossDetector(direction=1)
+        cd.check(0.0, -1.0)
+        assert cd.check(1e-9, 0.0, expr_tol=0.0) is True
+        assert cd.check(2e-9, -1.0, expr_tol=0.0) is False
+        assert cd.pending_touch_direction == 0
+        assert cd.last_triggered is False
+
+    def test_exact_zero_touch_falling_then_negative_triggers_at_touch_time(self):
+        cd = CrossDetector(direction=-1)
+        cd.check(0.0, 1.0)
+        assert cd.check(1e-9, 0.0, expr_tol=0.0) is True
+        assert cd.t_cross == pytest.approx(1e-9)
 
     def test_last_triggered_reflects_result(self):
         cd = CrossDetector(direction=0)
@@ -189,9 +210,32 @@ class TestCrossDetector:
         assert result is True
         assert cd.prev_val == prev_val   # state unchanged
 
+    def test_would_cross_exact_touch_counts_as_cross(self):
+        cd = CrossDetector(direction=1)
+        cd.check(0.0, -0.5)
+        assert cd.would_cross(0.0, expr_tol=0.0) is True
+        assert cd.would_cross(0.5, expr_tol=0.0) is True
+
     def test_would_cross_before_init_returns_false(self):
         cd = CrossDetector(direction=0)
         assert cd.would_cross(0.5) is False
+
+    def test_expr_tol_affects_cross_decision(self):
+        cd = CrossDetector(direction=1)
+        cd.check(0.0, -1e-4)
+        # With expr_tol=1e-3 both samples are inside tolerance band -> no trigger.
+        assert cd.check(1e-9, 2e-4, expr_tol=1e-3) is False
+        # Tightening tolerance allows trigger.
+        cd = CrossDetector(direction=1)
+        cd.check(0.0, -1e-4)
+        assert cd.check(1e-9, 2e-4, expr_tol=1e-5) is True
+
+    def test_time_tol_debounces_back_to_back_crosses(self):
+        cd = CrossDetector(direction=0)
+        cd.check(0.0, -1.0)
+        assert cd.check(1e-9, 1.0, time_tol=2e-9) is True
+        # Immediate opposite crossing within time_tol should be suppressed.
+        assert cd.check(1.5e-9, -1.0, time_tol=2e-9) is False
 
 
 # ===========================================================================
@@ -276,9 +320,10 @@ class TestPulse:
 
     def test_next_breakpoint_advances(self):
         fn = self._make()
-        # First knee after t=0 is the end of the rise (rise=1ns)
+        # Edge interiors are breakpoints so @cross events on source ramps are
+        # ordered before later same-step events.
         bp = fn._next_breakpoint(0.0)
-        assert bp == pytest.approx(1e-9)
+        assert bp == pytest.approx(0.5e-9)
 
 
 class TestPwl:
@@ -432,6 +477,25 @@ class TestSimulator:
         result = sim.run(tstop=5e-9, tstep=1e-9)
         assert len(result.step_sizes) == len(result.time)
 
+    def test_record_step_keeps_event_breakpoints_on_output_grid(self):
+        class InternalBreakpointModel(CompiledModel):
+            def next_breakpoint(self, time):
+                return 0.5e-9 if time < 0.5e-9 else None
+
+            def evaluate(self, nv, time):
+                self._set_output("out", time, nv)
+
+        sim = Simulator()
+        sim.add_model(InternalBreakpointModel())
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9, record_step=1e-9)
+
+        assert len(result.time) == 3
+        assert result.time[0] == pytest.approx(0.0)
+        assert result.time[1] == pytest.approx(0.5e-9)
+        assert result.time[-1] == pytest.approx(1e-9)
+        assert len(result.step_sizes) == len(result.time)
+
 
 # ===========================================================================
 # CompiledModel base-class helpers
@@ -453,6 +517,17 @@ class TestCompiledModelHelpers:
         self.model.node_map["out_internal"] = "out_external"
         nv = {"out_external": 0.9}
         assert self.model._get_voltage("out_internal", nv) == pytest.approx(0.9)
+
+    def test_get_voltage_interpolates_inside_event_context(self):
+        self.model._prepare_step({"vin": 0.0, "rst": 0.0}, {"vin": 1.0, "rst": 1.0}, 0.0, 10e-9)
+        self.model._event_time = 4e-9
+        self.model._event_context_active = True
+        self.model._event_interpolated_nodes = {"vin"}
+        assert self.model._get_voltage("vin", {"vin": 1.0}) == pytest.approx(0.4)
+        assert self.model._get_voltage("rst", {"rst": 1.0}) == pytest.approx(1.0)
+        self.model._event_context_active = False
+        assert self.model._get_voltage("vin", {"vin": 1.0}) == pytest.approx(1.0)
+
 
     def test_set_output_writes_node_voltages(self):
         nv = {}
@@ -486,8 +561,56 @@ class TestCompiledModelHelpers:
         self.model._check_cross("c1", 0.0, -0.5)
         assert self.model._check_cross("c1", 0.0, 0.5) is True
 
+    def test_check_cross_with_tolerances(self):
+        self.model._check_cross("ct", 0.0, -1e-4, direction=1, expr_tol=1e-3)
+        assert self.model._check_cross("ct", 1e-9, 2e-4, direction=1, expr_tol=1e-3) is False
+        # Re-arm by going sufficiently below -expr_tol, then cross again.
+        assert self.model._check_cross("ct", 2e-9, -2e-2, direction=1, expr_tol=1e-3) is False
+        assert self.model._check_cross("ct", 3e-9, 2e-2, direction=1, expr_tol=1e-3) is True
+
+    def test_seeded_random_streams_are_reproducible(self):
+        seq_a = [self.model._rand_normal(7, 0.0, 1.0) for _ in range(4)]
+        seq_b = [self.model._rand_normal(7, 0.0, 1.0) for _ in range(4)]
+        # Same seeded stream continues deterministically.
+        assert seq_a != seq_b
+
+        m2 = CompiledModel()
+        seq_c = [m2._rand_normal(7, 0.0, 1.0) for _ in range(4)]
+        # Fresh model with same seed reproduces the initial sequence.
+        assert seq_a == pytest.approx(seq_c)
+
+    def test_unseeded_random_stream_is_deterministic_per_model(self):
+        seq_a = [self.model._rand_uniform(None, -1.0, 1.0) for _ in range(3)]
+        m2 = CompiledModel()
+        seq_b = [m2._rand_uniform(None, -1.0, 1.0) for _ in range(3)]
+        assert seq_a == pytest.approx(seq_b)
+
+    def test_slew_first_call_returns_target(self):
+        val = self.model._slew("s0", time=0.0, target=1.0, maxrise=1e8, maxfall=1e8)
+        assert val == pytest.approx(1.0)
+
+    def test_slew_limits_rising_slope(self):
+        self.model._slew("s1", time=0.0, target=0.0, maxrise=1e8, maxfall=1e8)
+        # 1e8 V/s over 1ns -> +0.1V max increment
+        val = self.model._slew("s1", time=1e-9, target=1.0, maxrise=1e8, maxfall=1e8)
+        assert val == pytest.approx(0.1, abs=1e-12)
+
+    def test_slew_limits_falling_slope(self):
+        self.model._slew("s2", time=0.0, target=1.0, maxrise=1e8, maxfall=2e8)
+        # 2e8 V/s over 1ns -> -0.2V max decrement
+        val = self.model._slew("s2", time=1e-9, target=0.0, maxrise=1e8, maxfall=2e8)
+        assert val == pytest.approx(0.8, abs=1e-12)
+
+    def test_slew_zero_limit_means_unlimited(self):
+        self.model._slew("s3", time=0.0, target=0.0, maxrise=0.0, maxfall=0.0)
+        val = self.model._slew("s3", time=1e-9, target=1.0, maxrise=0.0, maxfall=0.0)
+        assert val == pytest.approx(1.0, abs=1e-12)
+
     def test_check_above_first_call_false(self):
         assert self.model._check_above("a0", 0.0, -0.5) is False
+
+    def test_check_above_first_call_positive_triggers(self):
+        assert self.model._check_above("a0_pos", 0.0, 0.5) is True
 
     def test_check_above_negative_to_positive_triggers(self):
         self.model._check_above("a1", 0.0, -0.5)
@@ -510,13 +633,13 @@ class TestCompiledModelHelpers:
 
     def test_next_breakpoint_with_active_transition(self):
         # Plant an active TransitionState directly.
-        # At time=0.0 the midpoint (5ns) is returned first; t_end (10ns) follows.
+        # At time=0.0 the first interior point (2.5ns) is returned first.
         ts = TransitionState(current_val=0.0, target_val=1.0,
                              start_time=0.0, start_val=0.0,
                              rise_time=10e-9, active=True)
         self.model.transitions["t"] = ts
         bp = self.model.next_breakpoint(0.0)
-        assert bp == pytest.approx(5e-9)
+        assert bp == pytest.approx(2.5e-9)
 
     def test_check_timer_first_fire(self):
         fired = self.model._check_timer("t0", 10e-9, 10e-9)
@@ -531,12 +654,19 @@ class TestCompiledModelHelpers:
         assert not self.model._check_timer("t2", 15e-9, 10e-9)  # before 20ns
         assert self.model._check_timer("t2", 20e-9, 10e-9)  # fires at 20ns
 
+    def test_check_timer_rejects_non_finite_period(self):
+        assert not self.model._check_timer("tnf", 1e-9, float("nan"))
+        assert not self.model._check_timer("tnf2", 1e-9, float("inf"))
+
     def test_check_timer_at_fires_once_per_target(self):
         assert not self.model._check_timer_at("ta", 5e-9, 10e-9)
         assert self.model._check_timer_at("ta", 10e-9, 10e-9)
         assert not self.model._check_timer_at("ta", 11e-9, 10e-9)
         assert not self.model._check_timer_at("ta", 11e-9, 20e-9)
         assert self.model._check_timer_at("ta", 20e-9, 20e-9)
+
+    def test_check_timer_at_rejects_non_finite_target(self):
+        assert not self.model._check_timer_at("ta_nf", 1e-9, float("nan"))
 
     def test_next_breakpoint_includes_timer(self):
         self.model.timer_states["t0"] = 10e-9
@@ -647,6 +777,85 @@ endmodule
         final_val = result.signals["out"][-1]
         assert final_val == pytest.approx(5.0, abs=1.0)
 
+    VA_SRC_DIVISION_TYPES = """\
+`include "disciplines.vams"
+module division_type_probe(out_real, out_int);
+    output voltage out_real;
+    output voltage out_int;
+    parameter integer navg = 5;
+    integer code;
+    real ratio;
+    analog begin
+        @(initial_step) begin
+            code = 512;
+        end
+        ratio = 1.0 * code / 1023.0;
+        V(out_real) <+ ratio;
+        V(out_int) <+ navg / 2;
+    end
+endmodule
+"""
+
+    def test_integer_division_does_not_override_real_literals(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+        mod = parse(self.VA_SRC_DIVISION_TYPES)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out_real", "out_int")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out_real"][-1] == pytest.approx(512.0 / 1023.0)
+        assert result.signals["out_int"][-1] == pytest.approx(2.0)
+
+    def test_dollar_floor_alias_matches_spectre_math_function(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+module dollar_floor_probe(vin, out);
+    input voltage vin;
+    output voltage out;
+    integer code;
+    analog begin
+        code = $floor(V(vin) / 0.25);
+        V(out) <+ code;
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_source("vin", dc(0.62))
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert "math.floor" in ModelCls._generated_code
+        assert result.signals["out"][-1] == pytest.approx(2.0)
+
+    def test_transition_three_arg_form_uses_rise_for_fall(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+module transition_three_arg_probe(out);
+    output voltage out;
+    analog begin
+        V(out) <+ transition(1.0, 0.0, 10p);
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+
+        assert "1e-11, 1e-11" in ModelCls._generated_code
+
     VA_SRC_TIMER_TO_TRANSITION_CROSS = """\
 `include "disciplines.vams"
 module timer_cross_probe(out, seen);
@@ -688,6 +897,78 @@ endmodule
 
         seen = result.signals["seen"][-1]
         assert seen == pytest.approx(11e-9, abs=1e-12)
+
+    VA_SRC_VAR_PERIOD = """\
+`include "disciplines.vams"
+module timer_var_period(out);
+    output voltage out;
+    integer count;
+    real p;
+    analog begin
+        @(initial_step) begin
+            count = 0;
+            p = 2e-9;
+        end
+        @(timer(1e-9, p)) begin
+            count = count + 1;
+            p = (count & 1) ? 1e-9 : 2e-9;
+        end
+        V(out) <+ count;
+    end
+endmodule
+"""
+
+    def test_timer_variable_period_is_stable(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+        mod = parse(self.VA_SRC_VAR_PERIOD)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=10e-9, tstep=1e-9)
+
+        # Expected fire times: 1,2,4,5,7,8,10 ns => 7 fires.
+        assert result.signals["out"][-1] == pytest.approx(7.0, abs=1.0)
+
+
+class TestCrossToleranceAndLastCrossing:
+    VA_SRC = """\
+`include "disciplines.vams"
+module last_crossing_probe(vin, out, tlast);
+    input voltage vin;
+    output voltage out;
+    output voltage tlast;
+    real lc;
+    integer seen;
+    analog begin
+        @(initial_step) seen = 0;
+        lc = last_crossing(V(vin) - 0.5, +1, 0.0, 1e-12);
+        @(cross(V(vin) - 0.5, +1, 0.0, 1e-12))
+            seen = 1;
+        V(out) <+ seen;
+        V(tlast) <+ lc;
+    end
+endmodule
+"""
+
+    def test_last_crossing_tracks_rising_edge(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+        mod = parse(self.VA_SRC)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_source("vin", ramp(0.0, 1.0, 0.0, 10e-9))
+        sim.add_model(model)
+        sim.record("tlast")
+        result = sim.run(tstop=12e-9, tstep=1e-9)
+
+        # Ramp crosses 0.5 near 5ns.
+        assert result.signals["tlast"][-1] == pytest.approx(5e-9, abs=2e-9)
 
 
 class TestWhileStatement:
@@ -949,6 +1230,36 @@ endmodule
             assert dt <= 1e-9 + 1e-15
 
 
+class TestDifferentialContribution:
+    """Test V(a,b) <+ expr semantics through a compiled VA module."""
+
+    VA_SRC = """\
+`include "disciplines.vams"
+module diff_contrib_test(vss, outp, outn);
+    inout voltage vss, outp, outn;
+    analog begin
+        V(outn, vss) <+ 0.2;
+        V(outp, outn) <+ 0.5;
+    end
+endmodule
+"""
+
+    def test_differential_contribution_references_node2_voltage(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+        mod = parse(self.VA_SRC)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("outp")
+        sim.record("outn")
+        result = sim.run(tstop=1e-9, tstep=0.1e-9)
+        assert result.signals["outn"][-1] == pytest.approx(0.2)
+        assert result.signals["outp"][-1] == pytest.approx(0.7)
+
+
 class TestFileIO:
     """Test $fopen/$fstrobe/$fclose via compiled VA module."""
 
@@ -997,6 +1308,73 @@ endmodule
         assert len(lines) == 5
         assert lines[0].startswith("edge 1 at")
         assert lines[4].startswith("edge 5 at")
+
+    def test_direct_filename_fstrobe_does_not_crash_evas(self, tmp_path):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        outfile = tmp_path / "direct_output.txt"
+        outfile_s = str(outfile).replace("\\", "/")
+        src = f"""\
+`include "disciplines.vams"
+module direct_fileio_test(clk);
+    input voltage clk;
+    integer count;
+        analog begin
+            @(initial_step) count = 0;
+            @(cross(V(clk) - 0.5, 1)) begin
+                count = count + 1;
+            $fstrobe("{outfile_s}", "direct %d", count);
+            end
+        end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_source("clk", pulse(v_lo=0.0, v_hi=1.0, period=20e-9,
+                                     rise=0.1e-9, fall=0.1e-9, duty=0.5))
+        sim.add_model(model)
+        sim.run(tstop=45e-9, tstep=1e-9)
+
+        assert outfile.exists()
+        assert outfile.read_text().strip().splitlines() == ["direct 1", "direct 2", "direct 3"]
+
+    def test_fopen_accepts_string_parameter_filename(self, tmp_path):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        outfile = tmp_path / "param_filename.txt"
+        outfile_s = str(outfile).replace("\\", "/")
+        src = f"""\
+`include "disciplines.vams"
+module param_fileio_test(clk);
+    input voltage clk;
+    parameter string filename = "{outfile_s}";
+    integer fd;
+    analog begin
+        @(final_step) begin
+            fd = $fopen(filename, "w");
+            $fstrobe(fd, "ok");
+            $fclose(fd);
+        end
+    end
+endmodule
+"""
+        mod = parse(src)
+        assert [p.name for p in mod.parameters] == ["filename"]
+
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert outfile.exists()
+        assert outfile.read_text().strip() == "ok"
 
     def test_fclose_cleans_handle(self, tmp_path):
         """After simulation, file handles should be cleaned up."""
@@ -1300,3 +1678,44 @@ endmodule
         result = sim.run(tstop=1e-9, tstep=1e-10)
 
         assert result.signals["out"][0] == pytest.approx(0.5, abs=1e-12)
+
+
+class TestSlewOperator:
+    VA_SRC = """\
+`include "disciplines.vams"
+module slew_test(out, vss);
+    output voltage out;
+    inout voltage vss;
+    real target;
+    analog begin
+        @(initial_step) target = 0.0;
+        @(timer(5e-9)) target = 1.0;
+        V(out, vss) <+ slew(target, 1e8, 1e8);
+    end
+endmodule
+"""
+
+    def test_slew_compiles_and_rate_limits(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        mod = parse(self.VA_SRC)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.add_source("vss", dc(0.0))
+        sim.record("out")
+        result = sim.run(tstop=15e-9, tstep=1e-9)
+
+        # Before timer at 5ns, output stays near 0.
+        idx_4ns = min(range(len(result.time)), key=lambda i: abs(result.time[i] - 4e-9))
+        assert result.signals["out"][idx_4ns] == pytest.approx(0.0, abs=1e-9)
+
+        # Near 6ns (about 1ns after target step), slew should have moved ~0.1V.
+        idx_6ns = min(range(len(result.time)), key=lambda i: abs(result.time[i] - 6e-9))
+        assert 0.0 < result.signals["out"][idx_6ns] < 0.5
+
+        # By 15ns, with 1e8 V/s rise limit and 10ns elapsed since 5ns step, output nears 1V.
+        assert result.signals["out"][-1] == pytest.approx(1.0, abs=0.1)

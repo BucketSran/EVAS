@@ -121,6 +121,7 @@ class Token:
     value: str
     line: int
     col: int
+    raw: str = ''
 
     def __repr__(self):
         return f"Token({self.type.name}, {self.value!r}, L{self.line}:{self.col})"
@@ -253,7 +254,8 @@ def tokenize(source: str) -> List[Token]:
                 val = float(num_str) * multiplier
             except ValueError:
                 val = 0.0
-            tokens.append(Token(TokenType.NUMBER, str(val), line, start_col))
+            raw_num = source[start:i]
+            tokens.append(Token(TokenType.NUMBER, str(val), line, start_col, raw_num))
             continue
 
         # Identifiers / Keywords / System tasks

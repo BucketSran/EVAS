@@ -600,7 +600,14 @@ def _extract_nodes(line: str) -> Tuple[str, List[str], str]:
     paren_start = line.index('(')
     paren_end = line.index(')', paren_start)
 
-    name = line[:paren_start].strip()
+    name_text = line[:paren_start].strip()
+    name_parts = name_text.split()
+    if len(name_parts) != 1:
+        raise ValueError(
+            "Spectre instance/source syntax expects exactly one name before "
+            f"the node list; got {name_text!r}"
+        )
+    name = name_parts[0]
     nodes_str = line[paren_start + 1:paren_end].strip()
     remainder = line[paren_end + 1:].strip()
 
@@ -645,7 +652,7 @@ def _parse_vsource(line: str, netlist: SpectreNetlist,
     if wave_data is not None:
         # Evaluate each wave token; parameter refs (e.g. 'vdd') use variables
         wave_vals = []
-        for tok in wave_data.split():
+        for tok in wave_data.replace(',', ' ').split():
             tok = tok.strip()
             if not tok:
                 continue
@@ -665,10 +672,7 @@ def _parse_vsource(line: str, netlist: SpectreNetlist,
 def _parse_instance(line: str, netlist: SpectreNetlist,
                     variables: Dict[str, float]):
     """Parse an instance: Iname (n1 n2 ...) ModelName k=v ..."""
-    try:
-        name, nodes, remainder = _extract_nodes(line)
-    except ValueError:
-        return  # no parens found
+    name, nodes, remainder = _extract_nodes(line)
 
     tokens = remainder.split()
     if not tokens:
