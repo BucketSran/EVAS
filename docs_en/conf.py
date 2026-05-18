@@ -51,6 +51,12 @@ html_theme_options = {
 html_static_path = ["_static"]
 html_favicon = "_static/favicon.svg"
 html_css_files = ["custom.css"]
+html_js_files = [
+    (
+        "https://cdn.bootcdn.net/ajax/libs/busuanzi/2.3.0/bsz.pure.mini.js",
+        {"async": "async"},
+    ),
+]
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),

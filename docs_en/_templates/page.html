@@ -1,9 +1,4 @@
-{%- extends "!layout.html" %}
-
-{%- block extrahead %}
-{{ super() }}
-<script async src="https://cdn.bootcdn.net/ajax/libs/busuanzi/2.3.0/bsz.pure.mini.js"></script>
-{%- endblock %}
+{%- extends "!page.html" %}
 
 {%- block footer %}
 {{ super() }}
@@ -21,4 +16,4 @@
     <strong id="busuanzi_value_page_pv">--</strong>
   </span>
 </div>
-{%- endblock %}
+{%- endblock footer %}
