@@ -174,33 +174,40 @@ class TestCrossDetector:
         assert cd.check(0.0, 0.5) is False  # rising → should NOT fire
         assert cd.check(0.0, -0.5) is True  # falling → should fire
 
-    def test_exact_zero_touch_from_one_side_triggers_at_touch(self):
+    def test_exact_zero_touch_from_one_side_triggers_without_post_side_nudge(self):
         cd = CrossDetector(direction=0)
         cd.check(0.0, -1e-10)
         assert cd.check(1e-9, 0.0) is True
         assert cd.t_cross == pytest.approx(1e-9)
+        assert cd.last_trigger_direction == 1
+        assert cd.last_trigger_went_beyond is False
 
-    def test_exact_zero_touch_returning_same_side_still_triggers_once(self):
+    def test_exact_zero_touch_returning_same_side_does_not_retrigger(self):
         cd = CrossDetector(direction=1)
         cd.check(0.0, -1.0)
         assert cd.check(1e-9, 0.0, expr_tol=0.0) is True
+        assert cd.last_trigger_went_beyond is False
         assert cd.check(2e-9, -1.0, expr_tol=0.0) is False
         assert cd.pending_touch_direction == 0
         assert cd.last_triggered is False
 
-    def test_exact_zero_touch_falling_then_negative_triggers_at_touch_time(self):
+    def test_exact_zero_touch_falling_triggers_at_touch_time(self):
         cd = CrossDetector(direction=-1)
         cd.check(0.0, 1.0)
         assert cd.check(1e-9, 0.0, expr_tol=0.0) is True
         assert cd.t_cross == pytest.approx(1e-9)
+        assert cd.last_trigger_direction == -1
+        assert cd.last_trigger_went_beyond is False
 
     def test_last_triggered_reflects_result(self):
         cd = CrossDetector(direction=0)
         cd.check(0.0, -1.0)
         cd.check(0.0, 1.0)
         assert cd.last_triggered is True
+        assert cd.last_trigger_went_beyond is True
         cd.check(0.0, 0.5)                  # no crossing
         assert cd.last_triggered is False
+        assert cd.last_trigger_went_beyond is False
 
     def test_would_cross_does_not_update_state(self):
         cd = CrossDetector(direction=0)
@@ -324,6 +331,28 @@ class TestPulse:
         # ordered before later same-step events.
         bp = fn._next_breakpoint(0.0)
         assert bp == pytest.approx(0.5e-9)
+
+    def test_spectre_width_excludes_rise_time(self):
+        fn = pulse(
+            v_lo=0.0, v_hi=0.9, period=1e-9, delay=100e-12,
+            rise=20e-12, fall=20e-12, width=500e-12,
+        )
+
+        assert fn(100e-12) == pytest.approx(0.0)
+        assert fn(110e-12) == pytest.approx(0.45)
+        assert fn(120e-12) == pytest.approx(0.9)
+        assert fn(620e-12) == pytest.approx(0.9)
+        assert fn(630e-12) == pytest.approx(0.45)
+        assert fn(640e-12) == pytest.approx(0.0)
+
+    def test_spectre_width_breakpoints_include_fall_after_rise_plus_width(self):
+        fn = pulse(
+            v_lo=0.0, v_hi=0.9, period=1e-9, delay=100e-12,
+            rise=20e-12, fall=20e-12, width=500e-12,
+        )
+
+        assert fn._next_breakpoint(619e-12) == pytest.approx(620e-12)
+        assert fn._next_breakpoint(620e-12) == pytest.approx(630e-12)
 
 
 class TestPwl:
@@ -496,6 +525,29 @@ class TestSimulator:
         assert result.time[-1] == pytest.approx(1e-9)
         assert len(result.step_sizes) == len(result.time)
 
+    def test_skip_source_error_control_only_removes_source_dynamic_shrinks(self):
+        sim = Simulator()
+        sim.add_source("vin", ramp(0.0, 1.0, 0.0, 1e-9))
+        sim.record("vin")
+        sim.run(tstop=2e-9, tstep=1e-9, reltol=1e-3, vabstol=1e-6)
+        default_stats = dict(sim._perf_stats)
+
+        fast = Simulator()
+        fast.add_source("vin", ramp(0.0, 1.0, 0.0, 1e-9))
+        fast.record("vin")
+        fast.run(
+            tstop=2e-9,
+            tstep=1e-9,
+            reltol=1e-3,
+            vabstol=1e-6,
+            skip_source_error_control=True,
+        )
+
+        assert default_stats["dynamic_step_shrinks"] > 0
+        assert default_stats["err_ratio_skipped_sources"] == 0
+        assert fast._perf_stats["dynamic_step_shrinks"] == 0
+        assert fast._perf_stats["err_ratio_skipped_sources"] > 0
+
 
 # ===========================================================================
 # CompiledModel base-class helpers
@@ -524,9 +576,78 @@ class TestCompiledModelHelpers:
         self.model._event_context_active = True
         self.model._event_interpolated_nodes = {"vin"}
         assert self.model._get_voltage("vin", {"vin": 1.0}) == pytest.approx(0.4)
-        assert self.model._get_voltage("rst", {"rst": 1.0}) == pytest.approx(1.0)
+        assert self.model._get_voltage("rst", {"rst": 1.0}) == pytest.approx(0.4)
         self.model._event_context_active = False
         assert self.model._get_voltage("vin", {"vin": 1.0}) == pytest.approx(1.0)
+
+    def test_integer_assignment_rounds_real_values_like_spectre(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module integer_round_probe(out, neg);
+    output voltage out;
+    output voltage neg;
+    integer ipos;
+    integer ineg;
+    analog begin
+        @(initial_step) begin
+            ipos = 0.51;
+            ineg = -0.51;
+        end
+        V(out) <+ ipos;
+        V(neg) <+ ineg;
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+        sim = Simulator()
+        sim.add_model(ModelCls())
+        sim.record("out")
+        sim.record("neg")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"][0] == pytest.approx(1.0)
+        assert result.signals["neg"][0] == pytest.approx(-1.0)
+
+    def test_module_scope_real_initializer_can_reference_prior_constants(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module initializer_probe(out);
+    output voltage out;
+    parameter real vin_min = 0.25;
+    parameter real vin_max = 0.90;
+    real vmin_out = 0.28;
+    real vmax_out = 0.82;
+    real slope = (vmax_out - vmin_out) / (vin_max - vin_min);
+    real target = vmin_out + slope * (0.75 - vin_min);
+    analog begin
+        V(out) <+ target;
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        assert model.state["slope"] == pytest.approx((0.82 - 0.28) / (0.90 - 0.25))
+        assert model.state["target"] == pytest.approx(0.6953846153846154)
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"][-1] == pytest.approx(0.6953846153846154)
+
+    def test_plain_real_comparisons_do_not_use_hidden_epsilon(self):
+        assert self.model._cmp_ge(0.5 - 1e-16, 0.5) is False
+        assert self.model._cmp_le(0.5 + 1e-16, 0.5) is False
 
 
     def test_set_output_writes_node_voltages(self):
@@ -705,6 +826,364 @@ class TestCompiledModelHelpers:
 
 
 # ===========================================================================
+# Compiled event scheduling parity
+# ===========================================================================
+
+class TestCompiledEventScheduling:
+
+    def test_cross_event_body_samples_other_nodes_at_crossing_time(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module crossing_sample_probe(clk, vin, out);
+    input voltage clk;
+    input voltage vin;
+    output voltage out;
+    real sampled;
+    analog begin
+        @(initial_step) begin
+            sampled = 0.0;
+        end
+        @(cross(V(clk) - 0.5, +1)) begin
+            sampled = V(vin);
+        end
+        V(out) <+ sampled;
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+
+        sim = Simulator()
+        sim.add_source("clk", ramp(0.0, 1.0, 0.0, 10e-9))
+        sim.add_source("vin", ramp(0.0, 1.0, 0.0, 10e-9))
+        sim.add_model(ModelCls())
+        sim.record("out")
+        result = sim.run(
+            tstop=10e-9,
+            tstep=10e-9,
+            max_step=10e-9,
+            skip_source_error_control=True,
+        )
+
+        assert result.signals["out"][-1] == pytest.approx(0.5, abs=1e-12)
+
+    def test_combined_cross_evaluates_all_detectors_before_or(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module combined_cross_probe(a, b, out);
+    input voltage a;
+    input voltage b;
+    output voltage out;
+    integer count;
+    analog begin
+        @(initial_step) begin
+            count = 0;
+        end
+        @(cross(V(a) - 0.5, +1) or cross(V(b) - 0.5, -1)) begin
+            count = count + 1;
+        end
+        V(out) <+ count;
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+
+        sim = Simulator()
+        sim.add_source("a", lambda t: 0.0 if t < 10e-9 else 1.0)
+        sim.add_source("b", lambda t: 1.0 if t < 10e-9 else 0.0)
+        sim.add_model(ModelCls())
+        sim.record("out")
+        result = sim.run(
+            tstop=20e-9,
+            tstep=10e-9,
+            max_step=10e-9,
+            skip_source_error_control=True,
+        )
+
+        assert result.signals["out"][-1] == pytest.approx(1.0, abs=1e-12)
+
+    def test_cross_event_body_sees_trigger_node_on_post_cross_side(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module strict_window_probe(vin, vss, out);
+    input voltage vin;
+    input voltage vss;
+    output voltage out;
+    real target;
+    analog begin
+        @(initial_step) begin
+            target = 0.0;
+        end
+        @(cross(V(vin,vss) - 0.3, +1) or cross(V(vin,vss) - 0.6, +1) or
+          cross(V(vin,vss) - 0.3, -1) or cross(V(vin,vss) - 0.6, -1)) begin
+            if ((V(vin,vss) > 0.3) && (V(vin,vss) < 0.6))
+                target = 1.0;
+            else
+                target = 0.0;
+        end
+        V(out) <+ target;
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+
+        sim = Simulator()
+        sim.add_source("vin", ramp(0.0, 0.9, 0.0, 90e-9))
+        sim.add_source("vss", dc(0.0))
+        sim.add_model(ModelCls())
+        sim.record("out")
+        result = sim.run(
+            tstop=90e-9,
+            tstep=10e-9,
+            max_step=10e-9,
+            skip_source_error_control=True,
+        )
+
+        assert result.signals["out"].max() == pytest.approx(1.0, abs=1e-12)
+
+    def test_cross_event_body_nudges_subtracted_branch_nodes(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module strict_diff_comparator(vinp, vinn, out);
+    input voltage vinp;
+    input voltage vinn;
+    output voltage out;
+    real target;
+    analog begin
+        @(initial_step) begin
+            target = 0.0;
+        end
+        @(cross(V(vinp) - V(vinn), 0)) begin
+            if (V(vinp) > V(vinn))
+                target = 1.0;
+            else
+                target = 0.0;
+        end
+        V(out) <+ target;
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+
+        sim = Simulator()
+        sim.add_source("vinp", ramp(0.0, 0.9, 0.0, 10e-9))
+        sim.add_source("vinn", dc(0.45))
+        sim.add_model(ModelCls())
+        sim.record("out")
+        result = sim.run(
+            tstop=10e-9,
+            tstep=10e-9,
+            max_step=10e-9,
+            skip_source_error_control=True,
+        )
+
+        assert result.signals["out"].max() == pytest.approx(1.0, abs=1e-12)
+
+    def test_cross_direction_zero_float_detects_any_direction(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module any_cross_probe(vin, out);
+    input voltage vin;
+    output voltage out;
+    integer count;
+    analog begin
+        @(initial_step) count = 0;
+        @(cross(V(vin) - 0.5, 0.0, 1p)) count = count + 1;
+        V(out) <+ count;
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+
+        sim = Simulator()
+        sim.add_source("vin", pwl([0.0, 10e-9, 20e-9], [0.0, 1.0, 0.0]))
+        sim.add_model(ModelCls())
+        sim.record("out")
+        result = sim.run(
+            tstop=20e-9,
+            tstep=5e-9,
+            max_step=5e-9,
+            skip_source_error_control=True,
+        )
+
+        assert result.signals["out"][-1] == pytest.approx(2.0, abs=1e-12)
+
+    def test_same_step_cross_event_bodies_follow_chronological_order(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module ordered_threshold_probe(vin, out);
+    input voltage vin;
+    output voltage out;
+    real state;
+    analog begin
+        @(initial_step) state = 0.0;
+        @(cross(V(vin) - 0.65, 0)) state = 2.0;
+        @(cross(V(vin) - 0.50, 0)) state = 1.0;
+        V(out) <+ state;
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+
+        sim = Simulator()
+        sim.add_source("vin", ramp(0.2, 0.7, 0.0, 10e-9))
+        sim.add_model(ModelCls())
+        sim.record("out")
+        result = sim.run(
+            tstop=10e-9,
+            tstep=10e-9,
+            max_step=10e-9,
+            skip_source_error_control=True,
+        )
+
+        assert result.signals["out"][-1] == pytest.approx(2.0, abs=1e-12)
+
+    def test_cross_event_samples_simultaneous_nontrigger_source_post_side(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module simultaneous_sample(clk, err, out);
+    input voltage clk;
+    input voltage err;
+    output voltage out;
+    real target;
+    analog begin
+        @(initial_step) begin
+            target = 0.0;
+        end
+        @(cross(V(clk) - 0.5, +1)) begin
+            if (V(err) > 0.5)
+                target = 1.0;
+            else
+                target = 0.0;
+        end
+        V(out) <+ target;
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+
+        sim = Simulator()
+        sim.add_source("clk", ramp(0.0, 1.0, 0.0, 10e-9))
+        sim.add_source("err", ramp(1.0, 0.0, 0.0, 10e-9))
+        sim.add_model(ModelCls())
+        sim.record("out")
+        result = sim.run(
+            tstop=10e-9,
+            tstep=10e-9,
+            max_step=10e-9,
+            skip_source_error_control=True,
+        )
+
+        assert result.signals["out"].max() == pytest.approx(0.0, abs=1e-12)
+
+    def test_combined_cross_merges_simultaneous_trigger_directions(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module simultaneous_thermometer_step(b0, b1, out);
+    input voltage b0;
+    input voltage b1;
+    output voltage out;
+    integer code;
+    analog begin
+        @(initial_step) begin
+            code = 0;
+        end
+        @(cross(V(b0) - 0.5, 0) or cross(V(b1) - 0.5, 0)) begin
+            code = ((V(b1) > 0.5) ? 2 : 0) + ((V(b0) > 0.5) ? 1 : 0);
+        end
+        V(out) <+ code;
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+
+        sim = Simulator()
+        sim.add_source("b0", ramp(1.0, 0.0, 0.0, 10e-9))
+        sim.add_source("b1", ramp(0.0, 1.0, 0.0, 10e-9))
+        sim.add_model(ModelCls())
+        sim.record("out")
+        result = sim.run(
+            tstop=10e-9,
+            tstep=10e-9,
+            max_step=10e-9,
+            skip_source_error_control=True,
+        )
+
+        assert result.signals["out"][-1] == pytest.approx(2.0, abs=1e-12)
+
+    def test_exact_threshold_touch_does_not_force_strict_post_side(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module exact_touch_brownout(vin, out);
+    input voltage vin;
+    output voltage out;
+    real target;
+    analog begin
+        @(initial_step) begin
+            target = 1.0;
+        end
+        @(cross(V(vin) - 0.5, -1)) begin
+            if (V(vin) < 0.5)
+                target = 0.0;
+            else
+                target = 1.0;
+        end
+        V(out) <+ target;
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+
+        sim = Simulator()
+        sim.add_source("vin", ramp(1.0, 0.5, 0.0, 10e-9))
+        sim.add_model(ModelCls())
+        sim.record("out")
+        result = sim.run(
+            tstop=10e-9,
+            tstep=10e-9,
+            max_step=10e-9,
+            skip_source_error_control=True,
+        )
+
+        assert result.signals["out"][-1] == pytest.approx(1.0, abs=1e-12)
+
+
+# ===========================================================================
 # Compiled model features: timer, final_step, $temperature, $vt
 # ===========================================================================
 
@@ -838,6 +1317,32 @@ endmodule
 
         assert "math.floor" in ModelCls._generated_code
         assert result.signals["out"][-1] == pytest.approx(2.0)
+
+    def test_tanh_math_function_matches_spectre_alias(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+module tanh_probe(vin, out);
+    input voltage vin;
+    output voltage out;
+    analog begin
+        V(out) <+ tanh(V(vin));
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_source("vin", dc(0.5))
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert "math.tanh" in ModelCls._generated_code
+        assert result.signals["out"][-1] == pytest.approx(math.tanh(0.5))
 
     def test_transition_three_arg_form_uses_rise_for_fall(self):
         from evas.compiler.parser import parse
@@ -1608,10 +2113,51 @@ end
 endmodule
 """
         mod = parse(src)
-        # Spectre VACOMP accepts transition() inside conditional branches
-        # (only idtmod() is restricted by VACOMP-2154). EVAS now matches this
-        # behaviour: compile_module must succeed without raising.
-        compile_module(mod)
+        with pytest.raises(CompilationError, match="transition"):
+            compile_module(mod)
+
+    def test_event_body_contribution_is_rejected(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module bad_event_contrib(out, clk, vss);
+output out;
+electrical out;
+input clk;
+electrical clk;
+inout vss;
+electrical vss;
+analog begin
+    @(cross(V(clk, vss) - 0.5, +1))
+        V(out, vss) <+ 1.0;
+end
+endmodule
+"""
+        mod = parse(src)
+        with pytest.raises(CompilationError, match="contribution"):
+            compile_module(mod)
+
+    def test_unknown_function_is_rejected(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module bad_unknown_func(out);
+output out;
+electrical out;
+real x;
+analog begin
+    x = $itor(3);
+    V(out) <+ x;
+end
+endmodule
+"""
+        mod = parse(src)
+        with pytest.raises(CompilationError, match=r"\$itor"):
+            compile_module(mod)
 
     def test_transition_of_continuous_signal_is_accepted(self):
         from evas.compiler.parser import parse

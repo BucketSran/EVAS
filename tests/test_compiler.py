@@ -603,6 +603,12 @@ class TestParserEventStatements:
         assert stmt.event.time_tol_expr is not None
         assert stmt.event.expr_tol_expr is not None
 
+    def test_cross_event_direction_zero_float_is_preserved(self):
+        stmts = _stmts("@(cross(V(a) - 0.45, 0.0, 1p)) x = 1;")
+        stmt = stmts[0]
+        assert stmt.event.direction == 0
+        assert stmt.event.time_tol_expr is not None
+
     def test_above_event(self):
         stmts = _stmts("@(above(V(a) - 0.45)) x = 1;")
         stmt = stmts[0]
@@ -632,6 +638,41 @@ class TestParserEventStatements:
         stmts = _stmts("@(cross(V(a))) begin x = 1; y = 2; end")
         stmt = stmts[0]
         assert isinstance(stmt.body, Block)
+
+    def test_local_declaration_in_event_block_is_rejected(self):
+        src = """
+        module m(clk, vin, out);
+        electrical clk, vin, out;
+        real sampled;
+        analog begin
+            @(cross(V(clk) - 0.45, +1)) begin
+                real v_in = V(vin);
+                sampled = v_in;
+                V(out) <+ sampled;
+            end
+        end
+        endmodule
+        """
+        with pytest.raises(ParseError, match="Spectre-incompatible local declaration"):
+            _parse(src)
+
+    def test_module_scope_declaration_before_event_block_is_allowed(self):
+        src = """
+        module m(clk, vin, out);
+        electrical clk, vin, out;
+        real v_in;
+        real sampled;
+        analog begin
+            @(cross(V(clk) - 0.45, +1)) begin
+                v_in = V(vin);
+                sampled = v_in;
+                V(out) <+ sampled;
+            end
+        end
+        endmodule
+        """
+        m = _parse(src)
+        assert [v.name for v in m.variables] == ["v_in", "sampled"]
 
     def test_timer_event(self):
         stmts = _stmts("@(timer(10e-9)) x = 1;")

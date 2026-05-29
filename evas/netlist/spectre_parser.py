@@ -13,6 +13,7 @@ Parses real Cadence Spectre netlist syntax:
   save node1 node2 ...         — Signals to record
   simulatorOptions options ...  — Parse temp, skip rest
   // comment                   — C-style line comments
+  * comment                    — Spectre/SPICE full-line comments
   \\ at EOL                    — Line continuation
 """
 import re
@@ -107,9 +108,28 @@ class SpectreNetlist:
 # SPICE suffix parser
 # ---------------------------------------------------------------------------
 
-_SUFFIXES = {
-    'T': 1e12, 'G': 1e9, 'MEG': 1e6, 'X': 1e6, 'K': 1e3,
-    'M': 1e-3, 'U': 1e-6, 'N': 1e-9, 'P': 1e-12, 'F': 1e-15, 'A': 1e-18,
+_SUFFIXES_CASE_SENSITIVE = {
+    'T': 1e12,
+    'G': 1e9,
+    'M': 1e6,
+    'K': 1e3,
+    'k': 1e3,
+    'm': 1e-3,
+    'u': 1e-6,
+    'U': 1e-6,
+    'n': 1e-9,
+    'N': 1e-9,
+    'p': 1e-12,
+    'P': 1e-12,
+    'f': 1e-15,
+    'F': 1e-15,
+    'a': 1e-18,
+    'A': 1e-18,
+}
+
+_SUFFIXES_CASE_INSENSITIVE = {
+    'MEG': 1e6,
+    'X': 1e6,
 }
 
 
@@ -125,13 +145,23 @@ def _parse_suffix_number(s: str) -> Optional[float]:
     except ValueError:
         pass
 
-    # Try suffix match (longest first)
-    s_upper = s.upper()
-    for suffix in sorted(_SUFFIXES.keys(), key=len, reverse=True):
-        if s_upper.endswith(suffix):
-            num_part = s_upper[:-len(suffix)]
+    # Spectre engineering suffixes are case-sensitive for M/m.  Keep the
+    # common case-insensitive multi-letter aliases separately so 100M means
+    # 100e6 while 900m remains 0.9.
+    for suffix in sorted(_SUFFIXES_CASE_SENSITIVE.keys(), key=len, reverse=True):
+        if s.endswith(suffix):
+            num_part = s[:-len(suffix)]
             try:
-                return float(num_part) * _SUFFIXES[suffix]
+                return float(num_part) * _SUFFIXES_CASE_SENSITIVE[suffix]
+            except ValueError:
+                continue
+
+    s_upper = s.upper()
+    for suffix in sorted(_SUFFIXES_CASE_INSENSITIVE.keys(), key=len, reverse=True):
+        if s_upper.endswith(suffix):
+            num_part = s[:-len(suffix)]
+            try:
+                return float(num_part) * _SUFFIXES_CASE_INSENSITIVE[suffix]
             except ValueError:
                 continue
 
@@ -270,6 +300,67 @@ def evaluate_expr(expr: str, variables: Dict[str, float]) -> float:
 # Line preprocessing: strip comments, handle continuation
 # ---------------------------------------------------------------------------
 
+def _strip_line_comment(line: str) -> str:
+    """Strip Spectre line comments while respecting quoted strings."""
+    if line.lstrip().startswith('*'):
+        return ''
+    in_quote = False
+    quote_char = None
+    for i, ch in enumerate(line):
+        if in_quote:
+            if ch == quote_char:
+                in_quote = False
+        else:
+            if ch in ('"', "'"):
+                in_quote = True
+                quote_char = ch
+            elif ch == '/' and i + 1 < len(line) and line[i + 1] == '/':
+                return line[:i].rstrip()
+    return line
+
+
+def _validate_pwl_line_continuations(raw_lines: List[str]) -> None:
+    """Reject implicit multiline PWL wave arrays that Spectre rejects.
+
+    Spectre does not treat a bracketed ``wave=[...]`` array as an implicit line
+    continuation.  The generated netlist must either keep the full array on one
+    line or use backslash continuation on each non-final line.
+    """
+    in_wave = False
+    for line_no, raw in enumerate(raw_lines, start=1):
+        line = _strip_line_comment(raw.rstrip())
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        continued = stripped.endswith('\\')
+
+        if not in_wave:
+            match = re.search(r'\bwave\s*=\s*\[', stripped, flags=re.IGNORECASE)
+            if not match:
+                continue
+            if ']' in stripped[match.end():]:
+                continue
+            if not continued:
+                raise ValueError(
+                    "Spectre-incompatible PWL wave syntax at "
+                    f"line {line_no}: multiline wave=[...] requires backslash "
+                    "line continuation"
+                )
+            in_wave = True
+            continue
+
+        if ']' in stripped:
+            in_wave = False
+            continue
+        if not continued:
+            raise ValueError(
+                "Spectre-incompatible PWL wave syntax at "
+                f"line {line_no}: multiline wave=[...] requires backslash "
+                "line continuation"
+            )
+
+
 def _preprocess_lines(raw_lines: List[str]) -> List[str]:
     """Strip comments, handle \\ continuation and bracket blocks, return clean lines."""
     result = []
@@ -277,23 +368,7 @@ def _preprocess_lines(raw_lines: List[str]) -> List[str]:
     bracket_depth = 0
 
     for raw in raw_lines:
-        # Strip trailing whitespace
-        line = raw.rstrip()
-
-        # Remove // comments (but not inside quotes)
-        in_quote = False
-        quote_char = None
-        for i, ch in enumerate(line):
-            if in_quote:
-                if ch == quote_char:
-                    in_quote = False
-            else:
-                if ch in ('"', "'"):
-                    in_quote = True
-                    quote_char = ch
-                elif ch == '/' and i + 1 < len(line) and line[i + 1] == '/':
-                    line = line[:i].rstrip()
-                    break
+        line = _strip_line_comment(raw.rstrip())
 
         continued = line.endswith('\\')
         if continued:
@@ -394,6 +469,7 @@ def parse_spectre(filepath: str) -> SpectreNetlist:
     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
         raw_lines = f.readlines()
 
+    _validate_pwl_line_continuations(raw_lines)
     lines = _preprocess_lines(raw_lines)
     evaluator_vars = {}  # accumulated parameter variables
 

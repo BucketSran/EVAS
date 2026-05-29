@@ -9,6 +9,7 @@ Covers:
   - _add_spectre_source: degenerate pulse (no period, val0==val1),
       degenerate sine (no freq, ampl=0)
 """
+import csv
 import textwrap
 from pathlib import Path
 
@@ -17,6 +18,7 @@ import pytest
 from evas.netlist.spectre_parser import (
     _extract_nodes,
     _normalize_node_name,
+    _parse_suffix_number,
     parse_spectre,
 )
 from evas.netlist.runner import _add_spectre_source, _apply_evas_profile, SpectreSource
@@ -137,6 +139,26 @@ class TestParseSpectreRealNetlist:
         names = {s.name for s in netlist.sources}
         assert names == {"V0", "V1", "V2", "V3"}
 
+    def test_spectre_suffix_parser_keeps_m_and_M_distinct(self):
+        assert _parse_suffix_number("900m") == pytest.approx(0.9)
+        assert _parse_suffix_number("100M") == pytest.approx(100e6)
+        assert _parse_suffix_number("100Meg") == pytest.approx(100e6)
+
+    def test_spectre_star_comments_are_ignored(self, tmp_path):
+        scs = tmp_path / "tb_star_comment.scs"
+        scs.write_text(textwrap.dedent("""\
+            * Divide ratio code = 5
+            simulator lang=spectre
+            global 0
+            * Another SPICE-style comment with (parentheses)
+            V1 (out 0) vsource dc=1 type=dc
+            tran tran stop=1n
+            save out
+        """))
+        parsed = parse_spectre(str(scs))
+        assert [src.name for src in parsed.sources] == ["V1"]
+        assert parsed.tran is not None
+
     def test_vdd_dc_voltage(self, netlist):
         v1 = next(s for s in netlist.sources if s.name == "V1")
         assert v1.source_type == "dc"
@@ -236,6 +258,63 @@ class TestAhdlIncludePathFallback:
 
 
 # ===========================================================================
+# EVAS/Spectre startup conformance
+# ===========================================================================
+
+class TestInitialTimerTransitionConformance:
+
+    VA_SRC = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module timer0_transition_probe(vctrl, phase);
+        input vctrl;
+        output phase;
+        electrical vctrl, phase;
+        real ph;
+        parameter real tr = 200p;
+
+        analog begin
+            @(initial_step) ph = 0.0;
+            @(timer(0, 1n)) ph = ph + 0.03 + 0.09 * V(vctrl);
+            V(phase) <+ transition(ph, 0, tr, tr);
+        end
+        endmodule
+    """)
+
+    SCS_SRC = textwrap.dedent("""\
+        simulator lang=spectre
+        global 0
+        Vctrl (vctrl 0) vsource type=dc dc=0.1
+        I0 (vctrl phase) timer0_transition_probe
+        tran tran stop=2n maxstep=500p
+        save vctrl phase
+        ahdl_include "timer0_transition_probe.va"
+    """)
+
+    def test_timer_zero_sets_initial_transition_target(self, tmp_path):
+        va_file = tmp_path / "timer0_transition_probe.va"
+        va_file.write_text(self.VA_SRC)
+        scs_file = tmp_path / "tb_timer0_transition_probe.scs"
+        scs_file.write_text(self.SCS_SRC)
+
+        from evas.netlist.runner import evas_simulate
+        ok = evas_simulate(str(scs_file), output_dir=str(tmp_path / "out"))
+        assert ok
+
+        csv_file = tmp_path / "out" / "tran.csv"
+        rows = list(csv.DictReader(csv_file.open()))
+        points = [(float(row["time"]), float(row["phase"])) for row in rows]
+
+        # Spectre treats the timer(0, ...) event as part of the initial solve,
+        # so the first saved point is the settled target, not a ramp from 0.
+        assert points[0][0] == pytest.approx(0.0)
+        assert points[0][1] == pytest.approx(0.039, abs=1e-12)
+
+        before_second_timer = [v for t, v in points if t < 1e-9 - 1e-18]
+        assert before_second_timer
+        assert all(v == pytest.approx(0.039, abs=1e-12) for v in before_second_timer)
+
+
+# ===========================================================================
 # _add_spectre_source — degenerate cases
 # ===========================================================================
 
@@ -292,6 +371,23 @@ class TestAddSpectreSourceDegenerateCases:
         warns = _add_spectre_source(sim, src, "0")
         assert warns == []
 
+    def test_pulse_width_matches_spectre_plateau_semantics(self):
+        """Spectre pulse width is the high plateau after the rise ramp."""
+        src = _make_pulse(
+            "Vclk", val0=0.0, val1=0.9, period=1e-9,
+            delay=100e-12, rise=20e-12, fall=20e-12, width=500e-12,
+        )
+        sim = self._sim()
+        warns = _add_spectre_source(sim, src, "0")
+
+        assert warns == []
+        waveform = sim.sources[-1].waveform
+        assert waveform(110e-12) == pytest.approx(0.45)
+        assert waveform(120e-12) == pytest.approx(0.9)
+        assert waveform(620e-12) == pytest.approx(0.9)
+        assert waveform(630e-12) == pytest.approx(0.45)
+        assert waveform(640e-12) == pytest.approx(0.0)
+
     def test_sine_no_freq_warns_and_becomes_dc(self):
         """sine with freq=0 → DC + warning."""
         src = _make_sine("V3", freq=0.0, ampl=0.5, sinedc=0.45)
@@ -330,20 +426,71 @@ class TestAddSpectreSourceDegenerateCases:
         assert sim.sources[-1].waveform(0.0) == pytest.approx(0.45)
         assert sim.sources[-1].waveform(0.25 / 73e6) == pytest.approx(0.85)
 
-    def test_sine_offset_param_is_not_waveform_dc(self):
-        """`offset=` is not Spectre's sine waveform DC; use `sinedc=` instead."""
+    def test_sine_offset_amplitude_frequency_are_not_transient_aliases(self):
+        """Spectre ignores these names for transient sine; EVAS must too."""
         src = SpectreSource(
             name="Vin",
             node_pos="vin",
             node_neg="0",
             source_type="sine",
-            params={"type": "sine", "freq": 100e6, "ampl": 0.2, "offset": 0.45},
+            params={
+                "type": "sine",
+                "freq": 100e6,
+                "amplitude": 0.2,
+                "offset": 0.45,
+            },
         )
         sim = self._sim()
         warns = _add_spectre_source(sim, src, "0")
         assert warns == []
         assert sim.sources[-1].waveform(0.0) == pytest.approx(0.0)
-        assert sim.sources[-1].waveform(0.25 / 100e6) == pytest.approx(0.2)
+        assert sim.sources[-1].waveform(0.25 / 100e6) == pytest.approx(1.0)
+
+    def test_sine_vo_va_are_not_transient_aliases(self):
+        src = SpectreSource(
+            name="Vin",
+            node_pos="vin",
+            node_neg="0",
+            source_type="sine",
+            params={"type": "sine", "freq": 50e6, "vo": 0.45, "va": 0.15},
+        )
+        sim = self._sim()
+        warns = _add_spectre_source(sim, src, "0")
+        assert warns == []
+        assert sim.sources[-1].waveform(0.0) == pytest.approx(0.0)
+        assert sim.sources[-1].waveform(0.25 / 50e6) == pytest.approx(1.0)
+
+    def test_sine_noncanonical_names_are_ignored_but_uppercase_M_frequency_is_preserved(self, tmp_path):
+        scs = tmp_path / "tb_sine_aliases.scs"
+        scs.write_text(textwrap.dedent("""\
+            Vvin (vin 0) vsource type=sine amplitude=0.1 offset=0.45 freq=100M
+            tran tran stop=10n
+            save vin
+        """))
+
+        netlist = parse_spectre(str(scs))
+        sim = self._sim()
+        warns = _add_spectre_source(sim, netlist.sources[0], "0")
+
+        assert warns == []
+        assert sim.sources[-1].waveform(0.0) == pytest.approx(0.0)
+        assert sim.sources[-1].waveform(2.5e-9) == pytest.approx(1.0)
+
+    def test_sine_canonical_sinedc_ampl_preserves_uppercase_M_frequency(self, tmp_path):
+        scs = tmp_path / "tb_sine_canonical.scs"
+        scs.write_text(textwrap.dedent("""\
+            Vvin (vin 0) vsource type=sine sinedc=0.45 ampl=0.1 freq=100M
+            tran tran stop=10n
+            save vin
+        """))
+
+        netlist = parse_spectre(str(scs))
+        sim = self._sim()
+        warns = _add_spectre_source(sim, netlist.sources[0], "0")
+
+        assert warns == []
+        assert sim.sources[-1].waveform(0.0) == pytest.approx(0.45)
+        assert sim.sources[-1].waveform(2.5e-9) == pytest.approx(0.55)
 
     def test_pwl_duplicate_times_are_rejected_like_spectre(self):
         src = SpectreSource(
@@ -379,12 +526,24 @@ class TestNetlistRegressions:
         ]
         assert netlist.save_formats["vin_i"] == "3f"
 
-    def test_multiline_pwl_wave_is_joined_and_parsed(self, tmp_path):
+    def test_implicit_multiline_pwl_wave_is_rejected(self, tmp_path):
         scs = tmp_path / "tb_multiline_pwl.scs"
         scs.write_text(textwrap.dedent("""\
             VIN (vin_i 0) vsource type=pwl wave=[
                 0      0.0
                 20.48u 1.0
+            ]
+        """))
+
+        with pytest.raises(ValueError, match="multiline wave=\\[\\.\\.\\.\\] requires backslash"):
+            parse_spectre(str(scs))
+
+    def test_backslash_continued_pwl_wave_is_parsed(self, tmp_path):
+        scs = tmp_path / "tb_continued_pwl.scs"
+        scs.write_text(textwrap.dedent("""\
+            VIN (vin_i 0) vsource type=pwl wave=[ \\
+                0      0.0 \\
+                20.48u 1.0 \\
             ]
         """))
 
@@ -462,10 +621,46 @@ class TestEvasProfileMapping:
             output_dir=str(tmp_path / "out"),
         )
         assert ok is False
-        assert "ERROR: Invalid source VIN" in log_path.read_text()
+        assert "ERROR: Failed to parse" in log_path.read_text()
+        assert "multiline wave=[...] requires backslash" in log_path.read_text()
 
 
 class TestSpectreCompatibilityPreflight:
+
+    def test_event_body_contribution_fails(self, tmp_path):
+        va_file = tmp_path / "event_contribution.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module event_contribution(clk, out);
+                input clk;
+                output out;
+                electrical clk, out;
+                analog begin
+                    @(cross(V(clk) - 0.5, +1)) begin
+                        V(out) <+ transition(1.0, 0, 1p, 1p);
+                    end
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_event_contribution.scs"
+        log_path = tmp_path / "evas.log"
+        scs.write_text(textwrap.dedent("""\
+            Vclk (clk 0) vsource type=pulse val0=0 val1=1 period=1n width=500p rise=1p fall=1p
+            I1 (clk out) event_contribution
+            tran tran stop=2n
+            ahdl_include "event_contribution.va"
+            save out
+        """))
+
+        from evas.netlist.runner import evas_simulate
+
+        ok = evas_simulate(
+            str(scs),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+        assert ok is False
+        assert "contribution statement" in log_path.read_text()
 
     def test_transition_in_runtime_case_block_fails(self, tmp_path):
         va_file = tmp_path / "bad_transition.va"
@@ -504,6 +699,141 @@ class TestSpectreCompatibilityPreflight:
         )
         assert ok is False
         assert "transition()" in log_path.read_text()
+
+    def test_transition_in_if_branch_fails(self, tmp_path):
+        va_file = tmp_path / "bad_transition_if.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module bad_transition_if(inp, out);
+                input inp;
+                output out;
+                electrical inp, out;
+                analog begin
+                    if (V(inp) > 0.5)
+                        V(out) <+ transition(1.0, 0, 1n, 1n);
+                    else
+                        V(out) <+ transition(0.0, 0, 1n, 1n);
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_bad_transition_if.scs"
+        log_path = tmp_path / "evas.log"
+        scs.write_text(textwrap.dedent("""\
+            Vin (inp 0) vsource dc=1 type=dc
+            I1 (inp out) bad_transition_if
+            tran tran stop=1n
+            ahdl_include "bad_transition_if.va"
+            save out
+        """))
+
+        from evas.netlist.runner import evas_simulate
+
+        ok = evas_simulate(
+            str(scs),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+        assert ok is False
+        assert "transition()" in log_path.read_text()
+
+    def test_standalone_wait_call_fails(self, tmp_path):
+        va_file = tmp_path / "bad_wait.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module bad_wait(out);
+                output out;
+                electrical out;
+                analog begin
+                    wait(1n);
+                    V(out) <+ 1.0;
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_bad_wait.scs"
+        log_path = tmp_path / "evas.log"
+        scs.write_text(textwrap.dedent("""\
+            I1 (out) bad_wait
+            tran tran stop=1n
+            ahdl_include "bad_wait.va"
+            save out
+        """))
+
+        from evas.netlist.runner import evas_simulate
+
+        ok = evas_simulate(
+            str(scs),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+        assert ok is False
+        assert "wait()" in log_path.read_text()
+
+    def test_unknown_dollar_function_fails(self, tmp_path):
+        va_file = tmp_path / "bad_itor.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module bad_itor(out);
+                output out;
+                electrical out;
+                integer code;
+                real val;
+                analog begin
+                    code = 3;
+                    val = $itor(code);
+                    V(out) <+ val;
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_bad_itor.scs"
+        log_path = tmp_path / "evas.log"
+        scs.write_text(textwrap.dedent("""\
+            I1 (out) bad_itor
+            tran tran stop=1n
+            ahdl_include "bad_itor.va"
+            save out
+        """))
+
+        from evas.netlist.runner import evas_simulate
+
+        ok = evas_simulate(
+            str(scs),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+        assert ok is False
+        assert "$itor()" in log_path.read_text()
+
+    def test_tanh_math_function_is_supported(self, tmp_path):
+        va_file = tmp_path / "tanh_probe.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module tanh_probe(inp, out);
+                input inp;
+                output out;
+                electrical inp, out;
+                analog begin
+                    V(out) <+ tanh(V(inp));
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_tanh_probe.scs"
+        log_path = tmp_path / "evas.log"
+        scs.write_text(textwrap.dedent("""\
+            Vin (inp 0) vsource dc=0.5 type=dc
+            I1 (inp out) tanh_probe
+            tran tran stop=1n
+            ahdl_include "tanh_probe.va"
+            save out
+        """))
+
+        from evas.netlist.runner import evas_simulate
+
+        ok = evas_simulate(
+            str(scs),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+        assert ok is True
 
     def test_supply_port_hard_drive_conflict_fails(self, tmp_path):
         va_file = tmp_path / "supply_driver.va"

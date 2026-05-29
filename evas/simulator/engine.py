@@ -112,6 +112,8 @@ class CrossDetector:
     last_triggered: bool = False  # set by check(), read by simulator
     t_cross: float = 0.0  # interpolated exact crossing time
     last_cross_time: float = -1.0  # debounced last-trigger timestamp
+    last_trigger_direction: int = 0
+    last_trigger_went_beyond: bool = False
     pending_touch_direction: int = 0  # +1/-1 after touching zero from below/above
     pending_touch_time: float = 0.0
 
@@ -123,12 +125,15 @@ class CrossDetector:
             self.pprev_time = self.prev_time = time
             self.initialized = True
             self.last_triggered = False
+            self.last_trigger_direction = 0
+            self.last_trigger_went_beyond = False
             self.pending_touch_direction = 0
             return False
 
         e_tol = abs(float(expr_tol)) if expr_tol is not None else 1e-12
         triggered = False
         trigger_direction = 0
+        trigger_went_beyond = False
         cross_time = 0.0
 
         def interpolate_cross_time() -> float:
@@ -136,43 +141,28 @@ class CrossDetector:
             frac = max(0.0, min(1.0, -self.prev_val / dv)) if abs(dv) > 1e-30 else 0.0
             return self.prev_time + frac * (time - self.prev_time)
 
-        # Spectre treats a monotonic approach that lands exactly on the
-        # threshold as a crossing.  Do not wait for a later sample to move
-        # beyond zero; otherwise pulse tops at exactly vth miss @cross events.
-        if self.pending_touch_direction > 0:
-            if val > e_tol and self.direction >= 0:
+        if self.direction >= 0 and self.prev_val < -e_tol:
+            if val > e_tol:
                 triggered = True
                 trigger_direction = 1
-                cross_time = self.pending_touch_time
-            if val > e_tol or val < -e_tol:
-                self.pending_touch_direction = 0
-        elif self.pending_touch_direction < 0:
-            if val < -e_tol and self.direction <= 0:
+                trigger_went_beyond = True
+                cross_time = interpolate_cross_time()
+            elif abs(val) <= e_tol:
+                triggered = True
+                trigger_direction = 1
+                trigger_went_beyond = False
+                cross_time = interpolate_cross_time()
+        if not triggered and self.direction <= 0 and self.prev_val > e_tol:
+            if val < -e_tol:
                 triggered = True
                 trigger_direction = -1
-                cross_time = self.pending_touch_time
-            if val > e_tol or val < -e_tol:
-                self.pending_touch_direction = 0
-
-        if not triggered and self.pending_touch_direction == 0:
-            if self.direction >= 0 and self.prev_val < -e_tol:
-                if val > e_tol:
-                    triggered = True
-                    trigger_direction = 1
-                    cross_time = interpolate_cross_time()
-                elif abs(val) <= e_tol:
-                    triggered = True
-                    trigger_direction = 1
-                    cross_time = interpolate_cross_time()
-            if self.direction <= 0 and self.prev_val > e_tol:
-                if val < -e_tol:
-                    triggered = True
-                    trigger_direction = -1
-                    cross_time = interpolate_cross_time()
-                elif abs(val) <= e_tol:
-                    triggered = True
-                    trigger_direction = -1
-                    cross_time = interpolate_cross_time()
+                trigger_went_beyond = True
+                cross_time = interpolate_cross_time()
+            elif abs(val) <= e_tol:
+                triggered = True
+                trigger_direction = -1
+                trigger_went_beyond = False
+                cross_time = interpolate_cross_time()
 
         if triggered:
             self.t_cross = cross_time
@@ -184,16 +174,19 @@ class CrossDetector:
             self.pending_touch_direction = 0
             # Clamp val to the post-crossing side to prevent immediate re-trigger.
             sign_eps = max(e_tol, 1e-18)
-            if trigger_direction < 0:
-                val = min(val, -sign_eps)
-            elif trigger_direction > 0:
-                val = max(val, sign_eps)
+            if trigger_went_beyond:
+                if trigger_direction < 0:
+                    val = min(val, -sign_eps)
+                elif trigger_direction > 0:
+                    val = max(val, sign_eps)
 
         self.pprev_val = self.prev_val
         self.pprev_time = self.prev_time
         self.prev_time = time
         self.prev_val = val
         self.last_triggered = triggered
+        self.last_trigger_direction = trigger_direction if triggered else 0
+        self.last_trigger_went_beyond = trigger_went_beyond if triggered else False
         return triggered
 
     def next_breakpoint(self) -> Optional[float]:
@@ -333,7 +326,8 @@ class Simulator:
             reltol: float = 1e-3,
             vabstol: float = 1e-6,
             min_step: float = None,
-            record_step: float = None) -> SimResult:
+            record_step: float = None,
+            skip_source_error_control: bool = False) -> SimResult:
         """Run transient simulation with adaptive step control near cross events."""
         if tstep is None:
             tstep = tstop / 10000
@@ -360,8 +354,10 @@ class Simulator:
             "dynamic_step_grows": 0,
             "output_step_clamps": 0,
             "err_ratio_skipped_outputs": 0,
+            "err_ratio_skipped_sources": 0,
             "steps_total": 0,
         }
+        source_nodes = {src.node for src in self.sources}
         transition_breakpoint_min_ramp = 0.15 * max_step
 
         def _set_transition_breakpoint_threshold(model):
@@ -373,11 +369,22 @@ class Simulator:
         for model in self.models:
             _set_transition_breakpoint_threshold(model)
 
+        def _set_initial_condition_mode(model, enabled: bool):
+            if hasattr(model, "_set_initial_condition_mode"):
+                model._set_initial_condition_mode(enabled)
+
         # Initialize node voltages
         for src in self.sources:
             self.node_voltages[src.node] = src.waveform(0.0)
         for model in self.models:
             model._prepare_step(self.node_voltages, self.node_voltages, 0.0, 0.0)
+
+        # Spectre solves initial_step and coincident t=0 events before the
+        # first saved transient point.  During that operating-point-like pass,
+        # transition() contributes its settled target instead of a ramp from an
+        # implicit zero.
+        for model in self.models:
+            _set_initial_condition_mode(model, True)
 
         # Fire initial_step events
         for model in self.models:
@@ -391,6 +398,9 @@ class Simulator:
             model._expire_absolute_timers(0.0)
             if model.post_update_events(self.node_voltages, 0.0):
                 model.refresh_outputs(self.node_voltages, 0.0)
+
+        for model in self.models:
+            _set_initial_condition_mode(model, False)
 
         # Record initial state
         self._record_point(0.0)
@@ -451,9 +461,14 @@ class Simulator:
             for src in self.sources:
                 self.node_voltages[src.node] = src.waveform(time)
 
+            future_time = time + max(1e-18, min(dt * 1e-6, 1e-15))
+            future_nv = dict(self.node_voltages)
+            for src in self.sources:
+                future_nv[src.node] = src.waveform(future_time)
+
             # Evaluate all models
             for model in self.models:
-                model._prepare_step(prev_nv, self.node_voltages, prev_time, time)
+                model._prepare_step(prev_nv, self.node_voltages, prev_time, time, future_nv)
                 model.evaluate(self.node_voltages, time)
                 model._expire_absolute_timers(time)
                 if model.post_update_events(self.node_voltages, time):
@@ -491,6 +506,9 @@ class Simulator:
             for node, vnew in self.node_voltages.items():
                 if node in model_output_nodes:
                     self._perf_stats["err_ratio_skipped_outputs"] += 1
+                    continue
+                if skip_source_error_control and node in source_nodes:
+                    self._perf_stats["err_ratio_skipped_sources"] += 1
                     continue
                 vold = prev_nv.get(node, vnew)
                 dv = abs(vnew - vold)
@@ -551,16 +569,24 @@ class Simulator:
 
 # ─── Waveform helpers ───
 
-def pulse(v_lo, v_hi, period, duty=0.5, rise=1e-12, fall=1e-12, delay=0.0):
-    """Create a pulse waveform function."""
-    t_hi = period * duty
+def pulse(v_lo, v_hi, period, duty=0.5, rise=1e-12, fall=1e-12, delay=0.0,
+          width=None):
+    """Create a pulse waveform function.
+
+    When ``width`` is provided, use Spectre vsource pulse semantics: ``width``
+    is the high plateau after the rise ramp, so the falling edge starts at
+    ``delay + rise + width``.  The older ``duty`` path is kept for direct helper
+    callers that model the falling edge as ``delay + period * duty``.
+    """
+    fall_start = rise + float(width) if width is not None else period * duty
+    fall_end = fall_start + fall
     # Include edge interior breakpoints so source-driven @cross events are
     # scheduled in chronological order when multiple sources switch together.
-    knees = {0.0, rise, t_hi, t_hi + fall}
+    knees = {0.0, rise, fall_start, fall_end}
     if rise > 0:
         knees.add(0.5 * rise)
     if fall > 0:
-        knees.add(t_hi + 0.5 * fall)
+        knees.add(fall_start + 0.5 * fall)
     knees = sorted(knees)
 
     def wfn(t):
@@ -571,10 +597,10 @@ def pulse(v_lo, v_hi, period, duty=0.5, rise=1e-12, fall=1e-12, delay=0.0):
         if t_mod < rise:
             frac = t_mod / rise if rise > 0 else 1.0
             return v_lo + frac * (v_hi - v_lo)
-        elif t_mod < t_hi:
+        elif t_mod < fall_start:
             return v_hi
-        elif t_mod < t_hi + fall:
-            frac = (t_mod - t_hi) / fall if fall > 0 else 1.0
+        elif t_mod < fall_end:
+            frac = (t_mod - fall_start) / fall if fall > 0 else 1.0
             return v_hi - frac * (v_hi - v_lo)
         else:
             return v_lo

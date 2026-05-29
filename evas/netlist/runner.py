@@ -58,6 +58,27 @@ def _apply_evas_profile(profile: str, refine_factor: int, refine_steps: int, rel
     return rf, rs, rt, p
 
 
+def _simopt_bool(simopt: Dict[str, object], key: str, default: bool = False) -> bool:
+    value = simopt.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return default
+
+
+def _first_param(params: Dict[str, object], *keys: str, default: object = None) -> object:
+    for key in keys:
+        if key in params:
+            return params[key]
+    return default
+
+
 # ---------------------------------------------------------------------------
 # VA model compilation
 # ---------------------------------------------------------------------------
@@ -106,6 +127,45 @@ def _expr_has_call(expr, call_name: str) -> bool:
     return False
 
 
+_SUPPORTED_FUNCTION_CALLS = {
+    'transition', 'slew', 'idtmod', 'cross', 'last_crossing',
+    'ln', 'log', 'exp', 'sqrt', 'abs', 'pow', 'min', 'max',
+    'sin', 'cos', 'tan', 'tanh', 'floor', 'ceil',
+    '$ln', '$log', '$exp', '$sqrt', '$abs', '$pow', '$min', '$max',
+    '$sin', '$cos', '$tan', '$tanh', '$floor', '$ceil',
+    '$rdist_normal', '$random', '$dist_uniform', '$fopen',
+}
+
+
+def _iter_expr_calls(expr):
+    """Yield FunctionCall nodes from an expression tree."""
+    if expr is None:
+        return
+    if isinstance(expr, va_ast.FunctionCall):
+        yield expr
+        for arg in expr.args:
+            yield from _iter_expr_calls(arg)
+    elif isinstance(expr, va_ast.MethodCall):
+        for arg in expr.args:
+            yield from _iter_expr_calls(arg)
+    elif isinstance(expr, va_ast.BinaryExpr):
+        yield from _iter_expr_calls(expr.left)
+        yield from _iter_expr_calls(expr.right)
+    elif isinstance(expr, va_ast.UnaryExpr):
+        yield from _iter_expr_calls(expr.operand)
+    elif isinstance(expr, va_ast.TernaryExpr):
+        yield from _iter_expr_calls(expr.cond)
+        yield from _iter_expr_calls(expr.true_expr)
+        yield from _iter_expr_calls(expr.false_expr)
+    elif isinstance(expr, va_ast.ArrayAccess):
+        yield from _iter_expr_calls(expr.index)
+    elif isinstance(expr, va_ast.BranchAccess):
+        yield from _iter_expr_calls(expr.node1_index)
+        yield from _iter_expr_calls(expr.node2_index)
+        yield from _iter_expr_calls(expr.node1_index2)
+        yield from _iter_expr_calls(expr.node2_index2)
+
+
 def _assignment_target_name(assign) -> Optional[str]:
     target = getattr(assign, "target", None)
     if isinstance(target, va_ast.Identifier):
@@ -116,50 +176,83 @@ def _assignment_target_name(assign) -> Optional[str]:
 
 
 def _validate_transition_statement(stmt, conditional_depth: int = 0,
-                                   genvar_names: Optional[set] = None) -> None:
-    """Reject transition() where Spectre's analog-operator rules reject it."""
+                                   genvar_names: Optional[set] = None,
+                                   in_event: bool = False) -> None:
+    """Reject Verilog-A structures known to diverge from Spectre VACOMP."""
     if genvar_names is None:
         genvar_names = set()
     if stmt is None:
         return
     if isinstance(stmt, va_ast.Block):
         for child in stmt.statements:
-            _validate_transition_statement(child, conditional_depth, genvar_names)
+            _validate_transition_statement(child, conditional_depth, genvar_names, in_event)
         return
     if isinstance(stmt, va_ast.Contribution):
+        if in_event:
+            raise ValueError(
+                "Spectre-incompatible Verilog-A: contribution statement "
+                "is embedded in an analog event body"
+            )
         if conditional_depth > 0 and _expr_has_call(stmt.expr, "transition"):
             raise ValueError(
                 "Spectre-incompatible Verilog-A: transition() contribution "
                 "is inside a conditional/event/loop/case statement"
             )
+        _validate_supported_function_calls(stmt.expr)
         return
     if isinstance(stmt, va_ast.Assignment):
+        if isinstance(stmt.target, va_ast.FunctionCall):
+            raise ValueError(
+                "Spectre-incompatible Verilog-A: standalone function call "
+                f"{stmt.target.name}() is not a supported procedural statement"
+            )
         if conditional_depth > 0 and _expr_has_call(stmt.value, "transition"):
             raise ValueError(
                 "Spectre-incompatible Verilog-A: transition() expression "
                 "is inside a conditional/event/loop/case statement"
             )
+        _validate_supported_function_calls(stmt.target)
+        _validate_supported_function_calls(stmt.value)
         return
     if isinstance(stmt, va_ast.SystemTask):
+        for arg in stmt.args:
+            _validate_supported_function_calls(arg)
         return
     if isinstance(stmt, va_ast.EventStatement):
-        _validate_transition_statement(stmt.body, conditional_depth, genvar_names)
+        _validate_transition_statement(stmt.body, conditional_depth + 1, genvar_names, True)
         return
     if isinstance(stmt, va_ast.IfStatement):
-        _validate_transition_statement(stmt.then_body, conditional_depth, genvar_names)
-        _validate_transition_statement(stmt.else_body, conditional_depth, genvar_names)
+        _validate_supported_function_calls(stmt.cond)
+        _validate_transition_statement(stmt.then_body, conditional_depth + 1, genvar_names, in_event)
+        _validate_transition_statement(stmt.else_body, conditional_depth + 1, genvar_names, in_event)
         return
     if isinstance(stmt, va_ast.ForStatement):
         loop_var = _assignment_target_name(stmt.init)
         loop_depth = conditional_depth if loop_var in genvar_names else conditional_depth + 1
-        _validate_transition_statement(stmt.body, loop_depth, genvar_names)
+        _validate_transition_statement(stmt.init, conditional_depth, genvar_names, in_event)
+        _validate_supported_function_calls(stmt.cond)
+        _validate_transition_statement(stmt.update, conditional_depth, genvar_names, in_event)
+        _validate_transition_statement(stmt.body, loop_depth, genvar_names, in_event)
         return
     if isinstance(stmt, va_ast.WhileStatement):
-        _validate_transition_statement(stmt.body, conditional_depth + 1, genvar_names)
+        _validate_supported_function_calls(stmt.cond)
+        _validate_transition_statement(stmt.body, conditional_depth + 1, genvar_names, in_event)
         return
     if isinstance(stmt, va_ast.CaseStatement):
+        _validate_supported_function_calls(stmt.expr)
         for item in stmt.items:
-            _validate_transition_statement(item.body, conditional_depth + 1, genvar_names)
+            for value in item.values:
+                _validate_supported_function_calls(value)
+            _validate_transition_statement(item.body, conditional_depth + 1, genvar_names, in_event)
+
+
+def _validate_supported_function_calls(expr) -> None:
+    for call in _iter_expr_calls(expr):
+        if call.name not in _SUPPORTED_FUNCTION_CALLS:
+            raise ValueError(
+                "Spectre-incompatible/unsupported Verilog-A function call: "
+                f"{call.name}()"
+            )
 
 
 def _iter_contributions(stmt):
@@ -315,6 +408,7 @@ def _add_spectre_source(sim: Simulator, src: SpectreSource,
         sim.add_source(node, pulse(
             v_lo=v0, v_hi=v1, period=period, duty=duty,
             rise=rise, fall=fall, delay=delay,
+            width=float(width) if width is not None else None,
         ))
 
     elif stype == 'pwl':
@@ -335,12 +429,30 @@ def _add_spectre_source(sim: Simulator, src: SpectreSource,
         sim.add_source(node, pwl(times, values))
 
     elif stype in ('sin', 'sine'):
-        # Match Spectre sine-source semantics: waveform DC offset is `sinedc`
-        # (with `dc` kept for existing Spectre-style alias support).  Real
-        # Spectre does not treat `offset=` as the transient sine DC component.
-        offset = float(params.get('sinedc', params.get('dc', 0.0)))
-        ampl = float(params.get('ampl', params.get('mag', params.get('amplitude', 0.0))))
-        freq = float(params.get('freq', 0.0))
+        # Match Spectre transient vsource sine semantics for the supported
+        # subset.  `sinedc`/`ampl` are the canonical transient parameters; do
+        # not treat small-signal or schematic convenience names such as
+        # vo/va/offset/amplitude as transient aliases.
+        offset = float(_first_param(
+            params,
+            'sinedc', 'dc',
+            default=0.0,
+        ))
+        ampl = float(_first_param(
+            params,
+            'ampl', 'mag',
+            default=1.0,
+        ))
+        freq = float(_first_param(
+            params,
+            'freq',
+            default=0.0,
+        ))
+        phase = float(_first_param(
+            params,
+            'phase', 'sinephase', 'phi',
+            default=0.0,
+        ))
 
         if freq <= 0:
             warn.append(f"{src.name}: sine freq not set "
@@ -353,7 +465,7 @@ def _add_spectre_source(sim: Simulator, src: SpectreSource,
             sim.add_source(node, dc(offset))
             return warn
 
-        sim.add_source(node, sine(offset=offset, amplitude=ampl, freq=freq))
+        sim.add_source(node, sine(offset=offset, amplitude=ampl, freq=freq, phase=phase))
 
     return warn
 
@@ -719,6 +831,11 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     refine_factor, refine_steps, reltol, applied_profile = _apply_evas_profile(
         evas_profile, refine_factor, refine_steps, reltol
     )
+    skip_source_error_control = _simopt_bool(
+        simopt,
+        'evas_skip_source_error_control',
+        False,
+    )
 
     log.write("")
     log.write("*****************************************************")
@@ -736,6 +853,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     log.write(f"    refine_steps  = {refine_steps}")
     if applied_profile:
         log.write(f"    evas_profile = {applied_profile}")
+    if skip_source_error_control:
+        log.write("    evas_skip_source_error_control = true")
     log.write("")
 
     t_sim_start = time.time()
@@ -744,7 +863,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
                      refine_steps=refine_steps,
                      reltol=reltol,
                      vabstol=vabstol,
-                     record_step=tstep)
+                     record_step=tstep,
+                     skip_source_error_control=skip_source_error_control)
 
     for pct in range(10, 101, 10):
         t_at = tstop * pct / 100.0

@@ -498,6 +498,25 @@ class Parser:
         """Parse a single statement."""
         tok = self.peek()
 
+        # Module-scope declarations are parsed before the analog block.  If a
+        # declaration keyword reaches statement parsing, it is a local
+        # procedural declaration.  Spectre rejects the common generated pattern
+        # `@(cross(...)) begin real x = ...; ... end` unless the block is a
+        # supported labeled block, which EVAS does not model.  Reject it
+        # instead of silently swallowing the type keyword and simulating the
+        # trailing assignment.
+        if tok.type in (
+            TokenType.REAL, TokenType.INTEGER, TokenType.GENVAR,
+            TokenType.ELECTRICAL, TokenType.VOLTAGE, TokenType.CURRENT,
+            TokenType.PARAMETER, TokenType.INPUT, TokenType.OUTPUT,
+            TokenType.INOUT,
+        ):
+            raise ParseError(
+                "Spectre-incompatible local declaration inside analog/procedural "
+                "statement; move declarations to module scope",
+                tok,
+            )
+
         # begin/end block
         if tok.type == TokenType.BEGIN:
             return self._parse_block()
@@ -576,14 +595,14 @@ class Parser:
                 expr_tol_expr = None
                 if self.match(TokenType.COMMA):
                     dir_expr = self._parse_expression()
-                    direction = self._eval_const(dir_expr)
+                    direction = self._coerce_event_direction(dir_expr)
                     if self.match(TokenType.COMMA):
                         time_tol_expr = self._parse_expression()
                         if self.match(TokenType.COMMA):
                             expr_tol_expr = self._parse_expression()
                 self.expect(TokenType.RPAREN)
                 return EventExpr(EventType.CROSS, [expr],
-                                 direction=int(direction) if direction else None,
+                                 direction=direction,
                                  time_tol_expr=time_tol_expr,
                                  expr_tol_expr=expr_tol_expr)
 
@@ -594,10 +613,10 @@ class Parser:
                 direction = None
                 if self.match(TokenType.COMMA):
                     dir_expr = self._parse_expression()
-                    direction = self._eval_const(dir_expr)
+                    direction = self._coerce_event_direction(dir_expr)
                 self.expect(TokenType.RPAREN)
                 return EventExpr(EventType.ABOVE, [expr],
-                                 direction=int(direction) if direction else None)
+                                 direction=direction)
 
             elif tok.value == 'initial_step':
                 self.advance()
@@ -970,6 +989,15 @@ class Parser:
         if isinstance(expr, UnaryExpr) and expr.op == '-':
             return -self._eval_const(expr.operand)
         return 0
+
+    def _coerce_event_direction(self, expr: Expr) -> int:
+        value = self._eval_const(expr)
+        if value in (-1, 0, 1):
+            return int(value)
+        raise ParseError(
+            "Event direction must be a constant -1, 0, or +1",
+            self.peek(),
+        )
 
 
 def parse(source: str) -> Module:

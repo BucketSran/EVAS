@@ -26,7 +26,7 @@ class CompiledModel:
     """Base class for compiled Verilog-A models."""
     _module_registry: Dict[str, Any] = {}
     _module_ports: List[str] = []
-    _cmp_eps: float = 1e-12
+    _cmp_eps: float = 0.0
 
     def __init__(self):
         self.params: Dict[str, Any] = {}
@@ -40,6 +40,7 @@ class CompiledModel:
         self.node_map: Dict[str, str] = {}  # port_name -> external_node
         self.default_transition: float = 1e-12
         self._initial_step_done: bool = False
+        self._initial_condition_mode: bool = False
         self._strobe_log: List[str] = []
         self._event_time: float = 0.0  # $abstime inside cross/above event bodies
         self._temperature: float = 27.0  # degrees Celsius (expressions convert to Kelvin)
@@ -51,9 +52,12 @@ class CompiledModel:
         self._event_context_active: bool = False
         self._step_prev_node_voltages: Dict[str, float] = {}
         self._step_curr_node_voltages: Dict[str, float] = {}
+        self._step_future_node_voltages: Dict[str, float] = {}
         self._step_prev_time: float = 0.0
         self._step_time: float = 0.0
+        self._step_latest_cross_event_time: float = -math.inf
         self._event_interpolated_nodes: set[str] = set()
+        self._event_node_cross_directions: Dict[str, int] = {}
         self._perf_stats: Dict[str, int] = {
             "timer_periodic_checks": 0,
             "timer_periodic_fires": 0,
@@ -91,16 +95,25 @@ class CompiledModel:
     def final_step(self, node_voltages: Dict[str, float], time: float):
         pass
 
+    def _set_initial_condition_mode(self, enabled: bool):
+        """Treat transition-like operators as operating-point values."""
+        self._initial_condition_mode = bool(enabled)
+        for child in self._child_models:
+            child._set_initial_condition_mode(enabled)
+
     def _prepare_step(self, prev_node_voltages: Dict[str, float],
                       curr_node_voltages: Dict[str, float],
-                      prev_time: float, time: float):
+                      prev_time: float, time: float,
+                      future_node_voltages: Optional[Dict[str, float]] = None):
         """Cache step endpoints so event bodies can read values at t_cross."""
         self._step_prev_node_voltages = dict(prev_node_voltages)
         self._step_curr_node_voltages = dict(curr_node_voltages)
+        self._step_future_node_voltages = dict(future_node_voltages or curr_node_voltages)
         self._step_prev_time = float(prev_time)
         self._step_time = float(time)
+        self._step_latest_cross_event_time = -math.inf
         for child in self._child_models:
-            child._prepare_step(prev_node_voltages, curr_node_voltages, prev_time, time)
+            child._prepare_step(prev_node_voltages, curr_node_voltages, prev_time, time, future_node_voltages)
 
     def next_breakpoint(self, time: float) -> Optional[float]:
         bps = []
@@ -226,6 +239,16 @@ class CompiledModel:
         return float(left) <= float(right) + cls._cmp_eps
 
     @staticmethod
+    def _to_integer(value: Any) -> int:
+        """Verilog-A real-to-integer assignment rounds to nearest."""
+        v = float(value)
+        if not math.isfinite(v):
+            return 0
+        if v >= 0.0:
+            return math.floor(v + 0.5)
+        return math.ceil(v - 0.5)
+
+    @staticmethod
     def _int_div(left: Any, right: Any) -> int:
         """Verilog-style integer division, truncating toward zero."""
         r = int(right)
@@ -240,20 +263,33 @@ class CompiledModel:
         if isinstance(ext, str) and ext.startswith('@parent:') and self._parent_model is not None:
             pnode = ext[len('@parent:'):]
             ext = self._parent_model.node_map.get(pnode, pnode)
-        if (
-            self._event_context_active
-            and isinstance(ext, str)
-            and (node in self._event_interpolated_nodes or ext in self._event_interpolated_nodes)
-        ):
-            if ext in self._step_prev_node_voltages and ext in self._step_curr_node_voltages:
+        if self._event_context_active and isinstance(ext, str):
+            if ext in self._step_prev_node_voltages:
                 t0 = self._step_prev_time
                 t1 = self._step_time
                 if t1 > t0 + 1e-30:
                     frac = (float(self._event_time) - t0) / (t1 - t0)
                     frac = max(0.0, min(1.0, frac))
                     v0 = self._step_prev_node_voltages[ext]
-                    v1 = self._step_curr_node_voltages[ext]
-                    return v0 + frac * (v1 - v0)
+                    if ext in node_voltages:
+                        v1 = node_voltages[ext]
+                    elif ext in self._step_curr_node_voltages:
+                        v1 = self._step_curr_node_voltages[ext]
+                    else:
+                        v1 = v0
+                    value = v0 + frac * (v1 - v0)
+                    if ext in self._event_node_cross_directions:
+                        cross_dir = self._event_node_cross_directions[ext]
+                    elif node in self._event_node_cross_directions:
+                        cross_dir = self._event_node_cross_directions[node]
+                    else:
+                        cross_dir = None
+                    if cross_dir is not None:
+                        if cross_dir:
+                            value += math.copysign(max(1e-12, abs(value) * 1e-12), cross_dir)
+                    elif abs(v1 - v0) > 1e-30:
+                        value += math.copysign(max(1e-12, abs(value) * 1e-12), v1 - v0)
+                    return value
         if ext in node_voltages:
             return node_voltages[ext]
         # Check output nodes (self-driven)
@@ -273,6 +309,18 @@ class CompiledModel:
     def _transition(self, key: str, time: float, target: float,
                     delay: float = 0.0, rise: float = 0.0, fall: float = 0.0) -> float:
         """Evaluate a transition operator."""
+        if self._initial_condition_mode:
+            ts = self.transitions.get(key)
+            if ts is None:
+                ts = TransitionState(current_val=target)
+                self.transitions[key] = ts
+            ts.current_val = target
+            ts.target_val = target
+            ts.start_val = target
+            ts.start_time = time
+            ts.delay = 0.0
+            ts.active = False
+            return target
         if key not in self.transitions:
             self.transitions[key] = TransitionState(current_val=target)
             return target
@@ -329,14 +377,88 @@ class CompiledModel:
 
     def _check_cross(self, key: str, time: float, val: float, direction: int = 0,
                      time_tol: float = 0.0, expr_tol: float = 1e-12,
-                     interp_nodes: Optional[List[str]] = None) -> bool:
+                     interp_nodes: Optional[List[str]] = None,
+                     nudge_nodes: Optional[Any] = None) -> bool:
         if key not in self.cross_detectors:
             self.cross_detectors[key] = CrossDetector(direction=direction)
         fired = self.cross_detectors[key].check(time, val, time_tol=time_tol, expr_tol=expr_tol)
         if fired:
+            cross_time = float(self.cross_detectors[key].t_cross)
+            if cross_time + max(1e-18, float(time_tol or 0.0)) < self._step_latest_cross_event_time:
+                # Multiple cross() statements can trigger inside one simulator
+                # step. Spectre applies their event bodies in chronological
+                # crossing order, not source order. EVAS does not yet replay a
+                # full event queue, so suppress a retrograde event body instead
+                # of letting an earlier crossing discovered later overwrite the
+                # state from a later crossing.
+                self.cross_detectors[key].last_triggered = False
+                return False
+            self._step_latest_cross_event_time = max(
+                self._step_latest_cross_event_time,
+                cross_time,
+            )
             self._perf_stats["cross_fires"] += 1
-            self._event_time = self.cross_detectors[key].t_cross
+            trigger_dir = self.cross_detectors[key].last_trigger_direction or direction
+            trigger_went_beyond = self.cross_detectors[key].last_trigger_went_beyond
+            prev_event_time = self._event_time
+            prev_cross_directions = dict(self._event_node_cross_directions)
+            self._event_time = cross_time
+
+            def resolve_node(node: str) -> str:
+                ext = self.node_map.get(node, node)
+                if isinstance(ext, str) and ext.startswith('@parent:') and self._parent_model is not None:
+                    pnode = ext[len('@parent:'):]
+                    ext = self._parent_model.node_map.get(pnode, pnode)
+                return ext
+
+            def event_node_value(node: str) -> float:
+                ext = resolve_node(node)
+                t0 = self._step_prev_time
+                t1 = self._step_time
+                if t1 > t0 + 1e-30 and ext in self._step_prev_node_voltages:
+                    frac = (float(self._event_time) - t0) / (t1 - t0)
+                    frac = max(0.0, min(1.0, frac))
+                    v0 = self._step_prev_node_voltages[ext]
+                    v1 = self._step_curr_node_voltages.get(ext, v0)
+                    return v0 + frac * (v1 - v0)
+                return self._step_curr_node_voltages.get(ext, self._step_prev_node_voltages.get(ext, 0.0))
+
+            exact_touch_moves_beyond = False
+            if not trigger_went_beyond and isinstance(nudge_nodes, dict) and trigger_dir:
+                expr_delta = 0.0
+                for node, sign in nudge_nodes.items():
+                    if not sign:
+                        continue
+                    ext = resolve_node(node)
+                    future_value = self._step_future_node_voltages.get(
+                        ext,
+                        self._step_curr_node_voltages.get(ext, event_node_value(node)),
+                    )
+                    expr_delta += float(sign) * (future_value - event_node_value(node))
+                exact_touch_moves_beyond = expr_delta * float(trigger_dir) > max(float(expr_tol or 0.0), 1e-18)
+            use_post_side = trigger_went_beyond or exact_touch_moves_beyond
+            if isinstance(nudge_nodes, dict):
+                cross_directions = {
+                    node: int(trigger_dir) * (1 if sign > 0 else -1) if use_post_side else 0
+                    for node, sign in nudge_nodes.items()
+                    if sign
+                }
+            else:
+                cross_directions = {
+                    node: int(trigger_dir) if use_post_side else 0
+                    for node in set(nudge_nodes or interp_nodes or [])
+                }
             self._event_interpolated_nodes = set(interp_nodes or [])
+            if (
+                prev_cross_directions
+                and abs(float(prev_event_time) - float(self._event_time)) <= max(1e-18, float(time_tol or 0.0))
+            ):
+                for node, cross_dir in cross_directions.items():
+                    if cross_dir or node not in prev_cross_directions:
+                        prev_cross_directions[node] = cross_dir
+                self._event_node_cross_directions = prev_cross_directions
+            else:
+                self._event_node_cross_directions = cross_directions
         return fired
 
     def _last_crossing(self, key: str, time: float, val: float, direction: int = 0,
@@ -356,6 +478,7 @@ class CompiledModel:
             self._perf_stats["above_fires"] += 1
             self._event_time = self.above_detectors[key].t_cross
             self._event_interpolated_nodes = set()
+            self._event_node_cross_directions = {}
         return fired
 
     def _idtmod(self, key: str, time: float, x: float,
@@ -544,20 +667,30 @@ class _ModuleCompiler:
         lines.append("        super().__init__()")
         lines.append(f"        self.default_transition = {self.default_transition}")
 
+        static_env: Dict[str, Any] = {}
+
         # Initialize parameters
         for p in mod.parameters:
-            val = self._eval_expr_static(p.default_value)
+            val = self._eval_expr_static(p.default_value, static_env)
             if p.param_type == ParamType.INTEGER:
-                val = int(val)
+                val = CompiledModel._to_integer(val)
             lines.append(f"        self.params[{p.name!r}] = {val!r}")
+            static_env[p.name] = val
 
         # Initialize scalar state variables
         for v in mod.variables:
             if not v.is_array:
                 init_val = 0
                 if v.init_values and len(v.init_values) == 1:
-                    init_val = self._eval_expr_static(v.init_values[0])
+                    init_val = self._eval_expr_static(v.init_values[0], static_env)
+                if (
+                    v.var_type == ParamType.INTEGER
+                    or getattr(v.var_type, "name", "") == "INTEGER"
+                    or v.var_type in {"integer", "genvar"}
+                ):
+                    init_val = CompiledModel._to_integer(init_val)
                 lines.append(f"        self.state[{v.name!r}] = {init_val}")
+                static_env[v.name] = init_val
 
         # Initialize array variables
         for name, (hi, lo, init_vals) in array_vars.items():
@@ -567,7 +700,9 @@ class _ModuleCompiler:
             if init_vals:
                 for i, iv in enumerate(init_vals):
                     idx = hi_idx - i
-                    val = self._eval_expr_static(iv)
+                    val = self._eval_expr_static(iv, static_env)
+                    if self._is_integer_variable(name):
+                        val = CompiledModel._to_integer(val)
                     lines.append(f"        self.arrays[{name!r}][{idx}] = {val!r}")
             else:
                 for idx in range(lo_idx, hi_idx + 1):
@@ -718,24 +853,42 @@ class _ModuleCompiler:
         self._check_stmt_for_restricted_operators(
             self.module.analog_block.body,
             conditional_depth=0,
+            in_event=False,
         )
         self._check_transition_targets(self.module.analog_block.body)
 
-    def _check_stmt_for_restricted_operators(self, stmt, conditional_depth: int) -> None:
+    def _check_stmt_for_restricted_operators(
+        self,
+        stmt,
+        conditional_depth: int,
+        in_event: bool,
+    ) -> None:
         if isinstance(stmt, Block):
             for child in stmt.statements:
-                self._check_stmt_for_restricted_operators(child, conditional_depth)
+                self._check_stmt_for_restricted_operators(child, conditional_depth, in_event)
             return
 
         if isinstance(stmt, IfStatement):
-            self._check_stmt_for_restricted_operators(stmt.then_body, conditional_depth + 1)
+            self._check_stmt_for_restricted_operators(
+                stmt.then_body,
+                conditional_depth + 1,
+                in_event,
+            )
             if stmt.else_body is not None:
-                self._check_stmt_for_restricted_operators(stmt.else_body, conditional_depth + 1)
+                self._check_stmt_for_restricted_operators(
+                    stmt.else_body,
+                    conditional_depth + 1,
+                    in_event,
+                )
             return
 
         if isinstance(stmt, CaseStatement):
             for item in stmt.items:
-                self._check_stmt_for_restricted_operators(item.body, conditional_depth + 1)
+                self._check_stmt_for_restricted_operators(
+                    item.body,
+                    conditional_depth + 1,
+                    in_event,
+                )
             return
 
         if isinstance(stmt, EventStatement):
@@ -748,16 +901,28 @@ class _ModuleCompiler:
                         f"{ops} inside a conditionally executed statement. "
                         f"Move these operators out of if/case branches."
                     )
-            self._check_stmt_for_restricted_operators(stmt.body, conditional_depth)
+            self._check_stmt_for_restricted_operators(
+                stmt.body,
+                conditional_depth + 1,
+                True,
+            )
             return
 
         if isinstance(stmt, ForStatement):
-            self._check_stmt_for_restricted_operators(stmt.body, conditional_depth)
+            self._check_stmt_for_restricted_operators(stmt.body, conditional_depth, in_event)
             return
 
         if isinstance(stmt, WhileStatement):
-            self._check_stmt_for_restricted_operators(stmt.body, conditional_depth)
+            self._check_stmt_for_restricted_operators(stmt.body, conditional_depth + 1, in_event)
             return
+
+        if isinstance(stmt, Contribution) and in_event:
+            raise CompilationError(
+                f"Module {self.module.name} embeds a contribution statement inside "
+                "an analog event body. Spectre rejects this with VACOMP-2157; "
+                "move the contribution to unconditional analog code and update "
+                "state variables in the event body."
+            )
 
         if conditional_depth <= 0:
             return
@@ -803,13 +968,7 @@ class _ModuleCompiler:
         restricted = set()
 
         if isinstance(expr, FunctionCall):
-            # Spectre accepts transition() inside conditional branches, though it
-            # may emit VACOMP-1116 warnings when the target is continuous.
-            # Keep idtmod() restricted here. A local 2026-04-18 Spectre probe
-            # shows conditional idtmod() is rejected outright with VACOMP-2154,
-            # so relaxing this guard would diverge from Spectre rather than
-            # improve compatibility.
-            if expr.name in ('idtmod',):
+            if expr.name in ('transition', 'idtmod'):
                 restricted.add(expr.name)
             for arg in expr.args:
                 restricted |= self._collect_restricted_calls_from_expr(arg)
@@ -1386,6 +1545,8 @@ class _ModuleCompiler:
                 if not body_lines:
                     lines.append(f"{prefix}    pass")
                 lines.append(f"{prefix}    self._event_context_active = False")
+                lines.append(f"{prefix}    self._event_interpolated_nodes = set()")
+                lines.append(f"{prefix}    self._event_node_cross_directions = {{}}")
                 lines.append(f"{prefix}    self._event_time = time")
 
             elif event.event_type == EventType.ABOVE:
@@ -1401,6 +1562,8 @@ class _ModuleCompiler:
                 if not body_lines:
                     lines.append(f"{prefix}    pass")
                 lines.append(f"{prefix}    self._event_context_active = False")
+                lines.append(f"{prefix}    self._event_interpolated_nodes = set()")
+                lines.append(f"{prefix}    self._event_node_cross_directions = {{}}")
                 lines.append(f"{prefix}    self._event_time = time")
 
             elif event.event_type == EventType.TIMER:
@@ -1410,23 +1573,29 @@ class _ModuleCompiler:
                     period_expr = self._compile_expr(event.args[1])
                     lines.append(f"{prefix}if self._check_timer_due({key!r}, time, {period_expr}, {start_expr}):")
                     lines.append(f"{prefix}    self._event_interpolated_nodes = set()")
+                    lines.append(f"{prefix}    self._event_node_cross_directions = {{}}")
                     lines.append(f"{prefix}    self._event_context_active = True")
                     body_lines = self._compile_statement(stmt.body, indent + 1)
                     lines.extend(body_lines)
                     if not body_lines:
                         lines.append(f"{prefix}    pass")
                     lines.append(f"{prefix}    self._event_context_active = False")
+                    lines.append(f"{prefix}    self._event_interpolated_nodes = set()")
+                    lines.append(f"{prefix}    self._event_node_cross_directions = {{}}")
                     lines.append(f"{prefix}    self._reschedule_timer({key!r}, time, {period_expr})")
                 else:
                     target_expr = self._compile_expr(event.args[0])
                     lines.append(f"{prefix}if self._check_timer_at({key!r}, time, {target_expr}):")
                     lines.append(f"{prefix}    self._event_interpolated_nodes = set()")
+                    lines.append(f"{prefix}    self._event_node_cross_directions = {{}}")
                     lines.append(f"{prefix}    self._event_context_active = True")
                     body_lines = self._compile_statement(stmt.body, indent + 1)
                     lines.extend(body_lines)
                     if not body_lines:
                         lines.append(f"{prefix}    pass")
                     lines.append(f"{prefix}    self._event_context_active = False")
+                    lines.append(f"{prefix}    self._event_interpolated_nodes = set()")
+                    lines.append(f"{prefix}    self._event_node_cross_directions = {{}}")
                     lines.append(f"{prefix}    self.timer_states[{key!r}] = {target_expr}")
                 lines.append(f"{prefix}    self._event_time = time")
 
@@ -1463,7 +1632,12 @@ class _ModuleCompiler:
                         conditions.append(f"self._check_timer_at({key!r}, time, {target_expr})")
 
             if conditions:
-                cond = ' or '.join(conditions)
+                hit_vars = []
+                for idx, cond in enumerate(conditions):
+                    var = f"_event_hit_{idx}"
+                    hit_vars.append(var)
+                    lines.append(f"{prefix}{var} = {cond}")
+                cond = ' or '.join(hit_vars)
                 lines.append(f"{prefix}if {cond}:")
                 lines.append(f"{prefix}    self._event_context_active = True")
                 body_lines = self._compile_statement(stmt.body, indent + 1)
@@ -1471,6 +1645,8 @@ class _ModuleCompiler:
                 if not body_lines:
                     lines.append(f"{prefix}    pass")
                 lines.append(f"{prefix}    self._event_context_active = False")
+                lines.append(f"{prefix}    self._event_interpolated_nodes = set()")
+                lines.append(f"{prefix}    self._event_node_cross_directions = {{}}")
                 lines.append(f"{prefix}    self._event_time = time")
 
         return lines
@@ -1503,7 +1679,12 @@ class _ModuleCompiler:
         if event.expr_tol_expr is not None:
             expr_tol = self._compile_expr(event.expr_tol_expr)
         interp_nodes = sorted(self._collect_branch_nodes_from_expr(event.args[0]))
-        return f"self._check_cross({key!r}, time, {expr}, {direction}, {time_tol}, {expr_tol}, {interp_nodes!r})"
+        raw_nudges = self._collect_branch_nudge_nodes_from_expr(event.args[0])
+        nudge_nodes = {node: raw_nudges[node] for node in sorted(raw_nudges)}
+        return (
+            f"self._check_cross({key!r}, time, {expr}, {direction}, "
+            f"{time_tol}, {expr_tol}, {interp_nodes!r}, {nudge_nodes!r})"
+        )
 
     def _collect_branch_nodes_from_expr(self, expr: Expr) -> set[str]:
         nodes: set[str] = set()
@@ -1532,6 +1713,47 @@ class _ModuleCompiler:
             for arg in expr.args:
                 nodes |= self._collect_branch_nodes_from_expr(arg)
             return nodes
+        return nodes
+
+    def _collect_branch_nudge_nodes_from_expr(self, expr: Expr, polarity: int = 1) -> Dict[str, int]:
+        nodes: Dict[str, int] = {}
+
+        def add(node: Optional[str], sign: int) -> None:
+            if not node:
+                return
+            nodes[node] = nodes.get(node, 0) + sign
+
+        def merge(other: Dict[str, int]) -> None:
+            for node, sign in other.items():
+                add(node, sign)
+
+        if isinstance(expr, BranchAccess):
+            add(expr.node1, polarity)
+            add(expr.node2, -polarity)
+            return {node: 1 if sign > 0 else -1 for node, sign in nodes.items() if sign}
+        if isinstance(expr, BinaryExpr):
+            merge(self._collect_branch_nudge_nodes_from_expr(expr.left, polarity))
+            right_polarity = -polarity if expr.op == "-" else polarity
+            merge(self._collect_branch_nudge_nodes_from_expr(expr.right, right_polarity))
+            return {node: 1 if sign > 0 else -1 for node, sign in nodes.items() if sign}
+        if isinstance(expr, UnaryExpr):
+            operand_polarity = -polarity if expr.op == "-" else polarity
+            return self._collect_branch_nudge_nodes_from_expr(expr.operand, operand_polarity)
+        if isinstance(expr, TernaryExpr):
+            merge(self._collect_branch_nudge_nodes_from_expr(expr.cond, polarity))
+            merge(self._collect_branch_nudge_nodes_from_expr(expr.true_expr, polarity))
+            merge(self._collect_branch_nudge_nodes_from_expr(expr.false_expr, polarity))
+            return {node: 1 if sign > 0 else -1 for node, sign in nodes.items() if sign}
+        if isinstance(expr, FunctionCall):
+            for arg in expr.args:
+                merge(self._collect_branch_nudge_nodes_from_expr(arg, polarity))
+            return {node: 1 if sign > 0 else -1 for node, sign in nodes.items() if sign}
+        if isinstance(expr, ArrayAccess):
+            return self._collect_branch_nudge_nodes_from_expr(expr.index, polarity)
+        if isinstance(expr, MethodCall):
+            for arg in expr.args:
+                merge(self._collect_branch_nudge_nodes_from_expr(arg, polarity))
+            return {node: 1 if sign > 0 else -1 for node, sign in nodes.items() if sign}
         return nodes
 
     def _alloc_stateful_func_key(self, kind: str, expr) -> str:
@@ -1682,6 +1904,8 @@ class _ModuleCompiler:
                 if not body_lines:
                     lines.append(f"{prefix}    pass")
                 lines.append(f"{prefix}    self._event_context_active = False")
+                lines.append(f"{prefix}    self._event_interpolated_nodes = set()")
+                lines.append(f"{prefix}    self._event_node_cross_directions = {{}}")
                 lines.append(f"{prefix}    self._event_time = time")
                 lines.append(f"{prefix}    _post_event_fired = True")
             elif event.event_type == EventType.ABOVE:
@@ -1697,6 +1921,8 @@ class _ModuleCompiler:
                 if not body_lines:
                     lines.append(f"{prefix}    pass")
                 lines.append(f"{prefix}    self._event_context_active = False")
+                lines.append(f"{prefix}    self._event_interpolated_nodes = set()")
+                lines.append(f"{prefix}    self._event_node_cross_directions = {{}}")
                 lines.append(f"{prefix}    self._event_time = time")
                 lines.append(f"{prefix}    _post_event_fired = True")
             return lines
@@ -1719,7 +1945,12 @@ class _ModuleCompiler:
                     direction = e.direction if e.direction is not None else 1
                     conditions.append(f"self._check_above({key!r}, time, {expr}, {direction})")
             if conditions:
-                cond = ' or '.join(conditions)
+                hit_vars = []
+                for idx, cond in enumerate(conditions):
+                    var = f"_post_event_hit_{idx}"
+                    hit_vars.append(var)
+                    lines.append(f"{prefix}{var} = {cond}")
+                cond = ' or '.join(hit_vars)
                 lines.append(f"{prefix}if {cond}:")
                 lines.append(f"{prefix}    self._event_context_active = True")
                 body_lines = self._compile_statement(stmt.body, indent + 1)
@@ -1727,6 +1958,8 @@ class _ModuleCompiler:
                 if not body_lines:
                     lines.append(f"{prefix}    pass")
                 lines.append(f"{prefix}    self._event_context_active = False")
+                lines.append(f"{prefix}    self._event_interpolated_nodes = set()")
+                lines.append(f"{prefix}    self._event_node_cross_directions = {{}}")
                 lines.append(f"{prefix}    self._event_time = time")
                 lines.append(f"{prefix}    _post_event_fired = True")
         return lines
@@ -1892,14 +2125,14 @@ class _ModuleCompiler:
         if isinstance(stmt.target, Identifier):
             name = stmt.target.name
             if self._is_integer_variable(name):
-                val = f"int({val})"
+                val = f"self._to_integer({val})"
             return [f"{prefix}self.state[{name!r}] = {val}"]
 
         elif isinstance(stmt.target, ArrayAccess):
             name = stmt.target.name
             idx = self._compile_expr(stmt.target.index)
             if self._is_integer_variable(name):
-                val = f"int({val})"
+                val = f"self._to_integer({val})"
             return [f"{prefix}self._array_set({name!r}, int({idx}), {val})"]
 
         return [f"{prefix}pass  # unknown assignment target"]
@@ -2164,7 +2397,7 @@ class _ModuleCompiler:
         name = expr.name
         math_aliases = {
             'ln', 'log', 'exp', 'sqrt', 'abs', 'pow', 'min', 'max',
-            'sin', 'cos', 'floor', 'ceil',
+            'sin', 'cos', 'tan', 'tanh', 'floor', 'ceil',
         }
         if name.startswith('$') and name[1:] in math_aliases:
             name = name[1:]
@@ -2235,6 +2468,10 @@ class _ModuleCompiler:
             return f"math.sin({args[0]})"
         if name == 'cos':
             return f"math.cos({args[0]})"
+        if name == 'tan':
+            return f"math.tan({args[0]})"
+        if name == 'tanh':
+            return f"math.tanh({args[0]})"
         if name == 'floor':
             return f"math.floor({args[0]})"
         if name == 'ceil':
@@ -2270,7 +2507,7 @@ class _ModuleCompiler:
             mode = args[1] if len(args) > 1 else "'w'"
             return f"self._fopen({filename}, {mode})"
 
-        return "0.0"  # unknown function: {name}
+        raise CompilationError(f"Unsupported Verilog-A function call: {name}()")
 
     def _compile_method_call(self, expr: MethodCall) -> str:
         """Compile method calls like conf.substr(i, i)."""
@@ -2331,21 +2568,26 @@ class _ModuleCompiler:
             )
         return new_lines
 
-    def _eval_expr_static(self, expr: Expr) -> Any:
-        """Evaluate a constant expression statically."""
+    def _eval_expr_static(self, expr: Expr, env: Optional[Dict[str, Any]] = None) -> Any:
+        """Evaluate an elaboration-time constant expression statically."""
+        env = env or {}
         if isinstance(expr, NumberLiteral):
             return expr.value
         if isinstance(expr, StringLiteral):
             return expr.value
         if isinstance(expr, UnaryExpr) and expr.op == '-':
-            return -self._eval_expr_static(expr.operand)
+            return -self._eval_expr_static(expr.operand, env)
+        if isinstance(expr, UnaryExpr) and expr.op == '+':
+            return self._eval_expr_static(expr.operand, env)
         if isinstance(expr, Identifier):
             if expr.name == 'inf':
                 return float('inf')
+            if expr.name in env:
+                return env[expr.name]
             return 0
         if isinstance(expr, BinaryExpr):
-            lv = self._eval_expr_static(expr.left)
-            rv = self._eval_expr_static(expr.right)
+            lv = self._eval_expr_static(expr.left, env)
+            rv = self._eval_expr_static(expr.right, env)
             if expr.op == '+':
                 return lv + rv
             if expr.op == '-':
@@ -2354,6 +2596,33 @@ class _ModuleCompiler:
                 return lv * rv
             if expr.op == '/':
                 return lv / rv if rv != 0 else 0
+            if expr.op == '%':
+                return lv % rv if rv != 0 else 0
+        if isinstance(expr, FunctionCall):
+            args = [self._eval_expr_static(arg, env) for arg in expr.args]
+            name = expr.name[1:] if expr.name.startswith('$') else expr.name
+            funcs = {
+                'abs': abs,
+                'sqrt': math.sqrt,
+                'exp': math.exp,
+                'ln': math.log,
+                'log': math.log10,
+                'sin': math.sin,
+                'cos': math.cos,
+                'tan': math.tan,
+                'tanh': math.tanh,
+                'floor': math.floor,
+                'ceil': math.ceil,
+                'min': min,
+                'max': max,
+                'pow': pow,
+            }
+            fn = funcs.get(name)
+            if fn is not None:
+                try:
+                    return fn(*args)
+                except Exception:
+                    return 0
         return 0
 
 
