@@ -743,6 +743,13 @@ def _parse_vsource(line: str, netlist: SpectreNetlist,
         # Remove wave=[...] from param_str
         param_str = param_str[:wave_match.start()] + param_str[wave_match.end():]
 
+    if re.search(r'(^|\s)\([^)]*\)', param_str):
+        raise ValueError(
+            f"Spectre-incompatible parenthesized vsource parameter list in source {name}: "
+            "use named source parameters such as val0=, val1=, delay=, rise=, "
+            "fall=, width=, and period=."
+        )
+
     params = _parse_named_params(param_str.split(), 0, variables)
 
     if wave_data is not None:

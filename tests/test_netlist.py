@@ -595,6 +595,17 @@ class TestNetlistRegressions:
         with pytest.raises(ValueError, match="inline arithmetic inside wave"):
             parse_spectre(str(scs))
 
+    def test_parenthesized_pulse_parameter_list_is_rejected_like_spectre(self, tmp_path):
+        scs = tmp_path / "tb_bad_pulse.scs"
+        scs.write_text(textwrap.dedent("""\
+            V0 (b0 0) vsource type=pulse (0 0.9 5n 0.1n 0.1n 5n 10n)
+            tran tran stop=80n
+            save b0
+        """))
+
+        with pytest.raises(ValueError, match="parenthesized vsource parameter list"):
+            parse_spectre(str(scs))
+
     def test_invalid_two_name_instance_syntax_is_rejected(self, tmp_path):
         scs = tmp_path / "tb_bad_instance.scs"
         scs.write_text(textwrap.dedent("""\
@@ -656,6 +667,41 @@ class TestEvasProfileMapping:
 
 
 class TestSpectreCompatibilityPreflight:
+
+    def test_initial_step_contribution_is_allowed(self, tmp_path):
+        va_file = tmp_path / "initial_contribution.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module initial_contribution(out);
+                output out;
+                electrical out;
+                real target;
+                analog begin
+                    @(initial_step) begin
+                        target = 1.0;
+                        V(out) <+ target;
+                    end
+                    V(out) <+ target;
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_initial_contribution.scs"
+        log_path = tmp_path / "evas.log"
+        scs.write_text(textwrap.dedent("""\
+            I1 (out) initial_contribution
+            tran tran stop=1n maxstep=100p
+            ahdl_include "initial_contribution.va"
+            save out
+        """))
+
+        from evas.netlist.runner import evas_simulate
+
+        ok = evas_simulate(
+            str(scs),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+        assert ok is True
 
     def test_event_body_contribution_fails(self, tmp_path):
         va_file = tmp_path / "event_contribution.va"

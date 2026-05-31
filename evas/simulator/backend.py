@@ -48,6 +48,8 @@ class CompiledModel:
         self.timer_last_fired: Dict[str, float] = {}  # key → last absolute-time fire target
         self.timer_kinds: Dict[str, str] = {}  # key → absolute | periodic
         self._bound_step: float = 0.0  # $bound_step limit (0 = no limit)
+        self._nominal_step: float = 0.0
+        self._discrete_update_buckets: Dict[str, int] = {}
         self._transition_breakpoint_min_ramp: float = 0.0
         self._event_context_active: bool = False
         self._step_prev_node_voltages: Dict[str, float] = {}
@@ -100,6 +102,32 @@ class CompiledModel:
         self._initial_condition_mode = bool(enabled)
         for child in self._child_models:
             child._set_initial_condition_mode(enabled)
+
+    def _set_nominal_step(self, step: float):
+        """Record the user-visible transient step for step-normalized state updates."""
+        self._nominal_step = float(step) if step and step > 0.0 else 0.0
+        self._discrete_update_buckets.clear()
+        for child in self._child_models:
+            child._set_nominal_step(step)
+
+    def _should_update_discrete_state(self, key: str, time: float) -> bool:
+        """Gate self-referential continuous real updates to the nominal tran grid.
+
+        Spectre accepts simple behavioral state such as ``x = x - decay`` in an
+        analog block. EVAS may insert extra internal refine steps near events;
+        without this gate, those implementation-detail steps change the user
+        model's state trajectory. Event bodies remain ungated.
+        """
+        if self._event_context_active:
+            return True
+        step = float(getattr(self, "_nominal_step", 0.0) or 0.0)
+        if step <= 0.0:
+            return True
+        bucket = int(math.floor((float(time) + 1e-18) / step))
+        if self._discrete_update_buckets.get(key) == bucket:
+            return False
+        self._discrete_update_buckets[key] = bucket
+        return True
 
     def _prepare_step(self, prev_node_voltages: Dict[str, float],
                       curr_node_voltages: Dict[str, float],
@@ -633,6 +661,8 @@ class _ModuleCompiler:
         self._in_loop_var = None  # track if we're inside a for loop
         self._event_key_cache: Dict[tuple, str] = {}
         self._stateful_func_key_cache: Dict[tuple, str] = {}
+        self._discrete_assignment_key_cache: Dict[int, str] = {}
+        self._discrete_assignment_counter = 0
         self._param_types = {p.name: p.param_type for p in module.parameters}
         self._var_types = {v.name: v.var_type for v in module.variables}
 
@@ -901,10 +931,14 @@ class _ModuleCompiler:
                         f"{ops} inside a conditionally executed statement. "
                         f"Move these operators out of if/case branches."
                     )
+            event_is_initial_step = (
+                isinstance(stmt.event, EventExpr)
+                and stmt.event.event_type == EventType.INITIAL_STEP
+            )
             self._check_stmt_for_restricted_operators(
                 stmt.body,
                 conditional_depth + 1,
-                True,
+                False if event_is_initial_step else True,
             )
             return
 
@@ -2126,7 +2160,14 @@ class _ModuleCompiler:
             name = stmt.target.name
             if self._is_integer_variable(name):
                 val = f"self._to_integer({val})"
-            return [f"{prefix}self.state[{name!r}] = {val}"]
+            line = f"self.state[{name!r}] = {val}"
+            if self._should_gate_self_referential_assignment(stmt, name):
+                key = self._discrete_assignment_key(stmt)
+                return [
+                    f"{prefix}if self._should_update_discrete_state({key!r}, time):",
+                    f"{prefix}    {line}",
+                ]
+            return [f"{prefix}{line}"]
 
         elif isinstance(stmt.target, ArrayAccess):
             name = stmt.target.name
@@ -2139,6 +2180,54 @@ class _ModuleCompiler:
             f"Module {self.module.name} has invalid assignment target "
             f"{type(stmt.target).__name__}; Spectre requires a variable or array element"
         )
+
+    def _discrete_assignment_key(self, stmt: Assignment) -> str:
+        stmt_id = id(stmt)
+        key = self._discrete_assignment_key_cache.get(stmt_id)
+        if key is None:
+            key = f"assign_{self._discrete_assignment_counter}"
+            self._discrete_assignment_counter += 1
+            self._discrete_assignment_key_cache[stmt_id] = key
+        return key
+
+    def _should_gate_self_referential_assignment(self, stmt: Assignment, name: str) -> bool:
+        if self._is_integer_variable(name):
+            return False
+        return self._expr_references_variable(stmt.value, name)
+
+    def _expr_references_variable(self, expr: Expr, name: str) -> bool:
+        if isinstance(expr, Identifier):
+            return expr.name == name
+        if isinstance(expr, ArrayAccess):
+            return expr.name == name or self._expr_references_variable(expr.index, name)
+        if isinstance(expr, BinaryExpr):
+            return (
+                self._expr_references_variable(expr.left, name)
+                or self._expr_references_variable(expr.right, name)
+            )
+        if isinstance(expr, UnaryExpr):
+            return self._expr_references_variable(expr.operand, name)
+        if isinstance(expr, TernaryExpr):
+            return (
+                self._expr_references_variable(expr.cond, name)
+                or self._expr_references_variable(expr.true_expr, name)
+                or self._expr_references_variable(expr.false_expr, name)
+            )
+        if isinstance(expr, FunctionCall):
+            return any(self._expr_references_variable(arg, name) for arg in expr.args)
+        if isinstance(expr, BranchAccess):
+            return any(
+                sub is not None and self._expr_references_variable(sub, name)
+                for sub in (
+                    expr.node1_index,
+                    expr.node2_index,
+                    expr.node1_index2,
+                    expr.node2_index2,
+                )
+            )
+        if isinstance(expr, MethodCall):
+            return any(self._expr_references_variable(arg, name) for arg in expr.args)
+        return False
 
     def _is_integer_variable(self, name: str) -> bool:
         for variable in self.module.variables:
@@ -2249,7 +2338,7 @@ class _ModuleCompiler:
             # Check if it's a special constant
             if name == 'inf':
                 return "float('inf')"
-            if name == '$abstime':
+            if name in ('$abstime', '$realtime'):
                 return "self._event_time"
             if name == '$temperature':
                 return "(self._temperature + 273.15)"

@@ -867,6 +867,77 @@ endmodule
 
 class TestCompiledEventScheduling:
 
+    def test_realtime_alias_tracks_cross_event_time(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module realtime_probe(clk, out);
+    input voltage clk;
+    output voltage out;
+    real sampled_t;
+    analog begin
+        @(initial_step) sampled_t = -1.0;
+        @(cross(V(clk) - 0.5, +1)) begin
+            sampled_t = $realtime;
+        end
+        V(out) <+ sampled_t;
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_source("clk", ramp(0.0, 1.0, 0.0, 10e-9))
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=10e-9, tstep=1e-9)
+
+        assert result.signals["out"][-1] == pytest.approx(5e-9, abs=1e-12)
+
+    def test_self_referential_real_update_uses_nominal_step_not_refine_steps(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module self_decay_probe(clk, out);
+    input voltage clk;
+    output voltage out;
+    real env;
+    analog begin
+        @(initial_step) begin
+            env = 1.0;
+        end
+        @(cross(V(clk) - 0.5, +1)) begin
+            env = 1.0;
+        end
+        if (env > 0.0) begin
+            env = env - 0.1;
+        end
+        V(out) <+ env;
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_source(
+            "clk",
+            pulse(v_lo=0.0, v_hi=1.0, delay=1e-9, period=10e-9,
+                  width=5e-9, rise=100e-12, fall=100e-12),
+        )
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=2e-9, tstep=1e-9, refine_factor=32, refine_steps=32)
+
+        assert result.signals["out"][-1] == pytest.approx(0.8, abs=0.11)
+
     def test_cross_event_body_samples_other_nodes_at_crossing_time(self):
         from evas.compiler.parser import parse
         from evas.simulator.backend import compile_module

@@ -219,7 +219,16 @@ def _validate_transition_statement(stmt, conditional_depth: int = 0,
             _validate_supported_function_calls(arg)
         return
     if isinstance(stmt, va_ast.EventStatement):
-        _validate_transition_statement(stmt.body, conditional_depth + 1, genvar_names, True)
+        event_is_initial_step = (
+            isinstance(stmt.event, va_ast.EventExpr)
+            and stmt.event.event_type == va_ast.EventType.INITIAL_STEP
+        )
+        _validate_transition_statement(
+            stmt.body,
+            conditional_depth + 1,
+            genvar_names,
+            False if event_is_initial_step else True,
+        )
         return
     if isinstance(stmt, va_ast.IfStatement):
         _validate_supported_function_calls(stmt.cond)

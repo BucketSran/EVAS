@@ -399,6 +399,10 @@ class Simulator:
         for model in self.models:
             _set_transition_breakpoint_threshold(model)
 
+        for model in self.models:
+            if hasattr(model, "_set_nominal_step"):
+                model._set_nominal_step(tstep)
+
         def _set_initial_condition_mode(model, enabled: bool):
             if hasattr(model, "_set_initial_condition_mode"):
                 model._set_initial_condition_mode(enabled)
