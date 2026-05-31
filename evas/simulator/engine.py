@@ -60,7 +60,37 @@ class TransitionState:
         if fall <= 0:
             fall = default_transition
 
-        if abs(target - self.target_val) > 1e-15 or not self.active:
+        changed = abs(target - self.target_val) > 1e-15
+        if changed and self.active:
+            t_begin = self.start_time + self.delay
+            going_up = self.target_val > self.start_val
+            ramp_time = self.rise_time if going_up else self.fall_time
+            in_active_region = time >= t_begin and time < t_begin + ramp_time
+            if in_active_region:
+                vi = self.current_val
+                if going_up:
+                    basis = self.target_val if target < vi else self.start_val
+                    readjust_time = fall if target < vi else rise
+                else:
+                    basis = self.start_val if target < vi else self.target_val
+                    readjust_time = fall if target < vi else rise
+                slope = (target - basis) / readjust_time if readjust_time > 0 else 0.0
+                if abs(slope) > 1e-30:
+                    # Verilog-AMS interrupted-transition semantics: a changed
+                    # input during an active transition readjusts the original
+                    # transition line; it does not restart a full rise/fall
+                    # interval from the instantaneous output value.
+                    self.start_val = basis
+                    self.start_time = time - (vi - basis) / slope
+                    self.delay = 0.0
+                    self.target_val = target
+                    self.rise_time = rise
+                    self.fall_time = fall
+                    self.current_val = vi
+                    self.active = True
+                    return
+
+        if changed or not self.active:
             if abs(target - self.current_val) > 1e-15:
                 self.start_val = self.current_val
                 self.target_val = target

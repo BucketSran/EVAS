@@ -135,6 +135,42 @@ class TestTransitionState:
         assert ts.evaluate(10e-9) == pytest.approx(0.5)
         assert ts.evaluate(15e-9) == pytest.approx(1.0)
 
+    def test_repeated_falling_interruptions_readjust_original_transition(self):
+        ts = TransitionState(current_val=0.8317)
+        events = [
+            (44.55e-9, 0.7901),
+            (46.55e-9, 0.7506),
+            (48.55e-9, 0.7131),
+            (50.55e-9, 0.6774),
+            (52.55e-9, 0.6435),
+            (54.55e-9, 0.6114),
+            (56.55e-9, 0.5808),
+            (58.55e-9, 0.5517),
+            (60.55e-9, 0.5242),
+            (62.55e-9, 0.4979),
+            (64.55e-9, 0.5379),
+        ]
+        samples = {
+            54.5e-9: 0.715881,
+            60.0e-9: 0.580100,
+            64.0e-9: 0.5203865,
+        }
+
+        sample_items = iter(sorted(samples.items()))
+        next_sample = next(sample_items, None)
+        for event_time, target in events:
+            while next_sample is not None and next_sample[0] < event_time:
+                sample_time, expected = next_sample
+                assert ts.evaluate(sample_time) == pytest.approx(expected)
+                next_sample = next(sample_items, None)
+            ts.evaluate(event_time)
+            ts.set_target(event_time, target, rise=150e-12, fall=10e-9)
+
+        while next_sample is not None:
+            sample_time, expected = next_sample
+            assert ts.evaluate(sample_time) == pytest.approx(expected)
+            next_sample = next(sample_items, None)
+
 
 # ===========================================================================
 # CrossDetector
