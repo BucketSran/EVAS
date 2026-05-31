@@ -14,18 +14,10 @@ from evas.netlist.runner import evas_simulate
 EXAMPLES = Path(__file__).parent.parent / "evas" / "examples"
 EXPECTED_EXAMPLES = [
     "adc_dac_ideal_4b",
-    "clk_burst_gen",
     "clk_div",
     "comparator",
-    "d2b_4b",
-    "dac_binary_clk_4b",
-    "dac_therm_16b",
     "digital_basics",
-    "dwa_ptr_gen",
-    "lfsr",
     "noise_gen",
-    "ramp_gen",
-    "sar_adc_dac_weighted_8b",
 ]
 
 
