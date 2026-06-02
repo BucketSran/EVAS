@@ -616,6 +616,95 @@ class TestCompiledModelHelpers:
         self.model._event_context_active = False
         assert self.model._get_voltage("vin", {"vin": 1.0}) == pytest.approx(1.0)
 
+    def test_prepare_step_skips_future_snapshot_when_unneeded(self):
+        self.model._prepare_step(
+            {"vin": 0.0},
+            {"vin": 1.0},
+            0.0,
+            10e-9,
+            {"vin": 2.0},
+        )
+
+        assert self.model._step_future_node_voltages is self.model._step_curr_node_voltages
+        assert self.model._step_future_node_voltages["vin"] == pytest.approx(1.0)
+
+    def test_prepare_step_copies_future_snapshot_when_needed(self):
+        self.model._needs_future_node_voltages = True
+        future = {"vin": 2.0}
+        self.model._prepare_step({"vin": 0.0}, {"vin": 1.0}, 0.0, 10e-9, future)
+        future["vin"] = 3.0
+
+        assert self.model._step_future_node_voltages is not self.model._step_curr_node_voltages
+        assert self.model._step_future_node_voltages["vin"] == pytest.approx(2.0)
+
+    def test_prepare_step_accepts_lazy_future_snapshot(self):
+        class LazyFuture:
+            def _with_fallback(self, fallback):
+                self.fallback = fallback
+                return self
+
+            def get(self, node, default=None):
+                if node == "src":
+                    return 2.0
+                return self.fallback.get(node, default)
+
+        self.model._needs_future_node_voltages = True
+        lazy = LazyFuture()
+        self.model._prepare_step(
+            {"src": 0.0, "held": 0.0},
+            {"src": 1.0, "held": 0.5},
+            0.0,
+            10e-9,
+            lazy,
+        )
+
+        assert self.model._step_future_node_voltages is lazy
+        assert self.model._step_future_node_voltages.get("src") == pytest.approx(2.0)
+        assert self.model._step_future_node_voltages.get("held") == pytest.approx(0.5)
+
+    def test_voltage_cross_event_marks_future_snapshot_need(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module cross_future_probe(vin, out);
+    input voltage vin;
+    output voltage out;
+    real seen;
+    analog begin
+        @(cross(V(vin) - 0.5, +1)) seen = 1.0;
+        V(out) <+ seen;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        assert ModelCls._needs_future_node_voltages is True
+        assert model._needs_future_node_voltages_tree() is True
+
+    def test_timer_only_event_does_not_mark_future_snapshot_need(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        src = """\
+`include "disciplines.vams"
+module timer_future_probe(out);
+    output voltage out;
+    real seen;
+    analog begin
+        @(timer(1n)) seen = seen + 1.0;
+        V(out) <+ seen;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        assert ModelCls._needs_future_node_voltages is False
+        assert model._needs_future_node_voltages_tree() is False
+
     def test_integer_assignment_rounds_real_values_like_spectre(self):
         from evas.compiler.parser import parse
         from evas.simulator.backend import compile_module
@@ -834,6 +923,24 @@ endmodule
         self.model.timer_states["ta"] = 10e-9
         self.model.timer_last_fired["ta"] = 10e-9
         assert self.model.next_breakpoint(10e-9) is None
+
+    def test_next_breakpoint_uses_timer_cache_until_state_changes(self):
+        self.model._set_timer_state("t0", 10e-9)
+
+        assert self.model.next_breakpoint(0.0) == pytest.approx(10e-9)
+        scans = self.model._perf_stats["timer_breakpoint_scans"]
+        assert self.model.next_breakpoint(1e-9) == pytest.approx(10e-9)
+
+        assert self.model._perf_stats["timer_breakpoint_scans"] == scans
+        assert self.model._perf_stats["timer_breakpoint_cache_hits"] == 1
+
+    def test_next_breakpoint_timer_cache_invalidates_on_reschedule(self):
+        self.model._set_timer_state("t0", 10e-9)
+        assert self.model.next_breakpoint(0.0) == pytest.approx(10e-9)
+
+        self.model._reschedule_timer("t0", 10e-9, 10e-9)
+
+        assert self.model.next_breakpoint(10e-9) == pytest.approx(20e-9)
 
     def test_idtmod_trapezoid_and_wrap(self):
         y0 = self.model._idtmod("i0", time=0.0, x=2.0, ic=0.0, mod=1.0)
@@ -1828,7 +1935,9 @@ endmodule
         from evas.simulator.backend import compile_module
         mod = parse(self.VA_SRC)
         ModelCls = compile_module(mod)
+        assert ModelCls._uses_bound_step is True
         model = ModelCls()
+        assert model._uses_bound_step_tree() is True
 
         sim = Simulator()
         sim.add_model(model)
@@ -1840,6 +1949,53 @@ endmodule
         # All step sizes (after first) should be <= 1ns + tolerance
         for dt in result.step_sizes[1:]:
             assert dt <= 1e-9 + 1e-15
+
+
+class TestCompiledModelCapabilityFlags:
+    """Regression coverage for simulator scan prefilters."""
+
+    def test_static_contribution_model_skips_dynamic_scans(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        mod = parse("""\
+`include "disciplines.vams"
+module static_out(out);
+    output voltage out;
+    analog begin
+        V(out) <+ 1.0;
+    end
+endmodule
+""")
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        assert ModelCls._has_dynamic_breakpoints is False
+        assert model._has_dynamic_breakpoints_tree() is False
+        assert ModelCls._uses_bound_step is False
+        assert model._uses_bound_step_tree() is False
+
+    def test_cross_event_model_keeps_dynamic_breakpoint_scan(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        mod = parse("""\
+`include "disciplines.vams"
+module edge_seen(in, out);
+    input voltage in;
+    output voltage out;
+    integer seen;
+    analog begin
+        @(cross(V(in) - 0.5, +1)) seen = 1;
+        V(out) <+ seen;
+    end
+endmodule
+""")
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        assert ModelCls._has_dynamic_breakpoints is True
+        assert model._has_dynamic_breakpoints_tree() is True
 
 
 class TestDifferentialContribution:

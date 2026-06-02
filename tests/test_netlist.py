@@ -13,6 +13,7 @@ import csv
 import textwrap
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from evas.netlist.spectre_parser import (
@@ -21,8 +22,13 @@ from evas.netlist.spectre_parser import (
     _parse_suffix_number,
     parse_spectre,
 )
-from evas.netlist.runner import _add_spectre_source, _apply_evas_profile, SpectreSource
-from evas.simulator.engine import Simulator
+from evas.netlist.runner import (
+    _add_spectre_source,
+    _apply_evas_profile,
+    _write_csv,
+    SpectreSource,
+)
+from evas.simulator.engine import SimResult, Simulator
 
 
 # ===========================================================================
@@ -558,6 +564,49 @@ class TestNetlistRegressions:
 
         with pytest.raises(ValueError, match="multiline wave=\\[\\.\\.\\.\\] requires backslash"):
             parse_spectre(str(scs))
+
+
+class TestCsvWriter:
+
+    def test_write_csv_preserves_formats_and_rounds_integer_columns(self, tmp_path):
+        result = SimResult(
+            time=np.array([0.0, 1e-9]),
+            signals={
+                "vin": np.array([0.1254, 0.3756]),
+                "code_code": np.array([0.49, 1.51]),
+                "fine": np.array([1.23456789, 2.3456789]),
+            },
+            step_sizes=np.array([0.0, 1e-9]),
+        )
+        csv_path = tmp_path / "tran.csv"
+
+        _write_csv(
+            csv_path,
+            result,
+            ["vin", "code_code", "fine"],
+            {"vin": "3f", "code_code": "d", "fine": "4e"},
+        )
+
+        assert csv_path.read_text(encoding="utf-8").splitlines() == [
+            "time,vin,code_code,fine",
+            "0.000000000000e+00,0.125,0,1.2346e+00",
+            "1.000000000000e-09,0.376,2,2.3457e+00",
+        ]
+
+    def test_write_csv_python_fallback_matches_numpy_writer(self, tmp_path, monkeypatch):
+        result = SimResult(
+            time=np.array([0.0, 2e-9]),
+            signals={"out": np.array([0.1, 0.2]), "state_code": np.array([1.4, 2.6])},
+            step_sizes=np.array([0.0, 2e-9]),
+        )
+        fast_path = tmp_path / "fast.csv"
+        fallback_path = tmp_path / "fallback.csv"
+
+        _write_csv(fast_path, result, ["out", "state_code"], {"state_code": "d"})
+        monkeypatch.setenv("EVAS_CSV_WRITER", "python")
+        _write_csv(fallback_path, result, ["out", "state_code"], {"state_code": "d"})
+
+        assert fast_path.read_text(encoding="utf-8") == fallback_path.read_text(encoding="utf-8")
 
     def test_backslash_continued_pwl_wave_is_parsed(self, tmp_path):
         scs = tmp_path / "tb_continued_pwl.scs"

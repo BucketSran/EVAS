@@ -3,6 +3,7 @@ runner.py -- EVAS runner: parse .scs, compile VA, simulate, produce log + CSV.
 """
 
 import csv
+import os
 import re as _re
 import sys
 import time
@@ -620,6 +621,34 @@ def _fmt_value(v: float, fmt: str) -> str:
     return f"{v:.{n}e}"
 
 
+def _csv_numpy_format(fmt: str) -> str:
+    if fmt == 'd':
+        return '%d'
+    if fmt.endswith('f') or fmt.endswith('F'):
+        try:
+            n = int(fmt[:-1])
+        except ValueError:
+            n = 6
+        return f'%.{n}f'
+    try:
+        n = int(fmt.rstrip('eE'))
+    except ValueError:
+        n = 6
+    return f'%.{n}e'
+
+
+def _write_csv_python(csv_path: Path, result: SimResult, valid_signals: List[str],
+                      signal_arrays: List[np.ndarray], signal_formats: List[str]) -> None:
+    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['time'] + valid_signals)
+        for i, t_value in enumerate(result.time):
+            row = [f"{t_value:.12e}"]
+            for values, fmt in zip(signal_arrays, signal_formats):
+                row.append(_fmt_value(values[i], fmt))
+            writer.writerow(row)
+
+
 def _write_csv(csv_path: Path, result: SimResult, save_signals: List[str],
                save_formats: Dict[str, str] = None) -> None:
     """Write simulation results to CSV file."""
@@ -627,20 +656,34 @@ def _write_csv(csv_path: Path, result: SimResult, save_signals: List[str],
         save_formats = {}
     signal_names = save_signals if save_signals else sorted(result.signals.keys())
     valid_signals = [s for s in signal_names if s in result.signals]
+    signal_arrays = [result.signals[s] for s in valid_signals]
+    signal_formats = [
+        save_formats.get(sig, 'd' if sig.endswith('_code') else '6e')
+        for sig in valid_signals
+    ]
 
-    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['time'] + valid_signals)
-        for i in range(len(result.time)):
-            row = [f"{result.time[i]:.12e}"]
-            for sig in valid_signals:
-                v = result.signals[sig][i]
-                if sig.endswith('_code'):
-                    fmt = save_formats.get(sig, 'd')
-                else:
-                    fmt = save_formats.get(sig, '6e')
-                row.append(_fmt_value(v, fmt))
-            writer.writerow(row)
+    if os.environ.get("EVAS_CSV_WRITER", "").strip().lower() == "python":
+        _write_csv_python(csv_path, result, valid_signals, signal_arrays, signal_formats)
+        return
+
+    columns = [result.time]
+    for values, fmt in zip(signal_arrays, signal_formats):
+        if fmt == 'd':
+            columns.append(np.rint(values))
+        else:
+            columns.append(values)
+    matrix = np.column_stack(columns)
+    formats = ['%.12e'] + [_csv_numpy_format(fmt) for fmt in signal_formats]
+    header = ','.join(['time'] + valid_signals)
+    np.savetxt(
+        csv_path,
+        matrix,
+        delimiter=',',
+        fmt=formats,
+        header=header,
+        comments='',
+        encoding='utf-8',
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -875,6 +918,13 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         'evas_skip_source_error_control',
         False,
     )
+    profile_sections = _simopt_bool(
+        simopt,
+        'evas_profile_sections',
+        False,
+    ) or os.environ.get("EVAS_PROFILE_SECTIONS", "").strip().lower() in {
+        "1", "true", "yes", "on", "enabled"
+    }
 
     log.write("")
     log.write("*****************************************************")
@@ -894,6 +944,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write(f"    evas_profile = {applied_profile}")
     if skip_source_error_control:
         log.write("    evas_skip_source_error_control = true")
+    if profile_sections:
+        log.write("    evas_profile_sections = true")
     log.write("")
 
     t_sim_start = time.time()
@@ -903,7 +955,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
                      reltol=reltol,
                      vabstol=vabstol,
                      record_step=tstep,
-                     skip_source_error_control=skip_source_error_control)
+                     skip_source_error_control=skip_source_error_control,
+                     profile_sections=profile_sections)
 
     for pct in range(10, 101, 10):
         t_at = tstop * pct / 100.0
@@ -929,6 +982,10 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write("Model event counters:")
         for line in model_perf_lines:
             log.write(line)
+    if getattr(sim, "_profile_times", None):
+        log.write("Section timing counters:")
+        for key, value in sorted(sim._profile_times.items()):
+            log.write(f"    {key} = {value:.6f} s")
 
     # Signal range summary
     log.write("")
@@ -948,15 +1005,22 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
               f"elapsed = {sim_elapsed_ms:.1f} ms.")
 
     # 6b. Derive combined bus signals (e.g. dout_3..dout_0 -> dout_code)
+    t_derive_start = time.time()
     derived = _derive_bus_signals(result)
+    derive_elapsed = time.time() - t_derive_start
     result.signals.update(derived)
 
     # 7. Write CSV
     csv_path = out_dir / 'tran.csv'
     save_with_derived = list(netlist.save_signals) + list(derived.keys())
+    t_csv_start = time.time()
     _write_csv(csv_path, result, save_with_derived, netlist.save_formats)
+    csv_elapsed = time.time() - t_csv_start
 
     signal_names = save_with_derived if save_with_derived else sorted(result.signals.keys())
+    log.write("Runner timing counters:")
+    log.write(f"    derive_bus_signals_s = {derive_elapsed:.6f} s")
+    log.write(f"    csv_write_s = {csv_elapsed:.6f} s")
     log.write("")
     log.write(f"Writing CSV: {csv_path} "
               f"(signals: {', '.join(signal_names)})")

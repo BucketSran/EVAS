@@ -27,6 +27,9 @@ class CompiledModel:
     _module_registry: Dict[str, Any] = {}
     _module_ports: List[str] = []
     _cmp_eps: float = 0.0
+    _needs_future_node_voltages: bool = False
+    _has_dynamic_breakpoints: bool = True
+    _uses_bound_step: bool = True
 
     def __init__(self):
         self.params: Dict[str, Any] = {}
@@ -37,6 +40,7 @@ class CompiledModel:
         self.cross_detectors: Dict[str, CrossDetector] = {}
         self.above_detectors: Dict[str, AboveDetector] = {}
         self.output_nodes: Dict[str, float] = {}
+        self._output_nodes_version: int = 0
         self.node_map: Dict[str, str] = {}  # port_name -> external_node
         self.default_transition: float = 1e-12
         self._initial_step_done: bool = False
@@ -47,6 +51,9 @@ class CompiledModel:
         self.timer_states: Dict[str, float] = {}  # key → next_fire_time
         self.timer_last_fired: Dict[str, float] = {}  # key → last absolute-time fire target
         self.timer_kinds: Dict[str, str] = {}  # key → absolute | periodic
+        self._timer_state_version: int = 0
+        self._timer_breakpoint_cache_version: int = -1
+        self._timer_breakpoint_cache: Optional[float] = None
         self._bound_step: float = 0.0  # $bound_step limit (0 = no limit)
         self._nominal_step: float = 0.0
         self._discrete_update_buckets: Dict[str, int] = {}
@@ -58,6 +65,13 @@ class CompiledModel:
         self._step_prev_time: float = 0.0
         self._step_time: float = 0.0
         self._step_latest_cross_event_time: float = -math.inf
+        self._step_event_fired: bool = False
+        self._needs_future_node_voltages = bool(
+            getattr(self.__class__, "_needs_future_node_voltages", False)
+        )
+        self._needs_future_node_voltages_tree_cache: Optional[bool] = None
+        self._has_dynamic_breakpoints_tree_cache: Optional[bool] = None
+        self._uses_bound_step_tree_cache: Optional[bool] = None
         self._event_interpolated_nodes: set[str] = set()
         self._event_node_cross_directions: Dict[str, int] = {}
         self._perf_stats: Dict[str, int] = {
@@ -69,6 +83,9 @@ class CompiledModel:
             "timer_absolute_expirations": 0,
             "timer_reschedules": 0,
             "timer_breakpoint_hits": 0,
+            "timer_breakpoint_scans": 0,
+            "timer_breakpoint_cache_hits": 0,
+            "timer_state_updates": 0,
             "cross_fires": 0,
             "above_fires": 0,
         }
@@ -134,43 +151,132 @@ class CompiledModel:
                       prev_time: float, time: float,
                       future_node_voltages: Optional[Dict[str, float]] = None):
         """Cache step endpoints so event bodies can read values at t_cross."""
-        self._step_prev_node_voltages = dict(prev_node_voltages)
-        self._step_curr_node_voltages = dict(curr_node_voltages)
-        self._step_future_node_voltages = dict(future_node_voltages or curr_node_voltages)
+        self._step_prev_node_voltages = prev_node_voltages
+        self._step_curr_node_voltages = curr_node_voltages
+        if self._needs_future_node_voltages and future_node_voltages is not None:
+            with_fallback = getattr(future_node_voltages, "_with_fallback", None)
+            if with_fallback is not None:
+                self._step_future_node_voltages = with_fallback(self._step_curr_node_voltages)
+            else:
+                self._step_future_node_voltages = dict(future_node_voltages)
+        else:
+            self._step_future_node_voltages = self._step_curr_node_voltages
         self._step_prev_time = float(prev_time)
         self._step_time = float(time)
         self._step_latest_cross_event_time = -math.inf
+        self._step_event_fired = False
         for child in self._child_models:
-            child._prepare_step(prev_node_voltages, curr_node_voltages, prev_time, time, future_node_voltages)
+            child_future_node_voltages = (
+                future_node_voltages
+                if child._needs_future_node_voltages_tree()
+                else None
+            )
+            child._prepare_step(
+                prev_node_voltages,
+                curr_node_voltages,
+                prev_time,
+                time,
+                child_future_node_voltages,
+            )
+
+    def _needs_future_node_voltages_tree(self) -> bool:
+        cached = self._needs_future_node_voltages_tree_cache
+        if cached is not None:
+            return cached
+        cached = bool(self._needs_future_node_voltages) or any(
+            child._needs_future_node_voltages_tree()
+            for child in self._child_models
+        )
+        self._needs_future_node_voltages_tree_cache = cached
+        return cached
+
+    def _has_dynamic_breakpoints_tree(self) -> bool:
+        cached = self._has_dynamic_breakpoints_tree_cache
+        if cached is not None:
+            return cached
+        own = bool(getattr(self, "_has_dynamic_breakpoints", True))
+        if type(self).next_breakpoint is not CompiledModel.next_breakpoint:
+            own = True
+        cached = own or any(
+            child._has_dynamic_breakpoints_tree()
+            for child in self._child_models
+        )
+        self._has_dynamic_breakpoints_tree_cache = cached
+        return cached
+
+    def _uses_bound_step_tree(self) -> bool:
+        cached = self._uses_bound_step_tree_cache
+        if cached is not None:
+            return cached
+        cached = bool(getattr(self, "_uses_bound_step", True)) or any(
+            child._uses_bound_step_tree()
+            for child in self._child_models
+        )
+        self._uses_bound_step_tree_cache = cached
+        return cached
 
     def next_breakpoint(self, time: float) -> Optional[float]:
-        bps = []
+        best: Optional[float] = None
         min_ramp = getattr(self, "_transition_breakpoint_min_ramp", 0.0)
         for ts in self.transitions.values():
             bp = ts.next_breakpoint(time, min_ramp)
-            if bp is not None:
-                bps.append(bp)
+            if bp is not None and (best is None or bp < best):
+                best = bp
         for cd in self.cross_detectors.values():
             bp = cd.next_breakpoint()
-            if bp is not None and bp > time:
-                bps.append(bp)
+            if bp is not None and bp > time and (best is None or bp < best):
+                best = bp
         for ad in self.above_detectors.values():
             bp = ad.next_breakpoint()
-            if bp is not None and bp > time:
-                bps.append(bp)
-        # Timer breakpoints
+            if bp is not None and bp > time and (best is None or bp < best):
+                best = bp
+        bp = self._next_timer_breakpoint(time)
+        if bp is not None and (best is None or bp < best):
+            best = bp
+        for child in self._child_models:
+            bp = child.next_breakpoint(time)
+            if bp is not None and (best is None or bp < best):
+                best = bp
+        return best
+
+    def _invalidate_timer_breakpoint_cache(self):
+        self._timer_state_version += 1
+        self._timer_breakpoint_cache_version = -1
+        self._timer_breakpoint_cache = None
+        self._perf_stats["timer_state_updates"] += 1
+
+    def _set_timer_state(self, key: str, value: float):
+        self.timer_states[key] = float(value)
+        self._invalidate_timer_breakpoint_cache()
+
+    def _set_timer_last_fired(self, key: str, value: float):
+        self.timer_last_fired[key] = float(value)
+        self._invalidate_timer_breakpoint_cache()
+
+    def _next_timer_breakpoint(self, time: float) -> Optional[float]:
+        cached_version = self._timer_breakpoint_cache_version
+        cached = self._timer_breakpoint_cache
+        if cached_version == self._timer_state_version:
+            if cached is None:
+                return None
+            if cached > time:
+                self._perf_stats["timer_breakpoint_hits"] += 1
+                self._perf_stats["timer_breakpoint_cache_hits"] += 1
+                return cached
+
+        self._perf_stats["timer_breakpoint_scans"] += 1
+        best: Optional[float] = None
         for key, nf in self.timer_states.items():
             last_fired = self.timer_last_fired.get(key)
             if last_fired is not None and abs(last_fired - nf) <= 1e-18:
                 continue
-            if nf > time:
-                self._perf_stats["timer_breakpoint_hits"] += 1
-                bps.append(nf)
-        for child in self._child_models:
-            bp = child.next_breakpoint(time)
-            if bp is not None:
-                bps.append(bp)
-        return min(bps) if bps else None
+            if nf > time and (best is None or nf < best):
+                best = nf
+        self._timer_breakpoint_cache = best
+        self._timer_breakpoint_cache_version = self._timer_state_version
+        if best is not None:
+            self._perf_stats["timer_breakpoint_hits"] += 1
+        return best
 
     def _check_timer_due(self, key: str, time: float, period: float, start: Optional[float] = None) -> bool:
         self._perf_stats["timer_periodic_checks"] += 1
@@ -184,14 +290,14 @@ class CompiledModel:
                 next_fire = p
             if time > next_fire + 1e-18:
                 missed = math.floor((time - next_fire) / p) + 1
-                self.timer_states[key] = next_fire + missed * p
+                self._set_timer_state(key, next_fire + missed * p)
                 self._perf_stats["timer_periodic_skips"] += 1
                 return False
-            self.timer_states[key] = next_fire
+            self._set_timer_state(key, next_fire)
         next_fire = self.timer_states[key]
         if time > next_fire + 1e-18:
             missed = math.floor((time - next_fire) / p) + 1
-            self.timer_states[key] = next_fire + missed * p
+            self._set_timer_state(key, next_fire + missed * p)
             self._perf_stats["timer_periodic_skips"] += 1
             return False
         due = time >= next_fire - 1e-18
@@ -204,7 +310,7 @@ class CompiledModel:
         p = float(period)
         if p <= 0.0 or not math.isfinite(p) or key not in self.timer_states:
             return
-        self.timer_states[key] = self.timer_states[key] + p
+        self._set_timer_state(key, self.timer_states[key] + p)
         self._perf_stats["timer_reschedules"] += 1
 
     def _check_timer_at(self, key: str, time: float, target: float) -> bool:
@@ -215,9 +321,9 @@ class CompiledModel:
             return False
         first_seen = key not in self.timer_states
         if first_seen or abs(self.timer_states[key] - tgt) > 1e-18:
-            self.timer_states[key] = tgt
+            self._set_timer_state(key, tgt)
         if first_seen and time > tgt + 1e-18:
-            self.timer_last_fired[key] = tgt
+            self._set_timer_last_fired(key, tgt)
             self._perf_stats["timer_absolute_expirations"] += 1
             return False
         armed_target = self.timer_states[key]
@@ -225,7 +331,7 @@ class CompiledModel:
         if last_fired is not None and abs(last_fired - armed_target) <= 1e-18:
             return False
         if time >= armed_target - 1e-18:
-            self.timer_last_fired[key] = armed_target
+            self._set_timer_last_fired(key, armed_target)
             self._perf_stats["timer_absolute_fires"] += 1
             self._event_time = time
             self._event_interpolated_nodes = set()
@@ -247,7 +353,7 @@ class CompiledModel:
             if last_fired is not None and abs(last_fired - armed_target) <= 1e-18:
                 continue
             if time >= armed_target - 1e-18:
-                self.timer_last_fired[key] = armed_target
+                self._set_timer_last_fired(key, armed_target)
                 self._perf_stats["timer_absolute_expirations"] += 1
 
     @classmethod
@@ -286,9 +392,22 @@ class CompiledModel:
 
     def _get_voltage(self, node: str, node_voltages: Dict[str, float]) -> float:
         """Get voltage of a node, resolving through node_map."""
+        if not self.node_map and not self._event_context_active:
+            if node in node_voltages:
+                return node_voltages[node]
+            if node in self.output_nodes:
+                return self.output_nodes[node]
+            return 0.0
+
         # Check if it's a mapped external node
         ext = self.node_map.get(node, node)
-        if isinstance(ext, str) and ext.startswith('@parent:') and self._parent_model is not None:
+        if (
+            isinstance(ext, str)
+            and ext
+            and ext[0] == '@'
+            and ext.startswith('@parent:')
+            and self._parent_model is not None
+        ):
             pnode = ext[len('@parent:'):]
             ext = self._parent_model.node_map.get(pnode, pnode)
         if self._event_context_active and isinstance(ext, str):
@@ -327,9 +446,24 @@ class CompiledModel:
 
     def _set_output(self, node: str, value: float, node_voltages: Dict[str, float]):
         """Set an output node voltage."""
+        if not self.node_map:
+            if node not in self.output_nodes:
+                self._output_nodes_version += 1
+            self.output_nodes[node] = value
+            node_voltages[node] = value
+            return
+
+        if node not in self.output_nodes:
+            self._output_nodes_version += 1
         self.output_nodes[node] = value
         ext = self.node_map.get(node, node)
-        if isinstance(ext, str) and ext.startswith('@parent:') and self._parent_model is not None:
+        if (
+            isinstance(ext, str)
+            and ext
+            and ext[0] == '@'
+            and ext.startswith('@parent:')
+            and self._parent_model is not None
+        ):
             pnode = ext[len('@parent:'):]
             ext = self._parent_model.node_map.get(pnode, pnode)
         node_voltages[ext] = value
@@ -425,6 +559,7 @@ class CompiledModel:
                 self._step_latest_cross_event_time,
                 cross_time,
             )
+            self._step_event_fired = True
             self._perf_stats["cross_fires"] += 1
             trigger_dir = self.cross_detectors[key].last_trigger_direction or direction
             trigger_went_beyond = self.cross_detectors[key].last_trigger_went_beyond
@@ -434,7 +569,13 @@ class CompiledModel:
 
             def resolve_node(node: str) -> str:
                 ext = self.node_map.get(node, node)
-                if isinstance(ext, str) and ext.startswith('@parent:') and self._parent_model is not None:
+                if (
+                    isinstance(ext, str)
+                    and ext
+                    and ext[0] == '@'
+                    and ext.startswith('@parent:')
+                    and self._parent_model is not None
+                ):
                     pnode = ext[len('@parent:'):]
                     ext = self._parent_model.node_map.get(pnode, pnode)
                 return ext
@@ -504,6 +645,7 @@ class CompiledModel:
         fired = self.above_detectors[key].check(time, val)
         if fired:
             self._perf_stats["above_fires"] += 1
+            self._step_event_fired = True
             self._event_time = self.above_detectors[key].t_cross
             self._event_interpolated_nodes = set()
             self._event_node_cross_directions = {}
@@ -657,6 +799,7 @@ class _ModuleCompiler:
         self._slew_counter = 0
         self._last_cross_counter = 0
         self._uses_idtmod = False
+        self._needs_future_node_voltages = False
         self._indent = 2
         self._in_loop_var = None  # track if we're inside a for loop
         self._event_key_cache: Dict[tuple, str] = {}
@@ -789,6 +932,7 @@ class _ModuleCompiler:
         self._slew_counter = 0
         self._last_cross_counter = 0
         self._uses_idtmod = False
+        self._needs_future_node_voltages = False
         self._event_key_cache = {}
         self._stateful_func_key_cache = {}
         self._contributed_nodes = set()
@@ -869,6 +1013,13 @@ class _ModuleCompiler:
 
         cls = namespace[f'{mod.name}_Model']
         cls._uses_idtmod = self._uses_idtmod
+        cls._needs_future_node_voltages = self._needs_future_node_voltages
+        if mod.analog_block:
+            cls._has_dynamic_breakpoints = self._statement_has_dynamic_breakpoints(mod.analog_block.body)
+            cls._uses_bound_step = self._statement_uses_bound_step(mod.analog_block.body)
+        else:
+            cls._has_dynamic_breakpoints = False
+            cls._uses_bound_step = False
         cls._generated_code = code  # Store for debugging
         return cls
 
@@ -1319,6 +1470,182 @@ class _ModuleCompiler:
 
         return nodes
 
+    def _statement_has_dynamic_breakpoints(self, stmt) -> bool:
+        if stmt is None:
+            return False
+
+        if isinstance(stmt, Block):
+            return any(self._statement_has_dynamic_breakpoints(s) for s in stmt.statements)
+
+        if isinstance(stmt, EventStatement):
+            if self._event_has_dynamic_breakpoints(stmt.event):
+                return True
+            return self._statement_has_dynamic_breakpoints(stmt.body)
+
+        if isinstance(stmt, IfStatement):
+            return (
+                self._expr_has_function_call(stmt.cond, {"transition", "last_crossing"})
+                or self._statement_has_dynamic_breakpoints(stmt.then_body)
+                or self._statement_has_dynamic_breakpoints(stmt.else_body)
+            )
+
+        if isinstance(stmt, WhileStatement):
+            return (
+                self._expr_has_function_call(stmt.cond, {"transition", "last_crossing"})
+                or self._statement_has_dynamic_breakpoints(stmt.body)
+            )
+
+        if isinstance(stmt, ForStatement):
+            return (
+                self._assignment_has_function_call(stmt.init, {"transition", "last_crossing"})
+                or self._expr_has_function_call(stmt.cond, {"transition", "last_crossing"})
+                or self._assignment_has_function_call(stmt.update, {"transition", "last_crossing"})
+                or self._statement_has_dynamic_breakpoints(stmt.body)
+            )
+
+        if isinstance(stmt, CaseStatement):
+            if self._expr_has_function_call(stmt.expr, {"transition", "last_crossing"}):
+                return True
+            for item in stmt.items:
+                if any(self._expr_has_function_call(v, {"transition", "last_crossing"}) for v in item.values):
+                    return True
+                if self._statement_has_dynamic_breakpoints(item.body):
+                    return True
+            return False
+
+        if self._statement_has_function_call(stmt, {"transition", "last_crossing"}):
+            return True
+
+        return False
+
+    def _event_has_dynamic_breakpoints(self, event) -> bool:
+        if isinstance(event, EventExpr):
+            return event.event_type in {
+                EventType.CROSS,
+                EventType.ABOVE,
+                EventType.TIMER,
+            }
+        if isinstance(event, CombinedEvent):
+            return any(self._event_has_dynamic_breakpoints(e) for e in event.events)
+        return False
+
+    def _statement_uses_bound_step(self, stmt) -> bool:
+        return self._statement_has_system_task(stmt, {"$bound_step"})
+
+    def _statement_has_system_task(self, stmt, names: set[str]) -> bool:
+        if stmt is None:
+            return False
+
+        if isinstance(stmt, Block):
+            return any(self._statement_has_system_task(s, names) for s in stmt.statements)
+
+        if isinstance(stmt, EventStatement):
+            return self._statement_has_system_task(stmt.body, names)
+
+        if isinstance(stmt, SystemTask):
+            return stmt.name in names
+
+        if isinstance(stmt, IfStatement):
+            return (
+                self._statement_has_system_task(stmt.then_body, names)
+                or self._statement_has_system_task(stmt.else_body, names)
+            )
+
+        if isinstance(stmt, WhileStatement):
+            return self._statement_has_system_task(stmt.body, names)
+
+        if isinstance(stmt, ForStatement):
+            return self._statement_has_system_task(stmt.body, names)
+
+        if isinstance(stmt, CaseStatement):
+            return any(
+                self._statement_has_system_task(item.body, names)
+                for item in stmt.items
+            )
+
+        return False
+
+    def _statement_has_function_call(self, stmt, names: set[str]) -> bool:
+        if stmt is None:
+            return False
+
+        if isinstance(stmt, Block):
+            return any(self._statement_has_function_call(s, names) for s in stmt.statements)
+
+        if isinstance(stmt, Contribution):
+            return self._expr_has_function_call(stmt.expr, names)
+
+        if isinstance(stmt, Assignment):
+            return (
+                self._expr_has_function_call(stmt.value, names)
+                or self._target_has_function_call(stmt.target, names)
+            )
+
+        if isinstance(stmt, EventStatement):
+            return (
+                self._event_expr_has_function_call(stmt.event, names)
+                or self._statement_has_function_call(stmt.body, names)
+            )
+
+        if isinstance(stmt, IfStatement):
+            return (
+                self._expr_has_function_call(stmt.cond, names)
+                or self._statement_has_function_call(stmt.then_body, names)
+                or self._statement_has_function_call(stmt.else_body, names)
+            )
+
+        if isinstance(stmt, WhileStatement):
+            return (
+                self._expr_has_function_call(stmt.cond, names)
+                or self._statement_has_function_call(stmt.body, names)
+            )
+
+        if isinstance(stmt, ForStatement):
+            return (
+                self._assignment_has_function_call(stmt.init, names)
+                or self._expr_has_function_call(stmt.cond, names)
+                or self._assignment_has_function_call(stmt.update, names)
+                or self._statement_has_function_call(stmt.body, names)
+            )
+
+        if isinstance(stmt, CaseStatement):
+            if self._expr_has_function_call(stmt.expr, names):
+                return True
+            for item in stmt.items:
+                if any(self._expr_has_function_call(v, names) for v in item.values):
+                    return True
+                if self._statement_has_function_call(item.body, names):
+                    return True
+            return False
+
+        if isinstance(stmt, SystemTask):
+            return any(self._expr_has_function_call(arg, names) for arg in stmt.args)
+
+        return False
+
+    def _assignment_has_function_call(self, stmt, names: set[str]) -> bool:
+        if not isinstance(stmt, Assignment):
+            return False
+        return (
+            self._target_has_function_call(stmt.target, names)
+            or self._expr_has_function_call(stmt.value, names)
+        )
+
+    def _target_has_function_call(self, target, names: set[str]) -> bool:
+        if isinstance(target, ArrayAccess):
+            return self._expr_has_function_call(target.index, names)
+        return False
+
+    def _event_expr_has_function_call(self, event, names: set[str]) -> bool:
+        if isinstance(event, EventExpr):
+            return any(self._expr_has_function_call(arg, names) for arg in event.args)
+        if isinstance(event, CombinedEvent):
+            return any(self._event_expr_has_function_call(e, names) for e in event.events)
+        return False
+
+    def _expr_has_function_call(self, expr: Expr, names: set[str]) -> bool:
+        return any(call.name in names for call in self._iter_function_calls_in_expr(expr))
+
     def _expr_references_nodes(self, expr: Expr, nodes: set[str]) -> bool:
         if not nodes:
             return False
@@ -1630,7 +1957,7 @@ class _ModuleCompiler:
                     lines.append(f"{prefix}    self._event_context_active = False")
                     lines.append(f"{prefix}    self._event_interpolated_nodes = set()")
                     lines.append(f"{prefix}    self._event_node_cross_directions = {{}}")
-                    lines.append(f"{prefix}    self.timer_states[{key!r}] = {target_expr}")
+                    lines.append(f"{prefix}    self._set_timer_state({key!r}, {target_expr})")
                 lines.append(f"{prefix}    self._event_time = time")
 
         elif isinstance(event, CombinedEvent):
@@ -1715,6 +2042,8 @@ class _ModuleCompiler:
         interp_nodes = sorted(self._collect_branch_nodes_from_expr(event.args[0]))
         raw_nudges = self._collect_branch_nudge_nodes_from_expr(event.args[0])
         nudge_nodes = {node: raw_nudges[node] for node in sorted(raw_nudges)}
+        if nudge_nodes:
+            self._needs_future_node_voltages = True
         return (
             f"self._check_cross({key!r}, time, {expr}, {direction}, "
             f"{time_tol}, {expr_tol}, {interp_nodes!r}, {nudge_nodes!r})"

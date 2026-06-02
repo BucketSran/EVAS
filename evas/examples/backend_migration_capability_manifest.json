@@ -1,0 +1,428 @@
+{
+  "schema_version": 1,
+  "purpose": "Coverage contract for Python indexed and Rust backend migration. Every bundled EVAS example testbench that the current Python backend can simulate must remain listed here until an equivalent backend parity test exists.",
+  "backend_contract": {
+    "current_default_backend": "python_dict",
+    "migration_backends": [
+      "python_indexed",
+      "rust_native"
+    ],
+    "must_preserve": [
+      "successful simulation for every listed testbench",
+      "tran.csv header names and signal units",
+      "strobe.txt messages when a validator consumes them",
+      "validator pass/fail behavior for validator-backed cases",
+      "schema and row-count sanity for schema-only cases",
+      "fallback to python_dict for semantics not yet supported by the new backend"
+    ]
+  },
+  "cases": [
+    {
+      "id": "adc_dac_ideal_4b_ramp",
+      "group": "adc_dac_ideal_4b",
+      "tb": "adc_dac_ideal_4b/tb_adc_dac_ideal_4b_ramp.scs",
+      "coverage": [
+        "pwl_source",
+        "clocked_adc",
+        "combinational_dac",
+        "reset",
+        "bus_code_output"
+      ],
+      "required_signals": [
+        "time",
+        "vin",
+        "clk",
+        "rst_n",
+        "vout",
+        "dout_code"
+      ],
+      "validation": {
+        "kind": "schema_only",
+        "reason": "The bundled validator validates the sine testbench; ramp is currently exercised by the example analysis script."
+      },
+      "covered_by_current_pytest": false
+    },
+    {
+      "id": "adc_dac_ideal_4b_sine",
+      "group": "adc_dac_ideal_4b",
+      "tb": "adc_dac_ideal_4b/tb_adc_dac_ideal_4b_sine.scs",
+      "coverage": [
+        "sine_source",
+        "clocked_adc",
+        "sample_hold",
+        "combinational_dac",
+        "reset",
+        "bus_code_output",
+        "strobe_sampling"
+      ],
+      "required_signals": [
+        "time",
+        "vin",
+        "vin_sh",
+        "clk",
+        "rst_n",
+        "vout",
+        "dout_code"
+      ],
+      "validation": {
+        "kind": "validator",
+        "module": "adc_dac_ideal_4b/validate_adc_dac_ideal_4b.py",
+        "functions": [
+          "validate_csv"
+        ]
+      },
+      "covered_by_current_pytest": true
+    },
+    {
+      "id": "adc_dac_ideal_4b_sine1000",
+      "group": "adc_dac_ideal_4b",
+      "tb": "adc_dac_ideal_4b/tb_adc_dac_ideal_4b_sine1000.scs",
+      "coverage": [
+        "longer_sine_run",
+        "clocked_adc",
+        "sample_hold",
+        "combinational_dac",
+        "reset",
+        "bus_code_output"
+      ],
+      "required_signals": [
+        "time",
+        "vin",
+        "vin_sh",
+        "clk",
+        "rst_n",
+        "vout",
+        "dout_code"
+      ],
+      "validation": {
+        "kind": "schema_only",
+        "reason": "The bundled validator validates the sine testbench; sine1000 is currently exercised by the example analysis script."
+      },
+      "covered_by_current_pytest": false
+    },
+    {
+      "id": "clk_div_ratio4",
+      "group": "clk_div",
+      "tb": "clk_div/tb_clk_div.scs",
+      "coverage": [
+        "timer_event",
+        "cross_event",
+        "parameterized_ratio",
+        "transition_output"
+      ],
+      "required_signals": [
+        "time",
+        "clk_in",
+        "clk_out"
+      ],
+      "validation": {
+        "kind": "validator",
+        "module": "clk_div/validate_clk_div.py",
+        "functions": [
+          "validate_csv"
+        ],
+        "notes": "Validator expects ratio=4 and first checks out_dir/div4/tran.csv before falling back to out_dir/tran.csv."
+      },
+      "covered_by_current_pytest": true
+    },
+    {
+      "id": "clk_div_ratio2",
+      "group": "clk_div",
+      "tb": "clk_div/tb_clk_div_div2.scs",
+      "coverage": [
+        "timer_event",
+        "cross_event",
+        "parameterized_ratio",
+        "transition_output"
+      ],
+      "required_signals": [
+        "time",
+        "clk_in",
+        "clk_out"
+      ],
+      "validation": {
+        "kind": "schema_only",
+        "reason": "The bundled validator is calibrated for ratio=4 only."
+      },
+      "covered_by_current_pytest": false
+    },
+    {
+      "id": "clk_div_ratio8",
+      "group": "clk_div",
+      "tb": "clk_div/tb_clk_div_div8.scs",
+      "coverage": [
+        "timer_event",
+        "cross_event",
+        "parameterized_ratio",
+        "transition_output"
+      ],
+      "required_signals": [
+        "time",
+        "clk_in",
+        "clk_out"
+      ],
+      "validation": {
+        "kind": "schema_only",
+        "reason": "The bundled validator is calibrated for ratio=4 only."
+      },
+      "covered_by_current_pytest": false
+    },
+    {
+      "id": "comparator_ideal",
+      "group": "comparator",
+      "tb": "comparator/tb_cmp_ideal.scs",
+      "coverage": [
+        "cross_event",
+        "differential_input",
+        "transition_output"
+      ],
+      "required_signals": [
+        "time",
+        "clk",
+        "vinp",
+        "vinn",
+        "out_p",
+        "out_n"
+      ],
+      "validation": {
+        "kind": "validator",
+        "module": "comparator/validate_cmp_ideal.py",
+        "functions": [
+          "validate_csv"
+        ]
+      },
+      "covered_by_current_pytest": true
+    },
+    {
+      "id": "comparator_strongarm",
+      "group": "comparator",
+      "tb": "comparator/tb_cmp_strongarm.scs",
+      "coverage": [
+        "cross_event",
+        "differential_input",
+        "regenerative_latch_behavior",
+        "transition_output"
+      ],
+      "required_signals": [
+        "time",
+        "clk",
+        "vinp",
+        "vinn",
+        "out_p",
+        "out_n"
+      ],
+      "validation": {
+        "kind": "validator",
+        "module": "comparator/validate_cmp_strongarm.py",
+        "functions": [
+          "validate_csv"
+        ]
+      },
+      "covered_by_current_pytest": true
+    },
+    {
+      "id": "comparator_offset_search",
+      "group": "comparator",
+      "tb": "comparator/tb_cmp_offset_search.scs",
+      "coverage": [
+        "cross_event",
+        "pwl_source",
+        "differential_input",
+        "strobe_output",
+        "transition_output"
+      ],
+      "required_signals": [
+        "time",
+        "CLK",
+        "vincm",
+        "vinp_node",
+        "vinn_node",
+        "dcmpp",
+        "dcmpn"
+      ],
+      "validation": {
+        "kind": "validator",
+        "module": "comparator/validate_cmp_offset_search.py",
+        "functions": [
+          "validate_csv",
+          "validate_txt"
+        ],
+        "requires_strobe": true
+      },
+      "covered_by_current_pytest": true
+    },
+    {
+      "id": "comparator_delay",
+      "group": "comparator",
+      "tb": "comparator/tb_cmp_delay.scs",
+      "coverage": [
+        "cross_event",
+        "timer_measurement",
+        "differential_input",
+        "delay_metric_output",
+        "transition_output"
+      ],
+      "required_signals": [
+        "time",
+        "clk",
+        "vinp",
+        "vinn",
+        "out_p",
+        "out_n",
+        "delay_ps"
+      ],
+      "validation": {
+        "kind": "validator",
+        "module": "comparator/validate_cmp_delay.py",
+        "functions": [
+          "validate_csv"
+        ]
+      },
+      "covered_by_current_pytest": true
+    },
+    {
+      "id": "digital_basics_and_gate",
+      "group": "digital_basics",
+      "tb": "digital_basics/tb_and_gate.scs",
+      "coverage": [
+        "boolean_logic",
+        "transition_output",
+        "pulse_source"
+      ],
+      "required_signals": [
+        "time",
+        "a",
+        "b",
+        "y"
+      ],
+      "validation": {
+        "kind": "validator",
+        "module": "digital_basics/validate_digital_basics.py",
+        "functions": [
+          "validate_and"
+        ]
+      },
+      "covered_by_current_pytest": true
+    },
+    {
+      "id": "digital_basics_or_gate",
+      "group": "digital_basics",
+      "tb": "digital_basics/tb_or_gate.scs",
+      "coverage": [
+        "boolean_logic",
+        "transition_output",
+        "pulse_source"
+      ],
+      "required_signals": [
+        "time",
+        "a",
+        "b",
+        "y"
+      ],
+      "validation": {
+        "kind": "validator",
+        "module": "digital_basics/validate_digital_basics.py",
+        "functions": [
+          "validate_or"
+        ]
+      },
+      "covered_by_current_pytest": true
+    },
+    {
+      "id": "digital_basics_not_gate",
+      "group": "digital_basics",
+      "tb": "digital_basics/tb_not_gate.scs",
+      "coverage": [
+        "boolean_logic",
+        "transition_output",
+        "pulse_source"
+      ],
+      "required_signals": [
+        "time",
+        "a",
+        "y"
+      ],
+      "validation": {
+        "kind": "validator",
+        "module": "digital_basics/validate_digital_basics.py",
+        "functions": [
+          "validate_not"
+        ]
+      },
+      "covered_by_current_pytest": true
+    },
+    {
+      "id": "digital_basics_dff_rst",
+      "group": "digital_basics",
+      "tb": "digital_basics/tb_dff_rst.scs",
+      "coverage": [
+        "cross_event",
+        "stateful_digital_logic",
+        "synchronous_reset",
+        "transition_output"
+      ],
+      "required_signals": [
+        "time",
+        "clk",
+        "d",
+        "rst",
+        "q",
+        "qbar"
+      ],
+      "validation": {
+        "kind": "validator",
+        "module": "digital_basics/validate_digital_basics.py",
+        "functions": [
+          "validate_dff"
+        ]
+      },
+      "covered_by_current_pytest": true
+    },
+    {
+      "id": "digital_basics_inverter_chain",
+      "group": "digital_basics",
+      "tb": "digital_basics/tb_inverter_chain.scs",
+      "coverage": [
+        "hierarchical_chain",
+        "multi_stage_transition",
+        "pulse_source"
+      ],
+      "required_signals": [
+        "time",
+        "in",
+        "n1",
+        "n2",
+        "n3",
+        "out"
+      ],
+      "validation": {
+        "kind": "schema_only",
+        "reason": "No bundled validator currently exists for this chain analysis case."
+      },
+      "covered_by_current_pytest": false
+    },
+    {
+      "id": "noise_gen",
+      "group": "noise_gen",
+      "tb": "noise_gen/tb_noise_gen.scs",
+      "coverage": [
+        "dc_source",
+        "random_normal",
+        "analog_output"
+      ],
+      "required_signals": [
+        "time",
+        "vin_i",
+        "vout_o"
+      ],
+      "validation": {
+        "kind": "validator",
+        "module": "noise_gen/validate_noise_gen.py",
+        "functions": [
+          "validate_csv"
+        ]
+      },
+      "covered_by_current_pytest": true
+    }
+  ]
+}

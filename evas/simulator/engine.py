@@ -10,10 +10,44 @@ This is a behavioral simulator that:
 - Records output waveforms
 """
 import math
-from dataclasses import dataclass
+import time as _wall_time
+from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
 import numpy as np
+
+
+class _LazyFutureNodeVoltages:
+    """Resolve future source values only when cross exact-touch handling needs them."""
+
+    __slots__ = ("_source_waveforms", "_time")
+
+    def __init__(self, source_waveforms: Dict[str, Callable[[float], float]], time: float):
+        self._source_waveforms = source_waveforms
+        self._time = float(time)
+
+    def _with_fallback(self, fallback: Dict[str, float]):
+        return _BoundLazyFutureNodeVoltages(self._source_waveforms, self._time, fallback)
+
+
+class _BoundLazyFutureNodeVoltages:
+    __slots__ = ("_source_waveforms", "_time", "_fallback")
+
+    def __init__(
+        self,
+        source_waveforms: Dict[str, Callable[[float], float]],
+        time: float,
+        fallback: Dict[str, float],
+    ):
+        self._source_waveforms = source_waveforms
+        self._time = time
+        self._fallback = fallback
+
+    def get(self, node: str, default: float = None):
+        waveform = self._source_waveforms.get(node)
+        if waveform is not None:
+            return waveform(self._time)
+        return self._fallback.get(node, default)
 
 
 @dataclass
@@ -113,9 +147,9 @@ class TransitionState:
         ramp_time = self.rise_time if going_up else self.fall_time
         t_end = t_begin + ramp_time
 
-        breakpoints = []
+        best: Optional[float] = None
         if t_begin > time:
-            breakpoints.append(t_begin)
+            best = t_begin
         # Add interior breakpoints only for transitions long enough to be
         # observable at the current tran maxstep. Very short transition()
         # filters are solver-internal smoothing; forcing their midpoints into
@@ -124,10 +158,11 @@ class TransitionState:
             for frac in (0.25, 0.5, 0.75):
                 t_inner = t_begin + frac * ramp_time
                 if t_inner > time and t_inner < t_end:
-                    breakpoints.append(t_inner)
-        if t_end > time:
-            breakpoints.append(t_end)
-        return min(breakpoints) if breakpoints else None
+                    if best is None or t_inner < best:
+                        best = t_inner
+        if t_end > time and (best is None or t_end < best):
+            best = t_end
+        return best
 
 
 @dataclass
@@ -309,12 +344,19 @@ class Source:
     """A voltage source stimulus."""
     node: str
     waveform: Callable[[float], float]  # time → voltage
+    breakpoint_fn: Optional[Callable[[float], Optional[float]]] = field(
+        init=False,
+        repr=False,
+        default=None,
+    )
+
+    def __post_init__(self):
+        self.breakpoint_fn = getattr(self.waveform, '_next_breakpoint', None)
 
     def next_breakpoint(self, time: float) -> Optional[float]:
-        bpfn = getattr(self.waveform, '_next_breakpoint', None)
-        if bpfn is None:
+        if self.breakpoint_fn is None:
             return None
-        return bpfn(time)
+        return self.breakpoint_fn(time)
 
 
 @dataclass
@@ -357,7 +399,8 @@ class Simulator:
             vabstol: float = 1e-6,
             min_step: float = None,
             record_step: float = None,
-            skip_source_error_control: bool = False) -> SimResult:
+            skip_source_error_control: bool = False,
+            profile_sections: bool = False) -> SimResult:
         """Run transient simulation with adaptive step control near cross events."""
         if tstep is None:
             tstep = tstop / 10000
@@ -385,9 +428,21 @@ class Simulator:
             "output_step_clamps": 0,
             "err_ratio_skipped_outputs": 0,
             "err_ratio_skipped_sources": 0,
+            "future_node_snapshots": 0,
+            "future_node_lazy_descriptors": 0,
             "steps_total": 0,
         }
+        self._profile_times: Dict[str, float] = {}
+        profile_clock = _wall_time.perf_counter if profile_sections else None
+
+        def _add_profile_time(name: str, start: float):
+            if profile_clock is not None:
+                elapsed = profile_clock() - start
+                self._profile_times[name] = self._profile_times.get(name, 0.0) + elapsed
+
         source_nodes = {src.node for src in self.sources}
+        source_future_waveforms = {src.node: src.waveform for src in self.sources}
+        source_breakpoint_sources = [src for src in self.sources if src.breakpoint_fn is not None]
         transition_breakpoint_min_ramp = 0.15 * max_step
 
         def _set_transition_breakpoint_threshold(model):
@@ -402,6 +457,19 @@ class Simulator:
         for model in self.models:
             if hasattr(model, "_set_nominal_step"):
                 model._set_nominal_step(tstep)
+        breakpoint_models = [
+            model for model in self.models
+            if bool(getattr(model, "_has_dynamic_breakpoints_tree", lambda: True)())
+        ]
+        bound_step_models = [
+            model for model in self.models
+            if bool(getattr(model, "_uses_bound_step_tree", lambda: True)())
+        ]
+        model_needs_future_node_voltages = tuple(
+            bool(getattr(model, "_needs_future_node_voltages_tree", lambda: False)())
+            for model in self.models
+        )
+        models_need_future_node_voltages = any(model_needs_future_node_voltages)
 
         def _set_initial_condition_mode(model, enabled: bool):
             if hasattr(model, "_set_initial_condition_mode"):
@@ -436,6 +504,28 @@ class Simulator:
         for model in self.models:
             _set_initial_condition_mode(model, False)
 
+        model_output_nodes: set[str] = set()
+        model_output_versions: Optional[tuple[int, ...]] = None
+        err_ratio_nodes: tuple[str, ...] = ()
+        err_ratio_cache_key = None
+        err_ratio_skipped_outputs_per_step = 0
+        err_ratio_skipped_sources_per_step = 0
+
+        def _refresh_model_output_nodes() -> set[str]:
+            nonlocal model_output_nodes, model_output_versions
+            versions = tuple(
+                int(getattr(model, "_output_nodes_version", len(model.output_nodes)))
+                for model in self.models
+            )
+            if versions != model_output_versions:
+                model_output_nodes = set()
+                for model in self.models:
+                    model_output_nodes.update(model.output_nodes.keys())
+                model_output_versions = versions
+            return model_output_nodes
+
+        _refresh_model_output_nodes()
+
         # Record initial state
         self._record_point(0.0)
         self._step_sizes.append(0.0)
@@ -450,7 +540,8 @@ class Simulator:
                 dt = min(dynamic_step, tstep, max_step, tstop - time)
 
             # Check for breakpoints from sources (PWL knees, pulse edges)
-            for src in self.sources:
+            _section_start = profile_clock() if profile_clock is not None else 0.0
+            for src in source_breakpoint_sources:
                 bp = src.next_breakpoint(time)
                 if bp is not None and bp > time and bp < time + dt:
                     dt = bp - time
@@ -458,9 +549,12 @@ class Simulator:
                     self._perf_stats["source_breakpoint_clamps"] += 1
                     if dt < 1e-18:
                         dt = 1e-18
+            if profile_clock is not None:
+                _add_profile_time("source_breakpoint_scan_s", _section_start)
 
             # Check for breakpoints from transition operators
-            for model in self.models:
+            _section_start = profile_clock() if profile_clock is not None else 0.0
+            for model in breakpoint_models:
                 bp = model.next_breakpoint(time)
                 if bp is not None and bp > time and bp < time + dt:
                     dt = bp - time
@@ -468,14 +562,19 @@ class Simulator:
                     self._perf_stats["model_breakpoint_clamps"] += 1
                     if dt < 1e-18:
                         dt = 1e-18
+            if profile_clock is not None:
+                _add_profile_time("model_breakpoint_scan_s", _section_start)
 
             # Respect $bound_step from models
-            for model in self.models:
+            _section_start = profile_clock() if profile_clock is not None else 0.0
+            for model in bound_step_models:
                 bs = model._bound_step
                 if bs > 0 and dt > bs:
                     dt = bs
                     force_record_point = True
                     self._perf_stats["bound_step_clamps"] += 1
+            if profile_clock is not None:
+                _add_profile_time("bound_step_scan_s", _section_start)
 
             if next_record_time is not None:
                 if next_record_time > time and next_record_time < time + dt:
@@ -488,40 +587,58 @@ class Simulator:
                 self._perf_stats["min_step_clamps"] += 1
 
             prev_time = time
+            _section_start = profile_clock() if profile_clock is not None else 0.0
             prev_nv = dict(self.node_voltages)
+            if profile_clock is not None:
+                _add_profile_time("dict_prev_snapshot_s", _section_start)
             time += dt
 
             # Update source voltages
+            _section_start = profile_clock() if profile_clock is not None else 0.0
             for src in self.sources:
                 self.node_voltages[src.node] = src.waveform(time)
+            if profile_clock is not None:
+                _add_profile_time("source_update_s", _section_start)
 
-            future_time = time + max(1e-18, min(dt * 1e-6, 1e-15))
-            future_nv = dict(self.node_voltages)
-            for src in self.sources:
-                future_nv[src.node] = src.waveform(future_time)
+            _section_start = profile_clock() if profile_clock is not None else 0.0
+            future_nv = None
+            if models_need_future_node_voltages:
+                future_time = time + max(1e-18, min(dt * 1e-6, 1e-15))
+                future_nv = _LazyFutureNodeVoltages(source_future_waveforms, future_time)
+                self._perf_stats["future_node_lazy_descriptors"] += 1
+            if profile_clock is not None:
+                _add_profile_time("dict_future_snapshot_s", _section_start)
 
             # Evaluate all models
-            for model in self.models:
-                model._prepare_step(prev_nv, self.node_voltages, prev_time, time, future_nv)
+            cross_fired = False
+            for model, model_needs_future in zip(self.models, model_needs_future_node_voltages):
+                _section_start = profile_clock() if profile_clock is not None else 0.0
+                model_future_nv = (
+                    future_nv
+                    if future_nv is not None
+                    and model_needs_future
+                    else None
+                )
+                model._prepare_step(prev_nv, self.node_voltages, prev_time, time, model_future_nv)
+                if profile_clock is not None:
+                    _add_profile_time("model_prepare_step_s", _section_start)
+                _section_start = profile_clock() if profile_clock is not None else 0.0
                 model.evaluate(self.node_voltages, time)
+                if profile_clock is not None:
+                    _add_profile_time("model_evaluate_s", _section_start)
+                _section_start = profile_clock() if profile_clock is not None else 0.0
                 model._expire_absolute_timers(time)
                 if model.post_update_events(self.node_voltages, time):
                     model.refresh_outputs(self.node_voltages, time)
+                if profile_clock is not None:
+                    _add_profile_time("model_post_update_s", _section_start)
+                if getattr(model, "_step_event_fired", False):
+                    cross_fired = True
 
             # Check if any cross/above event fired this step
-            cross_fired = False
-            for model in self.models:
-                for cd in model.cross_detectors.values():
-                    if cd.last_triggered:
-                        cross_fired = True
-                        break
-                if not cross_fired:
-                    for ad in model.above_detectors.values():
-                        if ad.last_triggered:
-                            cross_fired = True
-                            break
-                if cross_fired:
-                    break
+            _section_start = profile_clock() if profile_clock is not None else 0.0
+            if profile_clock is not None:
+                _add_profile_time("cross_above_scan_s", _section_start)
 
             if cross_fired and refine_steps_left == 0 and dt > tstep / refine_factor:
                 refine_dt = dt / refine_factor
@@ -534,16 +651,34 @@ class Simulator:
             # Tolerance-guided dynamic step adaptation (voltage-domain heuristic).
             # This is not full LTE/Newton control, but gives user-visible precision control.
             err_ratio = 0.0
-            model_output_nodes = set()
-            for model in self.models:
-                model_output_nodes.update(model.output_nodes.keys())
-            for node, vnew in self.node_voltages.items():
-                if node in model_output_nodes:
-                    self._perf_stats["err_ratio_skipped_outputs"] += 1
-                    continue
-                if skip_source_error_control and node in source_nodes:
-                    self._perf_stats["err_ratio_skipped_sources"] += 1
-                    continue
+            _section_start = profile_clock() if profile_clock is not None else 0.0
+            model_output_nodes = _refresh_model_output_nodes()
+            if profile_clock is not None:
+                _add_profile_time("model_output_set_s", _section_start)
+            _section_start = profile_clock() if profile_clock is not None else 0.0
+            cache_key = (len(self.node_voltages), model_output_versions, bool(skip_source_error_control))
+            if cache_key != err_ratio_cache_key:
+                err_ratio_nodes_list = []
+                skipped_outputs = 0
+                skipped_sources = 0
+                for node in self.node_voltages:
+                    if node in model_output_nodes:
+                        skipped_outputs += 1
+                        continue
+                    if skip_source_error_control and node in source_nodes:
+                        skipped_sources += 1
+                        continue
+                    err_ratio_nodes_list.append(node)
+                err_ratio_nodes = tuple(err_ratio_nodes_list)
+                err_ratio_skipped_outputs_per_step = skipped_outputs
+                err_ratio_skipped_sources_per_step = skipped_sources
+                err_ratio_cache_key = cache_key
+            if err_ratio_skipped_outputs_per_step:
+                self._perf_stats["err_ratio_skipped_outputs"] += err_ratio_skipped_outputs_per_step
+            if err_ratio_skipped_sources_per_step:
+                self._perf_stats["err_ratio_skipped_sources"] += err_ratio_skipped_sources_per_step
+            for node in err_ratio_nodes:
+                vnew = self.node_voltages[node]
                 vold = prev_nv.get(node, vnew)
                 dv = abs(vnew - vold)
                 vref = max(abs(vnew), abs(vold))
@@ -552,6 +687,8 @@ class Simulator:
                     er = dv / tol
                     if er > err_ratio:
                         err_ratio = er
+            if profile_clock is not None:
+                _add_profile_time("err_ratio_node_scan_s", _section_start)
             if err_ratio > 1.0:
                 scale = min(4.0, max(1.2, math.sqrt(err_ratio)))
                 dynamic_step = max(min_step, dynamic_step / scale)
@@ -570,26 +707,38 @@ class Simulator:
                 )
 
             if should_record:
+                _section_start = profile_clock() if profile_clock is not None else 0.0
                 self._record_point(time)
                 self._step_sizes.append(dt)
                 if next_record_time is not None:
                     while next_record_time <= time + 1e-18:
                         next_record_time += record_step
+                if profile_clock is not None:
+                    _add_profile_time("record_point_s", _section_start)
             self._perf_stats["steps_total"] += 1
 
         # Fire final_step events
+        _section_start = profile_clock() if profile_clock is not None else 0.0
         for model in self.models:
             model.final_step(self.node_voltages, time)
+        if profile_clock is not None:
+            _add_profile_time("final_step_s", _section_start)
 
         # Close any open file handles
+        _section_start = profile_clock() if profile_clock is not None else 0.0
         for model in self.models:
             model._cleanup_files()
+        if profile_clock is not None:
+            _add_profile_time("cleanup_files_s", _section_start)
 
         # Convert to arrays
+        _section_start = profile_clock() if profile_clock is not None else 0.0
         time_arr = np.array(self.time_points)
         signals = {}
         for name, data in self.recorded_signals.items():
             signals[name] = np.array(data)
+        if profile_clock is not None:
+            _add_profile_time("result_array_conversion_s", _section_start)
 
         return SimResult(time=time_arr, signals=signals,
                          step_sizes=np.array(self._step_sizes))
