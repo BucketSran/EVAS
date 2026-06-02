@@ -756,6 +756,42 @@ class TestIndexedMigrationHarness:
         assert "Indexed snapshot profile:" in log
         assert "max_abs_diff = 0.0" in log
 
+    def test_evas_simulate_logs_indexed_arrays_when_opted_in(self, tmp_path, monkeypatch):
+        va = tmp_path / "pass_through.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module pass_through(vin, vout);
+                input vin;
+                output vout;
+                electrical vin, vout;
+
+                analog begin
+                    V(vout) <+ V(vin);
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_pass_through.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (vin 0) vsource type=dc dc=0.75
+            I0 (vin vout) pass_through
+            tran tran stop=2n step=1n
+            save vin:3f vout:3f
+            ahdl_include "pass_through.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_INDEXED_ARRAYS", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_indexed_arrays = true" in log
+        assert "indexed_array_err_ratio_reads" in log
+        assert "Indexed array profile:" in log
+        assert "max_abs_diff = 0.0" in log
+
 
 class TestEvasProfileMapping:
 

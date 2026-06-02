@@ -16,7 +16,7 @@ from typing import Callable, Dict, List, Optional
 
 import numpy as np
 
-from evas.simulator.indexed import IndexedVoltageSnapshotter
+from evas.simulator.indexed import IndexedVoltageArray, IndexedVoltageSnapshotter
 
 
 class _LazyFutureNodeVoltages:
@@ -403,7 +403,8 @@ class Simulator:
             record_step: float = None,
             skip_source_error_control: bool = False,
             profile_sections: bool = False,
-            indexed_snapshot_profile: bool = False) -> SimResult:
+            indexed_snapshot_profile: bool = False,
+            indexed_arrays: bool = False) -> SimResult:
         """Run transient simulation with adaptive step control near cross events."""
         if tstep is None:
             tstep = tstop / 10000
@@ -437,11 +438,24 @@ class Simulator:
             "indexed_snapshot_dynamic_nodes": 0,
             "indexed_snapshot_mismatches": 0,
             "indexed_snapshot_values_checked": 0,
+            "indexed_array_dynamic_nodes": 0,
+            "indexed_array_err_ratio_reads": 0,
+            "indexed_array_mismatches": 0,
+            "indexed_array_record_reads": 0,
+            "indexed_array_snapshots": 0,
+            "indexed_array_source_updates": 0,
+            "indexed_array_syncs": 0,
+            "indexed_array_values_checked": 0,
             "steps_total": 0,
         }
         self._profile_times: Dict[str, float] = {}
         self._indexed_snapshot_stats: Dict[str, object] = {}
-        profile_clock = _wall_time.perf_counter if (profile_sections or indexed_snapshot_profile) else None
+        self._indexed_array_stats: Dict[str, object] = {}
+        profile_clock = (
+            _wall_time.perf_counter
+            if (profile_sections or indexed_snapshot_profile or indexed_arrays)
+            else None
+        )
 
         def _add_profile_time(name: str, start: float):
             if profile_clock is not None:
@@ -547,8 +561,64 @@ class Simulator:
                 "dynamic_nodes": 0,
             }
 
+        indexed_array = None
+        if indexed_arrays:
+            indexed_array = IndexedVoltageArray.from_names(
+                sorted(set(self.node_voltages) | set(self.recorded_signals) | source_nodes | model_output_nodes)
+            )
+            indexed_array.update_from_mapping(self.node_voltages)
+            self._indexed_array_stats = {
+                "node_count": indexed_array.node_count,
+                "snapshots": 0,
+                "syncs": 0,
+                "source_updates": 0,
+                "record_reads": 0,
+                "err_ratio_reads": 0,
+                "checked_values": 0,
+                "max_abs_diff": 0.0,
+                "max_abs_diff_node": "",
+                "dynamic_nodes": 0,
+            }
+
+        def _refresh_indexed_array_stats():
+            if indexed_array is None:
+                return
+            self._indexed_array_stats["node_count"] = indexed_array.node_count
+            self._indexed_array_stats["snapshots"] = self._perf_stats["indexed_array_snapshots"]
+            self._indexed_array_stats["syncs"] = self._perf_stats["indexed_array_syncs"]
+            self._indexed_array_stats["source_updates"] = self._perf_stats[
+                "indexed_array_source_updates"
+            ]
+            self._indexed_array_stats["record_reads"] = self._perf_stats["indexed_array_record_reads"]
+            self._indexed_array_stats["err_ratio_reads"] = self._perf_stats[
+                "indexed_array_err_ratio_reads"
+            ]
+            self._indexed_array_stats["checked_values"] = self._perf_stats[
+                "indexed_array_values_checked"
+            ]
+            self._indexed_array_stats["dynamic_nodes"] = indexed_array.dynamic_interns
+            self._perf_stats["indexed_array_dynamic_nodes"] = indexed_array.dynamic_interns
+
+        def _record_indexed_array_diff(max_diff: float, max_node: str, checked: int):
+            if indexed_array is None:
+                return
+            self._perf_stats["indexed_array_values_checked"] += checked
+            if max_diff > float(self._indexed_array_stats["max_abs_diff"]):
+                self._indexed_array_stats["max_abs_diff"] = max_diff
+                self._indexed_array_stats["max_abs_diff_node"] = max_node
+            if max_diff != 0.0:
+                self._perf_stats["indexed_array_mismatches"] += 1
+            _refresh_indexed_array_stats()
+
+        if indexed_array is not None:
+            max_diff, max_node, checked = indexed_array.max_abs_diff_mapping(self.node_voltages)
+            _record_indexed_array_diff(max_diff, max_node, checked)
+
         # Record initial state
-        self._record_point(0.0)
+        initial_record_reads = self._record_point(0.0, indexed_array)
+        if indexed_array is not None:
+            self._perf_stats["indexed_array_record_reads"] += initial_record_reads
+            _refresh_indexed_array_stats()
         self._step_sizes.append(0.0)
 
         # Main simulation loop
@@ -612,6 +682,15 @@ class Simulator:
             prev_nv = dict(self.node_voltages)
             if profile_clock is not None:
                 _add_profile_time("dict_prev_snapshot_s", _section_start)
+            prev_indexed_values = None
+            if indexed_array is not None:
+                _section_start = profile_clock() if profile_clock is not None else 0.0
+                prev_indexed_values = indexed_array.snapshot()
+                max_diff, max_node, checked = indexed_array.max_abs_diff_mapping(prev_nv)
+                self._perf_stats["indexed_array_snapshots"] += 1
+                _record_indexed_array_diff(max_diff, max_node, checked)
+                if profile_clock is not None:
+                    _add_profile_time("indexed_array_prev_snapshot_s", _section_start)
             if indexed_snapshotter is not None:
                 _section_start = profile_clock() if profile_clock is not None else 0.0
                 prev_indexed_snapshot = indexed_snapshotter.snapshot_from_mapping(prev_nv)
@@ -640,7 +719,13 @@ class Simulator:
             # Update source voltages
             _section_start = profile_clock() if profile_clock is not None else 0.0
             for src in self.sources:
-                self.node_voltages[src.node] = src.waveform(time)
+                value = src.waveform(time)
+                self.node_voltages[src.node] = value
+                if indexed_array is not None:
+                    indexed_array.set(src.node, value)
+                    self._perf_stats["indexed_array_source_updates"] += 1
+            if indexed_array is not None:
+                _refresh_indexed_array_stats()
             if profile_clock is not None:
                 _add_profile_time("source_update_s", _section_start)
 
@@ -678,6 +763,15 @@ class Simulator:
                     _add_profile_time("model_post_update_s", _section_start)
                 if getattr(model, "_step_event_fired", False):
                     cross_fired = True
+
+            if indexed_array is not None:
+                _section_start = profile_clock() if profile_clock is not None else 0.0
+                indexed_array.update_from_mapping(self.node_voltages)
+                self._perf_stats["indexed_array_syncs"] += 1
+                max_diff, max_node, checked = indexed_array.max_abs_diff_mapping(self.node_voltages)
+                _record_indexed_array_diff(max_diff, max_node, checked)
+                if profile_clock is not None:
+                    _add_profile_time("indexed_array_sync_s", _section_start)
 
             # Check if any cross/above event fired this step
             _section_start = profile_clock() if profile_clock is not None else 0.0
@@ -722,8 +816,13 @@ class Simulator:
             if err_ratio_skipped_sources_per_step:
                 self._perf_stats["err_ratio_skipped_sources"] += err_ratio_skipped_sources_per_step
             for node in err_ratio_nodes:
-                vnew = self.node_voltages[node]
-                vold = prev_nv.get(node, vnew)
+                if indexed_array is not None:
+                    vnew = indexed_array.get(node, self.node_voltages.get(node, 0.0))
+                    vold = indexed_array.get_from_snapshot(prev_indexed_values, node, vnew)
+                    self._perf_stats["indexed_array_err_ratio_reads"] += 1
+                else:
+                    vnew = self.node_voltages[node]
+                    vold = prev_nv.get(node, vnew)
                 dv = abs(vnew - vold)
                 vref = max(abs(vnew), abs(vold))
                 tol = reltol * vref + vabstol
@@ -731,6 +830,8 @@ class Simulator:
                     er = dv / tol
                     if er > err_ratio:
                         err_ratio = er
+            if indexed_array is not None:
+                _refresh_indexed_array_stats()
             if profile_clock is not None:
                 _add_profile_time("err_ratio_node_scan_s", _section_start)
             if err_ratio > 1.0:
@@ -752,7 +853,10 @@ class Simulator:
 
             if should_record:
                 _section_start = profile_clock() if profile_clock is not None else 0.0
-                self._record_point(time)
+                record_reads = self._record_point(time, indexed_array)
+                if indexed_array is not None:
+                    self._perf_stats["indexed_array_record_reads"] += record_reads
+                    _refresh_indexed_array_stats()
                 self._step_sizes.append(dt)
                 if next_record_time is not None:
                     while next_record_time <= time + 1e-18:
@@ -787,11 +891,17 @@ class Simulator:
         return SimResult(time=time_arr, signals=signals,
                          step_sizes=np.array(self._step_sizes))
 
-    def _record_point(self, time: float):
+    def _record_point(self, time: float, indexed_voltages: Optional[IndexedVoltageArray] = None) -> int:
         self.time_points.append(time)
+        reads = 0
         for name in self.recorded_signals:
-            val = self.node_voltages.get(name, 0.0)
+            if indexed_voltages is not None:
+                val = indexed_voltages.get(name, 0.0)
+                reads += 1
+            else:
+                val = self.node_voltages.get(name, 0.0)
             self.recorded_signals[name].append(val)
+        return reads
 
 
 # ─── Waveform helpers ───

@@ -599,6 +599,36 @@ class TestSimulator:
         assert "dict_prev_snapshot_s" in sim._profile_times
         assert "indexed_prev_snapshot_s" in sim._profile_times
 
+    def test_indexed_arrays_preserve_source_record_and_error_scan_results(self):
+        default = Simulator()
+        default.add_source("vin", ramp(0.0, 1.0, 0.0, 1e-9))
+        default.record("vin")
+        default_result = default.run(tstop=2e-9, tstep=1e-9, reltol=1e-3, vabstol=1e-6)
+
+        indexed = Simulator()
+        indexed.add_source("vin", ramp(0.0, 1.0, 0.0, 1e-9))
+        indexed.record("vin")
+        indexed_result = indexed.run(
+            tstop=2e-9,
+            tstep=1e-9,
+            reltol=1e-3,
+            vabstol=1e-6,
+            indexed_arrays=True,
+        )
+
+        assert indexed_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert indexed_result.step_sizes.tolist() == pytest.approx(default_result.step_sizes.tolist())
+        assert indexed_result.signals["vin"].tolist() == pytest.approx(
+            default_result.signals["vin"].tolist()
+        )
+        assert indexed._perf_stats["indexed_array_source_updates"] > 0
+        assert indexed._perf_stats["indexed_array_record_reads"] == len(indexed_result.time)
+        assert indexed._perf_stats["indexed_array_err_ratio_reads"] > 0
+        assert indexed._perf_stats["indexed_array_mismatches"] == 0
+        assert indexed._indexed_array_stats["max_abs_diff"] == pytest.approx(0.0)
+        assert "indexed_array_prev_snapshot_s" in indexed._profile_times
+        assert "indexed_array_sync_s" in indexed._profile_times
+
 
 # ===========================================================================
 # CompiledModel base-class helpers

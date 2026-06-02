@@ -208,6 +208,100 @@ class IndexedVoltageSnapshotter:
 
 
 @dataclass
+class IndexedVoltageArray:
+    """Persistent array-backed voltage mirror for opt-in simulator paths.
+
+    Unlike ``IndexedVoltages``, this helper can grow when model output nodes
+    appear at runtime.  The dict-backed simulator remains authoritative while
+    this mirror lets low-risk hot-loop reads exercise the node-id layout that a
+    native backend will consume.
+    """
+
+    node_index: NodeIndex
+    values: List[float] = field(default_factory=list)
+    dynamic_interns: int = 0
+
+    @classmethod
+    def from_names(cls, names: Iterable[str]) -> "IndexedVoltageArray":
+        node_index = build_node_index(names)
+        return cls(node_index=node_index, values=[0.0] * len(node_index))
+
+    @classmethod
+    def from_mapping(cls, voltages: Mapping[str, float]) -> "IndexedVoltageArray":
+        array = cls.from_names(voltages.keys())
+        array.update_from_mapping(voltages)
+        return array
+
+    @property
+    def node_count(self) -> int:
+        return len(self.node_index)
+
+    def _ensure_node(self, name: str) -> int:
+        before = len(self.node_index)
+        node_id = self.node_index.intern(name)
+        if len(self.node_index) > before:
+            self.values.append(0.0)
+            self.dynamic_interns += 1
+        return node_id
+
+    def ensure_nodes(self, names: Iterable[str]) -> int:
+        before = len(self.node_index)
+        for name in names:
+            if not self.node_index.has(name):
+                self._ensure_node(name)
+        return len(self.node_index) - before
+
+    def update_from_mapping(self, voltages: Mapping[str, float]) -> int:
+        added = self.ensure_nodes(voltages.keys())
+        for name, value in voltages.items():
+            self.values[self.node_index.id_of(name)] = float(value)
+        return added
+
+    def set(self, name: str, value: float) -> None:
+        self.values[self._ensure_node(name)] = float(value)
+
+    def get(self, name: str, default: float = 0.0) -> float:
+        if not self.node_index.has(name):
+            return float(default)
+        return self.values[self.node_index.id_of(name)]
+
+    def get_from_snapshot(
+        self,
+        snapshot: Optional[Sequence[float]],
+        name: str,
+        default: float = 0.0,
+    ) -> float:
+        if snapshot is None or not self.node_index.has(name):
+            return float(default)
+        node_id = self.node_index.id_of(name)
+        if node_id >= len(snapshot):
+            return float(default)
+        return float(snapshot[node_id])
+
+    def snapshot(self) -> List[float]:
+        return list(self.values)
+
+    def to_mapping(self) -> Dict[str, float]:
+        return {
+            name: self.values[node_id]
+            for node_id, name in enumerate(self.node_index.names)
+        }
+
+    def max_abs_diff_mapping(self, voltages: Mapping[str, float]) -> Tuple[float, str, int]:
+        self.ensure_nodes(voltages.keys())
+        max_diff = 0.0
+        max_node = ""
+        checked = 0
+        for name, value in voltages.items():
+            diff = abs(float(value) - self.values[self.node_index.id_of(name)])
+            checked += 1
+            if diff > max_diff:
+                max_diff = diff
+                max_node = name
+        return max_diff, max_node, checked
+
+
+@dataclass
 class IndexedRunPlan:
     """Opt-in lowering plan for a dict-backed Simulator instance.
 

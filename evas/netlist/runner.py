@@ -940,6 +940,13 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     ) or os.environ.get("EVAS_INDEXED_SNAPSHOT_PROFILE", "").strip().lower() in {
         "1", "true", "yes", "on", "enabled"
     }
+    indexed_arrays = _simopt_bool(
+        simopt,
+        'evas_indexed_arrays',
+        False,
+    ) or os.environ.get("EVAS_INDEXED_ARRAYS", "").strip().lower() in {
+        "1", "true", "yes", "on", "enabled"
+    }
     indexed_plan = None
     if indexed_parity:
         indexed_plan = build_indexed_run_plan(
@@ -972,6 +979,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write(f"    indexed_node_count = {indexed_plan.node_count}")
     if indexed_snapshot_profile:
         log.write("    evas_indexed_snapshot_profile = true")
+    if indexed_arrays:
+        log.write("    evas_indexed_arrays = true")
     log.write("")
 
     t_sim_start = time.time()
@@ -983,7 +992,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
                      record_step=tstep,
                      skip_source_error_control=skip_source_error_control,
                      profile_sections=profile_sections,
-                     indexed_snapshot_profile=indexed_snapshot_profile)
+                     indexed_snapshot_profile=indexed_snapshot_profile,
+                     indexed_arrays=indexed_arrays)
 
     for pct in range(10, 101, 10):
         t_at = tstop * pct / 100.0
@@ -1016,6 +1026,10 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     if getattr(sim, "_indexed_snapshot_stats", None):
         log.write("Indexed snapshot profile:")
         for key, value in sorted(sim._indexed_snapshot_stats.items()):
+            log.write(f"    {key} = {value}")
+    if getattr(sim, "_indexed_array_stats", None):
+        log.write("Indexed array profile:")
+        for key, value in sorted(sim._indexed_array_stats.items()):
             log.write(f"    {key} = {value}")
 
     # Signal range summary

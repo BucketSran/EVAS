@@ -5,6 +5,7 @@ import pytest
 
 from evas.simulator.indexed import (
     IndexedVoltages,
+    IndexedVoltageArray,
     IndexedVoltageSnapshotter,
     NodeIndex,
     StateIndex,
@@ -108,6 +109,28 @@ def test_indexed_voltage_snapshotter_tracks_mapping_updates_and_diffs():
     assert diff == pytest.approx(0.1)
     assert node == "vin"
     assert checked == 2
+
+
+def test_indexed_voltage_array_grows_and_reads_previous_snapshots():
+    array = IndexedVoltageArray.from_names(["vin", "vout"])
+    array.update_from_mapping({"vin": 0.25, "vout": 0.75})
+
+    previous = array.snapshot()
+    array.set("vout", 0.9)
+    array.set("clk", 1.0)
+
+    assert array.node_index.names == ("vin", "vout", "clk")
+    assert array.dynamic_interns == 1
+    assert array.get("vout") == pytest.approx(0.9)
+    assert array.get("missing", -1.0) == pytest.approx(-1.0)
+    assert array.get_from_snapshot(previous, "vout", 0.0) == pytest.approx(0.75)
+    assert array.get_from_snapshot(previous, "clk", -2.0) == pytest.approx(-2.0)
+
+    diff, node, checked = array.max_abs_diff_mapping({"vin": 0.25, "vout": 0.9, "clk": 1.0})
+    assert diff == pytest.approx(0.0)
+    assert node == ""
+    assert checked == 3
+    assert array.to_mapping() == pytest.approx({"vin": 0.25, "vout": 0.9, "clk": 1.0})
 
 
 def test_indexed_run_plan_collects_sources_records_and_model_nodes():
