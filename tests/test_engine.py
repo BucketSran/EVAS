@@ -785,6 +785,53 @@ endmodule
         assert fast_sim._perf_stats["static_branch_fastpath_fallbacks_total"] == 0
         assert fast_model._static_branch_fastpath_enabled is False
 
+    def test_static_branch_fastpath_uses_indexed_node_ids_when_array_enabled(self):
+        src = """\
+`include "disciplines.vams"
+module pass_through(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    analog begin
+        V(vout) <+ V(vin);
+    end
+endmodule
+"""
+        DefaultModel = compile_module(parse(src))
+        FastModel = compile_module(parse(src), static_branch_fastpath_codegen=True)
+
+        default_model = DefaultModel()
+        default_model.node_map = {"vin": "VIN", "vout": "VOUT"}
+        default = Simulator()
+        default.add_source("VIN", ramp(0.0, 1.0, 0.0, 1e-9))
+        default.add_model(default_model)
+        default.record("VOUT")
+        default_result = default.run(tstop=2e-9, tstep=1e-9)
+
+        fast_model = FastModel()
+        fast_model.node_map = {"vin": "VIN", "vout": "VOUT"}
+        fast = Simulator()
+        fast.add_source("VIN", ramp(0.0, 1.0, 0.0, 1e-9))
+        fast.add_model(fast_model)
+        fast.record("VOUT")
+        fast_result = fast.run(
+            tstop=2e-9,
+            tstep=1e-9,
+            indexed_arrays=True,
+            static_branch_fastpath=True,
+        )
+
+        assert fast_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert fast_result.signals["VOUT"].tolist() == pytest.approx(
+            default_result.signals["VOUT"].tolist()
+        )
+        assert fast._perf_stats["static_branch_direct_array_models"] == 1
+        assert fast._perf_stats["static_branch_direct_array_read_nodes"] == 1
+        assert fast._perf_stats["static_branch_direct_array_write_nodes"] == 1
+        assert fast._perf_stats["static_branch_fastpath_fallbacks_total"] == 0
+        assert fast._perf_stats["indexed_voltage_reads"] == 0
+        assert fast._perf_stats["indexed_output_write_throughs"] == 0
+        assert fast._perf_stats["indexed_post_model_sync_repairs"] == 0
+
 
 # ===========================================================================
 # CompiledModel base-class helpers
@@ -896,6 +943,19 @@ class TestCompiledModelHelpers:
         assert self.model._get_static_branch_voltage("vin", {"vin": 1.0}) == pytest.approx(0.4)
         assert calls == []
         assert self.model._perf_stats["static_branch_fastpath_fallbacks"] == 1
+
+    def test_static_branch_slot_voltage_falls_back_to_event_interpolation(self):
+        class SlotModel(CompiledModel):
+            _static_voltage_read_nodes = ("vin",)
+
+        model = SlotModel()
+        model._set_static_branch_indexed_io((0,), (), (), [1.2])
+        model._prepare_step({"vin": 0.0}, {"vin": 1.0}, 0.0, 10e-9)
+        model._event_time = 4e-9
+        model._event_context_active = True
+
+        assert model._get_static_branch_voltage_by_slot(0, {"vin": 1.0}) == pytest.approx(0.4)
+        assert model._perf_stats["static_branch_fastpath_fallbacks"] == 1
 
     def test_prepare_step_skips_future_snapshot_when_unneeded(self):
         self.model._prepare_step(

@@ -107,6 +107,10 @@ class CompiledModel:
         self._indexed_voltage_probe: Optional[Callable[[str, str, float, bool], None]] = None
         self._indexed_voltage_reader: Optional[Callable[[str, str], Optional[float]]] = None
         self._static_branch_fastpath_enabled: bool = False
+        self._static_branch_indexed_values: Optional[List[float]] = None
+        self._static_branch_read_node_ids: tuple[int, ...] = ()
+        self._static_branch_write_node_ids: tuple[int, ...] = ()
+        self._static_branch_write_external_nodes: tuple[str, ...] = ()
         self._node_resolution_cache_enabled: bool = False
         self._node_resolution_cache: Dict[str, str] = {}
         # Per-instance deterministic RNG streams.
@@ -178,6 +182,19 @@ class CompiledModel:
             self._perf_stats["static_branch_fastpath_fallbacks"] = 0
         for child in self._child_models:
             child._set_static_branch_fastpath_enabled(enabled)
+
+    def _set_static_branch_indexed_io(
+        self,
+        read_node_ids: tuple[int, ...] = (),
+        write_node_ids: tuple[int, ...] = (),
+        write_external_nodes: tuple[str, ...] = (),
+        values: Optional[List[float]] = None,
+    ):
+        """Install run-local node-id bindings for static branch helpers."""
+        self._static_branch_read_node_ids = tuple(read_node_ids)
+        self._static_branch_write_node_ids = tuple(write_node_ids)
+        self._static_branch_write_external_nodes = tuple(write_external_nodes)
+        self._static_branch_indexed_values = values
 
     def _set_node_resolution_cache_enabled(self, enabled: bool):
         """Cache local-to-external node mapping for the duration of a run."""
@@ -544,6 +561,23 @@ class CompiledModel:
             self._indexed_voltage_probe(node, ext, 0.0, False)
         return 0.0
 
+    def _get_static_branch_voltage_by_slot(self, slot: int, node_voltages: Dict[str, float]) -> float:
+        """Read a static branch node by run-installed node id when available."""
+        try:
+            node = self.__class__._static_voltage_read_nodes[slot]
+        except IndexError:
+            return 0.0
+        if self._event_context_active:
+            self._perf_stats["static_branch_fastpath_fallbacks"] += 1
+            return self._get_voltage(node, node_voltages)
+
+        values = self._static_branch_indexed_values
+        if values is not None and slot < len(self._static_branch_read_node_ids):
+            node_id = self._static_branch_read_node_ids[slot]
+            if 0 <= node_id < len(values):
+                return values[node_id]
+        return self._get_static_branch_voltage(node, node_voltages)
+
     def _get_static_branch_voltage(self, node: str, node_voltages: Dict[str, float]) -> float:
         """Fast helper for compile-time-static branch voltage reads.
 
@@ -592,6 +626,41 @@ class CompiledModel:
         node_voltages[ext] = value
         if self._indexed_output_writer is not None:
             self._indexed_output_writer(ext, value)
+
+    def _set_static_branch_output_by_slot(
+        self,
+        slot: int,
+        value: float,
+        node_voltages: Dict[str, float],
+    ):
+        """Write a static branch output by run-installed node id when available."""
+        try:
+            node = self.__class__._static_output_write_nodes[slot]
+        except IndexError:
+            return
+        if self._event_context_active:
+            self._perf_stats["static_branch_fastpath_fallbacks"] += 1
+            self._set_output(node, value, node_voltages)
+            return
+
+        if node not in self.output_nodes:
+            self._output_nodes_version += 1
+        self.output_nodes[node] = value
+
+        values = self._static_branch_indexed_values
+        if (
+            values is not None
+            and slot < len(self._static_branch_write_node_ids)
+            and slot < len(self._static_branch_write_external_nodes)
+        ):
+            node_id = self._static_branch_write_node_ids[slot]
+            if 0 <= node_id < len(values):
+                values[node_id] = float(value)
+                ext = self._static_branch_write_external_nodes[slot]
+                node_voltages[ext] = value
+                return
+
+        self._set_static_branch_output(node, value, node_voltages)
 
     def _set_static_branch_output(self, node: str, value: float, node_voltages: Dict[str, float]):
         """Fast helper for compile-time-static branch voltage contributions."""
@@ -950,6 +1019,8 @@ class _ModuleCompiler:
         self._stateful_func_key_cache: Dict[tuple, str] = {}
         self._discrete_assignment_key_cache: Dict[int, str] = {}
         self._discrete_assignment_counter = 0
+        self._static_branch_read_slot_by_node: Dict[str, int] = {}
+        self._static_branch_write_slot_by_node: Dict[str, int] = {}
         self._param_types = {p.name: p.param_type for p in module.parameters}
         self._var_types = {v.name: v.var_type for v in module.variables}
 
@@ -961,6 +1032,19 @@ class _ModuleCompiler:
         self._validate_spectre_operator_rules()
 
         # Collect info (port lists reserved for future use)
+        branch_io = (
+            self._collect_static_branch_io(mod.analog_block.body)
+            if mod.analog_block
+            else self._empty_static_branch_io()
+        )
+        self._static_branch_read_slot_by_node = {
+            node: idx
+            for idx, node in enumerate(sorted(branch_io["static_voltage_read_nodes"]))
+        }
+        self._static_branch_write_slot_by_node = {
+            node: idx
+            for idx, node in enumerate(sorted(branch_io["static_output_write_nodes"]))
+        }
 
         # Build arrays info
         array_vars = {}
@@ -1159,11 +1243,6 @@ class _ModuleCompiler:
         cls._uses_idtmod = self._uses_idtmod
         cls._needs_future_node_voltages = self._needs_future_node_voltages
         cls._static_branch_fastpath_codegen = self.static_branch_fastpath_codegen
-        branch_io = (
-            self._collect_static_branch_io(mod.analog_block.body)
-            if mod.analog_block
-            else self._empty_static_branch_io()
-        )
         cls._static_voltage_read_nodes = tuple(
             sorted(branch_io["static_voltage_read_nodes"])
         )
@@ -2865,6 +2944,9 @@ class _ModuleCompiler:
                 return [f"{prefix}self._set_output(f'{node}[{{int({idx_expr})}}][{{int({idx_expr2})}}]', {expr}, nv)"]
             return [f"{prefix}self._set_output(f'{node}[{{int({idx_expr})}}]', {expr}, nv)"]
         if self.static_branch_fastpath_codegen:
+            slot = self._static_branch_write_slot_by_node.get(node)
+            if slot is not None:
+                return [f"{prefix}self._set_static_branch_output_by_slot({slot}, {expr}, nv)"]
             return [f"{prefix}self._set_static_branch_output({node!r}, {expr}, nv)"]
         else:
             return [f"{prefix}self._set_output({node!r}, {expr}, nv)"]
@@ -3191,6 +3273,9 @@ class _ModuleCompiler:
                 return f"self._get_voltage(f'{node}[{{int({idx})}}][{{int({idx2})}}]', nv)"
             return f"self._get_voltage(f'{node}[{{int({idx})}}]', nv)"
         if self.static_branch_fastpath_codegen:
+            slot = self._static_branch_read_slot_by_node.get(node)
+            if slot is not None:
+                return f"self._get_static_branch_voltage_by_slot({slot}, nv)"
             return f"self._get_static_branch_voltage({node!r}, nv)"
         return f"self._get_voltage({node!r}, nv)"
 

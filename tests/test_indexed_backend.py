@@ -218,6 +218,7 @@ endmodule
     assert ModelCls._dynamic_output_write_count == 1
     assert "_set_output(f'dout[" in FastModelCls._generated_code
     assert "_set_static_branch_output('dout'" not in FastModelCls._generated_code
+    assert "_set_static_branch_output_by_slot" not in FastModelCls._generated_code
 
 
 def test_indexed_model_io_plan_includes_static_branch_io_nodes():

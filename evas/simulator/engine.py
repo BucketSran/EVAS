@@ -469,6 +469,9 @@ class Simulator:
             "indexed_voltage_read_nodes": 0,
             "indexed_voltage_reads": 0,
             "static_branch_fastpath_codegen_models": 0,
+            "static_branch_direct_array_models": 0,
+            "static_branch_direct_array_read_nodes": 0,
+            "static_branch_direct_array_write_nodes": 0,
             "static_branch_fastpath_fallbacks_total": 0,
             "static_branch_fastpath_static_read_nodes": 0,
             "static_branch_fastpath_static_write_nodes": 0,
@@ -606,11 +609,23 @@ class Simulator:
                 if setter is not None:
                     setter(enabled)
 
+        def _set_model_static_branch_indexed_io_empty():
+            def _visit(model):
+                setter = getattr(model, "_set_static_branch_indexed_io", None)
+                if setter is not None:
+                    setter()
+                for child in getattr(model, "_child_models", []) or []:
+                    _visit(child)
+
+            for model in self.models:
+                _visit(model)
+
         _set_model_indexed_output_writer(None)
         _set_model_indexed_voltage_probe(None)
         _set_model_indexed_voltage_reader(None)
         _set_model_node_resolution_cache_enabled(False)
         _set_model_static_branch_fastpath_enabled(False)
+        _set_model_static_branch_indexed_io_empty()
         _set_model_node_resolution_cache_enabled(True)
         if static_branch_fastpath:
             _set_model_static_branch_fastpath_enabled(True)
@@ -760,6 +775,53 @@ class Simulator:
                 _visit(model)
             return tuple(versions)
 
+        def _model_at_path(path: tuple[int, ...]):
+            if not path:
+                return None
+            try:
+                model = self.models[path[0]]
+                for child_idx in path[1:]:
+                    model = getattr(model, "_child_models", [])[child_idx]
+                return model
+            except (IndexError, TypeError):
+                return None
+
+        def _install_static_branch_indexed_io():
+            if (
+                indexed_array is None
+                or indexed_model_io_plan is None
+                or not static_branch_fastpath
+            ):
+                return
+            models = 0
+            read_nodes = 0
+            write_nodes = 0
+            for model_io in indexed_model_io_plan.model_ios:
+                model = _model_at_path(model_io.model_path)
+                setter = getattr(model, "_set_static_branch_indexed_io", None)
+                if model is None or setter is None:
+                    continue
+                write_external_nodes = tuple(
+                    indexed_model_io_plan.node_index.name_of(node_id)
+                    for node_id in model_io.static_output_write_node_ids
+                )
+                setter(
+                    model_io.static_voltage_read_node_ids,
+                    model_io.static_output_write_node_ids,
+                    write_external_nodes,
+                    indexed_array.values,
+                )
+                if (
+                    model_io.static_voltage_read_node_ids
+                    or model_io.static_output_write_node_ids
+                ):
+                    models += 1
+                    read_nodes += len(model_io.static_voltage_read_node_ids)
+                    write_nodes += len(model_io.static_output_write_node_ids)
+            self._perf_stats["static_branch_direct_array_models"] = models
+            self._perf_stats["static_branch_direct_array_read_nodes"] = read_nodes
+            self._perf_stats["static_branch_direct_array_write_nodes"] = write_nodes
+
         def _refresh_indexed_model_io_plan(force: bool = False):
             nonlocal indexed_model_io_versions, indexed_model_io_plan
             if indexed_array is None:
@@ -772,6 +834,7 @@ class Simulator:
                 extra_nodes=indexed_array.node_index.names,
             )
             indexed_array.ensure_nodes(indexed_model_io_plan.node_index.names)
+            _install_static_branch_indexed_io()
             indexed_model_io_versions = versions
             self._perf_stats["indexed_model_io_refreshes"] += 1
             self._perf_stats["indexed_model_io_models"] = indexed_model_io_plan.model_count
@@ -1277,6 +1340,7 @@ class Simulator:
         _set_model_indexed_voltage_reader(None)
         _set_model_node_resolution_cache_enabled(False)
         _set_model_static_branch_fastpath_enabled(False)
+        _set_model_static_branch_indexed_io_empty()
 
         return SimResult(time=time_arr, signals=signals,
                          step_sizes=np.array(self._step_sizes))

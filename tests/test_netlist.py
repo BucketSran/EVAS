@@ -836,10 +836,15 @@ class TestIndexedMigrationHarness:
         log_path = tmp_path / "evas.log"
 
         monkeypatch.setenv("EVAS_STATIC_BRANCH_FASTPATH", "1")
+        monkeypatch.setenv("EVAS_INDEXED_ARRAYS", "1")
         assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
 
         log = log_path.read_text(encoding="utf-8")
         assert "evas_static_branch_fastpath = true" in log
+        assert "evas_indexed_arrays = true" in log
+        assert "static_branch_direct_array_models = 1" in log
+        assert "static_branch_direct_array_read_nodes = 1" in log
+        assert "static_branch_direct_array_write_nodes = 1" in log
         assert "static_branch_fastpath_codegen_models = 1" in log
         assert "static_branch_fastpath_static_read_nodes = 1" in log
         assert "static_branch_fastpath_static_write_nodes = 1" in log
