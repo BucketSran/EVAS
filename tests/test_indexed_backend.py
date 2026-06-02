@@ -137,6 +137,29 @@ def test_indexed_voltage_array_grows_and_reads_previous_snapshots():
     assert array.to_mapping() == pytest.approx({"vin": 0.25, "vout": 0.9, "clk": 1.0})
 
 
+def test_indexed_voltage_array_checks_named_dirty_subset():
+    array = IndexedVoltageArray.from_names(["vin", "vout", "clk"])
+    array.update_from_mapping({"vin": 0.25, "vout": 0.75, "clk": 1.0})
+
+    array.values[array.node_index.id_of("vout")] = 0.8
+
+    diff, node, checked = array.max_abs_diff_names(
+        {"vin": 0.25, "vout": 0.75, "clk": 1.0},
+        ("vin", "clk"),
+    )
+    assert diff == pytest.approx(0.0)
+    assert node == ""
+    assert checked == 2
+
+    diff, node, checked = array.max_abs_diff_names(
+        {"vin": 0.25, "vout": 0.75, "clk": 1.0},
+        ("vout",),
+    )
+    assert diff == pytest.approx(0.05)
+    assert node == "vout"
+    assert checked == 1
+
+
 def test_indexed_model_io_plan_resolves_mapped_ports_outputs_and_parent_nodes():
     parent = CompiledModel()
     parent.node_map = {"inp": "VIN", "out": "VOUT"}

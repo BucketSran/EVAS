@@ -901,6 +901,14 @@ endmodule
             rust._perf_stats["steps_total"]
         )
         assert rust._perf_stats["rust_static_eval_output_syncs"] == 1
+        assert rust._perf_stats["indexed_array_dirty_validation_enabled"] == 1
+        assert rust._perf_stats["indexed_array_dirty_syncs"] == rust._perf_stats["steps_total"]
+        assert rust._perf_stats["indexed_array_prev_snapshot_dirty_skips"] == (
+            rust._perf_stats["steps_total"]
+        )
+        assert rust._perf_stats["indexed_array_dirty_nodes_checked"] == (
+            rust._perf_stats["steps_total"] * 2
+        )
         assert rust._perf_stats["rust_static_eval_errors"] == 0
         assert rust._perf_stats["indexed_post_model_sync_repairs"] == 0
         assert rust._indexed_array_stats["max_abs_diff"] == pytest.approx(0.0)
@@ -957,6 +965,12 @@ endmodule
             rust._perf_stats["steps_total"] * 3
         )
         assert rust._perf_stats["rust_static_eval_output_syncs"] == 3
+        assert rust._perf_stats["indexed_array_dirty_validation_enabled"] == 1
+        assert rust._perf_stats["indexed_array_dirty_syncs"] == rust._perf_stats["steps_total"]
+        assert rust._perf_stats["indexed_array_prev_snapshot_dirty_skips"] == (
+            rust._perf_stats["steps_total"]
+        )
+        assert rust._perf_stats["indexed_array_dirty_nodes_checked"] > 0
         assert rust._perf_stats["rust_static_eval_errors"] == 0
         assert rust._perf_stats["indexed_post_model_sync_repairs"] == 0
         assert rust.models[-1].output_nodes["vout"] == pytest.approx(
@@ -1001,9 +1015,57 @@ endmodule
         assert rust._perf_stats["rust_static_eval_node_voltage_syncs"] == (
             rust._perf_stats["steps_total"]
         )
+        assert rust._perf_stats["indexed_array_dirty_validation_enabled"] == 1
         assert rust.models[0].output_nodes["vout"] == pytest.approx(
             rust_result.signals["vout"][-1]
         )
+
+    def test_rust_static_eval_keeps_full_indexed_validation_for_mixed_models(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module gain(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    analog begin
+        V(vout) <+ 0.5 * V(vin) + 0.25;
+    end
+endmodule
+"""
+        RustModelCls = compile_module(parse(src))
+
+        class MirrorModel(CompiledModel):
+            def __init__(self):
+                super().__init__()
+                self.node_map = {"inp": "MID", "out": "VOUT"}
+
+            def evaluate(self, node_voltages, time):
+                value = self._get_voltage("inp", node_voltages)
+                self._set_output("out", value, node_voltages)
+
+        def build_sim():
+            sim = Simulator()
+            sim.add_source("VIN", ramp(0.0, 1.0, 0.0, 1e-9))
+            rust_model = RustModelCls()
+            rust_model.node_map = {"vin": "VIN", "vout": "MID"}
+            sim.add_model(rust_model)
+            sim.add_model(MirrorModel())
+            sim.record("VOUT")
+            return sim
+
+        default = build_sim()
+        default_result = default.run(tstop=2e-9, tstep=1e-9)
+
+        rust = build_sim()
+        rust_result = rust.run(tstop=2e-9, tstep=1e-9, rust_static_eval=True)
+
+        assert rust_result.signals["VOUT"].tolist() == pytest.approx(
+            default_result.signals["VOUT"].tolist()
+        )
+        assert rust._perf_stats["rust_static_eval_models"] == 1
+        assert rust._perf_stats["indexed_array_dirty_validation_enabled"] == 0
+        assert rust._perf_stats["indexed_array_dirty_syncs"] == 0
+        assert rust._perf_stats["indexed_post_model_sync_repairs"] == 0
 
 
 # ===========================================================================

@@ -462,6 +462,10 @@ class Simulator:
             "indexed_array_source_updates": 0,
             "indexed_array_syncs": 0,
             "indexed_array_values_checked": 0,
+            "indexed_array_dirty_validation_enabled": 0,
+            "indexed_array_dirty_syncs": 0,
+            "indexed_array_dirty_nodes_checked": 0,
+            "indexed_array_prev_snapshot_dirty_skips": 0,
             "indexed_model_io_mapped_ports": 0,
             "indexed_model_io_models": 0,
             "indexed_model_io_outputs": 0,
@@ -764,6 +768,9 @@ class Simulator:
         indexed_output_nodes_seen: set[str] = set()
         indexed_voltage_probe_max_node = ""
         indexed_voltage_read_nodes_seen: set[str] = set()
+        indexed_dirty_nodes: set[str] = set()
+        indexed_dirty_validation_nodes: Tuple[str, ...] = ()
+        indexed_dirty_validation_enabled = False
         rust_backend = load_optional_rust_backend() if rust_static_eval else None
         rust_static_eval_segments_by_start: Dict[int, Tuple[Tuple[int, ...], object, Tuple[tuple, ...]]] = {}
         rust_static_eval_segment_members: set[int] = set()
@@ -907,6 +914,15 @@ class Simulator:
             self._indexed_array_stats["checked_values"] = self._perf_stats[
                 "indexed_array_values_checked"
             ]
+            self._indexed_array_stats["dirty_validation_enabled"] = self._perf_stats[
+                "indexed_array_dirty_validation_enabled"
+            ]
+            self._indexed_array_stats["dirty_syncs"] = self._perf_stats[
+                "indexed_array_dirty_syncs"
+            ]
+            self._indexed_array_stats["dirty_nodes_checked"] = self._perf_stats[
+                "indexed_array_dirty_nodes_checked"
+            ]
             self._indexed_array_stats["dynamic_nodes"] = indexed_array.dynamic_interns
             self._indexed_array_stats["output_write_throughs"] = self._perf_stats[
                 "indexed_output_write_throughs"
@@ -1041,6 +1057,7 @@ class Simulator:
                     self._perf_stats["rust_static_eval_deferred_output_syncs"] += 1
                 if sync_node_voltages:
                     self.node_voltages[external_node] = value
+                    _mark_indexed_dirty_node(external_node)
                     self._perf_stats["rust_static_eval_node_voltage_syncs"] += 1
 
         def _record_indexed_array_diff(max_diff: float, max_node: str, checked: int):
@@ -1054,13 +1071,64 @@ class Simulator:
                 self._perf_stats["indexed_array_mismatches"] += 1
             _refresh_indexed_array_stats()
 
+        def _mark_indexed_dirty_node(node: str) -> None:
+            if (
+                indexed_dirty_validation_enabled
+                and not indexed_dirty_validation_nodes
+                and node
+            ):
+                indexed_dirty_nodes.add(node)
+
+        def _validate_indexed_array_mapping(
+            voltages: Dict[str, float],
+            *,
+            force_full: bool = False,
+        ) -> float:
+            if indexed_array is None:
+                return 0.0
+            if indexed_dirty_validation_enabled and not force_full:
+                dirty_names = (
+                    indexed_dirty_validation_nodes
+                    if indexed_dirty_validation_nodes
+                    else tuple(indexed_dirty_nodes)
+                )
+                max_diff, max_node, checked = indexed_array.max_abs_diff_names(
+                    voltages,
+                    dirty_names,
+                )
+                self._perf_stats["indexed_array_dirty_syncs"] += 1
+                self._perf_stats["indexed_array_dirty_nodes_checked"] += checked
+                _record_indexed_array_diff(max_diff, max_node, checked)
+                indexed_dirty_nodes.clear()
+                return max_diff
+            max_diff, max_node, checked = indexed_array.max_abs_diff_mapping(voltages)
+            _record_indexed_array_diff(max_diff, max_node, checked)
+            if indexed_dirty_validation_enabled:
+                indexed_dirty_nodes.clear()
+            return max_diff
+
         if indexed_array is not None:
             _refresh_indexed_model_io_plan(force=True)
             _build_rust_static_eval_plans()
+            indexed_dirty_validation_enabled = bool(
+                rust_static_eval
+                and self.models
+                and len(rust_static_eval_segment_members) == len(self.models)
+            )
+            if indexed_dirty_validation_enabled:
+                dirty_names = set(source_nodes)
+                for _, _, sync_entries in rust_static_eval_segments_by_start.values():
+                    for _, _, external_node, _ in sync_entries:
+                        dirty_names.add(external_node)
+                indexed_dirty_validation_nodes = tuple(sorted(dirty_names))
+            self._perf_stats["indexed_array_dirty_validation_enabled"] = int(
+                indexed_dirty_validation_enabled
+            )
 
             def _indexed_output_write_through(node: str, value: float):
                 _record_model_io_output_write(node, value)
                 indexed_array.set(node, value)
+                _mark_indexed_dirty_node(node)
                 indexed_output_nodes_seen.add(node)
                 self._perf_stats["indexed_output_write_throughs"] += 1
                 self._perf_stats["indexed_output_write_through_nodes"] = len(
@@ -1114,8 +1182,7 @@ class Simulator:
             _set_model_indexed_output_writer(_indexed_output_write_through)
             _set_model_indexed_voltage_probe(_indexed_voltage_probe)
             _set_model_indexed_voltage_reader(_indexed_voltage_read)
-            max_diff, max_node, checked = indexed_array.max_abs_diff_mapping(self.node_voltages)
-            _record_indexed_array_diff(max_diff, max_node, checked)
+            _validate_indexed_array_mapping(self.node_voltages, force_full=True)
 
         # Record initial state
         initial_record_reads = self._record_point(0.0, indexed_array)
@@ -1192,9 +1259,12 @@ class Simulator:
             if indexed_array is not None:
                 _section_start = profile_clock() if profile_clock is not None else 0.0
                 prev_indexed_values = indexed_array.snapshot()
-                max_diff, max_node, checked = indexed_array.max_abs_diff_mapping(prev_nv)
                 self._perf_stats["indexed_array_snapshots"] += 1
-                _record_indexed_array_diff(max_diff, max_node, checked)
+                if indexed_dirty_validation_enabled:
+                    self._perf_stats["indexed_array_prev_snapshot_dirty_skips"] += 1
+                    _refresh_indexed_array_stats()
+                else:
+                    _validate_indexed_array_mapping(prev_nv)
                 if profile_clock is not None:
                     _add_profile_time("indexed_array_prev_snapshot_s", _section_start)
             if indexed_snapshotter is not None:
@@ -1229,6 +1299,7 @@ class Simulator:
                 self.node_voltages[src.node] = value
                 if indexed_array is not None:
                     indexed_array.set(src.node, value)
+                    _mark_indexed_dirty_node(src.node)
                     self._perf_stats["indexed_array_source_updates"] += 1
             if indexed_array is not None:
                 _refresh_indexed_array_stats()
@@ -1420,8 +1491,7 @@ class Simulator:
                 _section_start = profile_clock() if profile_clock is not None else 0.0
                 _refresh_indexed_model_io_plan()
                 self._perf_stats["indexed_array_syncs"] += 1
-                max_diff, max_node, checked = indexed_array.max_abs_diff_mapping(self.node_voltages)
-                _record_indexed_array_diff(max_diff, max_node, checked)
+                max_diff = _validate_indexed_array_mapping(self.node_voltages)
                 if max_diff != 0.0:
                     indexed_array.update_from_mapping(self.node_voltages)
                     self._perf_stats["indexed_post_model_sync_repairs"] += 1

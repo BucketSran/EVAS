@@ -300,6 +300,25 @@ class IndexedVoltageArray:
                 max_node = name
         return max_diff, max_node, checked
 
+    def max_abs_diff_names(
+        self,
+        voltages: Mapping[str, float],
+        names: Iterable[str],
+    ) -> Tuple[float, str, int]:
+        max_diff = 0.0
+        max_node = ""
+        checked = 0
+        for name in names:
+            if name not in voltages:
+                continue
+            node_id = self._ensure_node(name)
+            diff = abs(float(voltages[name]) - self.values[node_id])
+            checked += 1
+            if diff > max_diff:
+                max_diff = diff
+                max_node = name
+        return max_diff, max_node, checked
+
 
 @dataclass
 class IndexedRunPlan:
