@@ -15,7 +15,8 @@ from evas.simulator.indexed import (
     check_indexed_trace_round_trip,
     copy_values_into,
 )
-from evas.simulator.backend import CompiledModel
+from evas.compiler.parser import parse
+from evas.simulator.backend import CompiledModel, compile_module
 from evas.simulator.engine import SimResult, Simulator, dc
 
 
@@ -169,6 +170,85 @@ def test_indexed_model_io_plan_resolves_mapped_ports_outputs_and_parent_nodes():
         plan.node_index.id_of("VOUT"),
     )
     assert child_io.output_node_ids == (plan.node_index.id_of("VOUT"),)
+
+
+def test_compiled_model_records_static_branch_io_metadata():
+    src = """\
+`include "disciplines.vams"
+module sample_hold(clk, inp, out);
+    input voltage clk;
+    input voltage inp;
+    output voltage out;
+    real sample;
+    analog begin
+        @(cross(V(clk) - 0.5, +1)) sample = V(inp);
+        V(out) <+ sample;
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+
+    assert ModelCls._static_voltage_read_nodes == ("clk",)
+    assert ModelCls._event_voltage_read_nodes == ("inp",)
+    assert ModelCls._static_output_write_nodes == ("out",)
+    assert ModelCls._dynamic_voltage_read_count == 0
+    assert ModelCls._dynamic_output_write_count == 0
+
+
+def test_compiled_model_counts_dynamic_branch_io_metadata():
+    src = """\
+`include "disciplines.vams"
+module bus_drive(VSS);
+    inout electrical VSS;
+    electrical [0:3] dout;
+    genvar i;
+    analog begin
+        for (i = 0; i <= 3; i = i + 1)
+            V(dout[i], VSS) <+ i;
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+
+    assert ModelCls._static_voltage_read_nodes == ("VSS",)
+    assert ModelCls._event_voltage_read_nodes == ()
+    assert ModelCls._static_output_write_nodes == ()
+    assert ModelCls._dynamic_voltage_read_count == 0
+    assert ModelCls._dynamic_output_write_count == 1
+
+
+def test_indexed_model_io_plan_includes_static_branch_io_nodes():
+    src = """\
+`include "disciplines.vams"
+module sample_hold(clk, inp, out);
+    input voltage clk;
+    input voltage inp;
+    output voltage out;
+    real sample;
+    analog begin
+        @(cross(V(clk) - 0.5, +1)) sample = V(inp);
+        V(out) <+ sample;
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+    model = ModelCls()
+    model.node_map = {"clk": "CLK", "inp": "INP", "out": "OUT"}
+    sim = Simulator()
+    sim.add_model(model)
+
+    plan = build_indexed_model_io_plan(sim)
+    (model_io,) = plan.model_ios
+
+    assert model_io.output_node_ids == ()
+    assert model_io.static_voltage_read_node_ids == (plan.node_index.id_of("CLK"),)
+    assert model_io.event_voltage_read_node_ids == (plan.node_index.id_of("INP"),)
+    assert model_io.static_output_write_node_ids == (plan.node_index.id_of("OUT"),)
+    assert model_io.dynamic_voltage_read_count == 0
+    assert model_io.dynamic_output_write_count == 0
+    assert plan.static_voltage_read_count == 1
+    assert plan.event_voltage_read_count == 1
+    assert plan.static_output_write_count == 1
 
 
 def test_indexed_run_plan_collects_sources_records_and_model_nodes():

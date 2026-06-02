@@ -26,6 +26,11 @@ class CompiledModel:
     """Base class for compiled Verilog-A models."""
     _module_registry: Dict[str, Any] = {}
     _module_ports: List[str] = []
+    _static_voltage_read_nodes = ()
+    _event_voltage_read_nodes = ()
+    _static_output_write_nodes = ()
+    _dynamic_voltage_read_count = 0
+    _dynamic_output_write_count = 0
     _cmp_eps: float = 0.0
     _needs_future_node_voltages: bool = False
     _has_dynamic_breakpoints: bool = True
@@ -1083,6 +1088,22 @@ class _ModuleCompiler:
         cls = namespace[f'{mod.name}_Model']
         cls._uses_idtmod = self._uses_idtmod
         cls._needs_future_node_voltages = self._needs_future_node_voltages
+        branch_io = (
+            self._collect_static_branch_io(mod.analog_block.body)
+            if mod.analog_block
+            else self._empty_static_branch_io()
+        )
+        cls._static_voltage_read_nodes = tuple(
+            sorted(branch_io["static_voltage_read_nodes"])
+        )
+        cls._event_voltage_read_nodes = tuple(
+            sorted(branch_io["event_voltage_read_nodes"])
+        )
+        cls._static_output_write_nodes = tuple(
+            sorted(branch_io["static_output_write_nodes"])
+        )
+        cls._dynamic_voltage_read_count = int(branch_io["dynamic_voltage_read_count"])
+        cls._dynamic_output_write_count = int(branch_io["dynamic_output_write_count"])
         if mod.analog_block:
             cls._has_dynamic_breakpoints = self._statement_has_dynamic_breakpoints(mod.analog_block.body)
             cls._has_post_update_events = self._has_post_update_event(mod.analog_block.body)
@@ -1540,6 +1561,229 @@ class _ModuleCompiler:
             return nodes
 
         return nodes
+
+    def _empty_static_branch_io(self) -> Dict[str, Any]:
+        return {
+            "static_voltage_read_nodes": set(),
+            "event_voltage_read_nodes": set(),
+            "static_output_write_nodes": set(),
+            "dynamic_voltage_read_count": 0,
+            "dynamic_output_write_count": 0,
+        }
+
+    def _collect_static_branch_io(self, stmt) -> Dict[str, Any]:
+        acc = self._empty_static_branch_io()
+        self._collect_static_branch_io_from_stmt(stmt, acc, in_event_body=False)
+        return acc
+
+    def _record_static_branch_read(
+        self,
+        acc: Dict[str, Any],
+        node: str,
+        index_expr,
+        index_expr2,
+        in_event_body: bool,
+    ) -> None:
+        if index_expr is not None:
+            acc["dynamic_voltage_read_count"] += 1
+            self._collect_static_branch_io_from_expr(index_expr, acc, in_event_body)
+            if index_expr2 is not None:
+                self._collect_static_branch_io_from_expr(index_expr2, acc, in_event_body)
+            return
+        target = (
+            acc["event_voltage_read_nodes"]
+            if in_event_body
+            else acc["static_voltage_read_nodes"]
+        )
+        target.add(node)
+
+    def _collect_static_branch_io_from_branch_read(
+        self,
+        branch: BranchAccess,
+        acc: Dict[str, Any],
+        in_event_body: bool,
+    ) -> None:
+        if branch.access_type != "V":
+            return
+        self._record_static_branch_read(
+            acc,
+            branch.node1,
+            branch.node1_index,
+            branch.node1_index2,
+            in_event_body,
+        )
+        if branch.node2 is not None:
+            self._record_static_branch_read(
+                acc,
+                branch.node2,
+                branch.node2_index,
+                branch.node2_index2,
+                in_event_body,
+            )
+
+    def _collect_static_branch_io_from_contribution(
+        self,
+        stmt: Contribution,
+        acc: Dict[str, Any],
+        in_event_body: bool,
+    ) -> None:
+        branch = stmt.branch
+        if branch.access_type == "V":
+            if branch.node1_index is not None:
+                acc["dynamic_output_write_count"] += 1
+                self._collect_static_branch_io_from_expr(
+                    branch.node1_index,
+                    acc,
+                    in_event_body,
+                )
+                if branch.node1_index2 is not None:
+                    self._collect_static_branch_io_from_expr(
+                        branch.node1_index2,
+                        acc,
+                        in_event_body,
+                    )
+            else:
+                acc["static_output_write_nodes"].add(branch.node1)
+            if branch.node2 is not None:
+                self._record_static_branch_read(
+                    acc,
+                    branch.node2,
+                    branch.node2_index,
+                    branch.node2_index2,
+                    in_event_body,
+                )
+        self._collect_static_branch_io_from_expr(stmt.expr, acc, in_event_body)
+
+    def _collect_static_branch_io_from_expr(
+        self,
+        expr: Expr,
+        acc: Dict[str, Any],
+        in_event_body: bool,
+    ) -> None:
+        if isinstance(expr, (NumberLiteral, StringLiteral, Identifier)):
+            return
+
+        if isinstance(expr, ArrayAccess):
+            self._collect_static_branch_io_from_expr(expr.index, acc, in_event_body)
+            return
+
+        if isinstance(expr, BranchAccess):
+            self._collect_static_branch_io_from_branch_read(expr, acc, in_event_body)
+            return
+
+        if isinstance(expr, BinaryExpr):
+            self._collect_static_branch_io_from_expr(expr.left, acc, in_event_body)
+            self._collect_static_branch_io_from_expr(expr.right, acc, in_event_body)
+            return
+
+        if isinstance(expr, UnaryExpr):
+            self._collect_static_branch_io_from_expr(expr.operand, acc, in_event_body)
+            return
+
+        if isinstance(expr, TernaryExpr):
+            self._collect_static_branch_io_from_expr(expr.cond, acc, in_event_body)
+            self._collect_static_branch_io_from_expr(expr.true_expr, acc, in_event_body)
+            self._collect_static_branch_io_from_expr(expr.false_expr, acc, in_event_body)
+            return
+
+        if isinstance(expr, FunctionCall):
+            for arg in expr.args:
+                self._collect_static_branch_io_from_expr(arg, acc, in_event_body)
+            return
+
+        if isinstance(expr, MethodCall):
+            for arg in expr.args:
+                self._collect_static_branch_io_from_expr(arg, acc, in_event_body)
+
+    def _collect_static_branch_io_from_event(
+        self,
+        event,
+        acc: Dict[str, Any],
+        in_event_body: bool,
+    ) -> None:
+        if isinstance(event, EventExpr):
+            for arg in event.args:
+                self._collect_static_branch_io_from_expr(arg, acc, in_event_body)
+            if event.time_tol_expr is not None:
+                self._collect_static_branch_io_from_expr(
+                    event.time_tol_expr,
+                    acc,
+                    in_event_body,
+                )
+            if event.expr_tol_expr is not None:
+                self._collect_static_branch_io_from_expr(
+                    event.expr_tol_expr,
+                    acc,
+                    in_event_body,
+                )
+            return
+
+        if isinstance(event, CombinedEvent):
+            for child in event.events:
+                self._collect_static_branch_io_from_event(child, acc, in_event_body)
+
+    def _collect_static_branch_io_from_stmt(
+        self,
+        stmt,
+        acc: Dict[str, Any],
+        in_event_body: bool,
+    ) -> None:
+        if stmt is None:
+            return
+
+        if isinstance(stmt, Block):
+            for child in stmt.statements:
+                self._collect_static_branch_io_from_stmt(child, acc, in_event_body)
+            return
+
+        if isinstance(stmt, Assignment):
+            if isinstance(stmt.target, ArrayAccess):
+                self._collect_static_branch_io_from_expr(
+                    stmt.target.index,
+                    acc,
+                    in_event_body,
+                )
+            self._collect_static_branch_io_from_expr(stmt.value, acc, in_event_body)
+            return
+
+        if isinstance(stmt, Contribution):
+            self._collect_static_branch_io_from_contribution(stmt, acc, in_event_body)
+            return
+
+        if isinstance(stmt, EventStatement):
+            self._collect_static_branch_io_from_event(stmt.event, acc, in_event_body)
+            self._collect_static_branch_io_from_stmt(stmt.body, acc, in_event_body=True)
+            return
+
+        if isinstance(stmt, IfStatement):
+            self._collect_static_branch_io_from_expr(stmt.cond, acc, in_event_body)
+            self._collect_static_branch_io_from_stmt(stmt.then_body, acc, in_event_body)
+            self._collect_static_branch_io_from_stmt(stmt.else_body, acc, in_event_body)
+            return
+
+        if isinstance(stmt, ForStatement):
+            self._collect_static_branch_io_from_stmt(stmt.init, acc, in_event_body)
+            self._collect_static_branch_io_from_expr(stmt.cond, acc, in_event_body)
+            self._collect_static_branch_io_from_stmt(stmt.update, acc, in_event_body)
+            self._collect_static_branch_io_from_stmt(stmt.body, acc, in_event_body)
+            return
+
+        if isinstance(stmt, WhileStatement):
+            self._collect_static_branch_io_from_expr(stmt.cond, acc, in_event_body)
+            self._collect_static_branch_io_from_stmt(stmt.body, acc, in_event_body)
+            return
+
+        if isinstance(stmt, CaseStatement):
+            self._collect_static_branch_io_from_expr(stmt.expr, acc, in_event_body)
+            for item in stmt.items:
+                for value in item.values:
+                    self._collect_static_branch_io_from_expr(value, acc, in_event_body)
+                self._collect_static_branch_io_from_stmt(item.body, acc, in_event_body)
+            return
+
+        if isinstance(stmt, SystemTask):
+            for arg in stmt.args:
+                self._collect_static_branch_io_from_expr(arg, acc, in_event_body)
 
     def _statement_has_dynamic_breakpoints(self, stmt) -> bool:
         if stmt is None:

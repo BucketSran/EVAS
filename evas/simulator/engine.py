@@ -766,10 +766,15 @@ class Simulator:
             )
             self._perf_stats["indexed_model_io_outputs"] = indexed_model_io_plan.output_count
             self._indexed_model_io_stats = {
+                "dynamic_output_write_count": indexed_model_io_plan.dynamic_output_write_count,
+                "dynamic_voltage_read_count": indexed_model_io_plan.dynamic_voltage_read_count,
+                "event_voltage_read_count": indexed_model_io_plan.event_voltage_read_count,
                 "node_count": indexed_model_io_plan.node_count,
                 "model_count": indexed_model_io_plan.model_count,
                 "mapped_port_count": indexed_model_io_plan.mapped_port_count,
                 "output_count": indexed_model_io_plan.output_count,
+                "static_output_write_count": indexed_model_io_plan.static_output_write_count,
+                "static_voltage_read_count": indexed_model_io_plan.static_voltage_read_count,
                 "refreshes": self._perf_stats["indexed_model_io_refreshes"],
             }
 

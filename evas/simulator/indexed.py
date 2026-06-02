@@ -328,6 +328,11 @@ class IndexedModelIO:
     model_class: str
     mapped_port_node_ids: Tuple[int, ...]
     output_node_ids: Tuple[int, ...]
+    static_voltage_read_node_ids: Tuple[int, ...] = ()
+    event_voltage_read_node_ids: Tuple[int, ...] = ()
+    static_output_write_node_ids: Tuple[int, ...] = ()
+    dynamic_voltage_read_count: int = 0
+    dynamic_output_write_count: int = 0
 
 
 @dataclass
@@ -352,6 +357,35 @@ class IndexedModelIOPlan:
     @property
     def output_count(self) -> int:
         return sum(len(model_io.output_node_ids) for model_io in self.model_ios)
+
+    @property
+    def static_voltage_read_count(self) -> int:
+        return sum(
+            len(model_io.static_voltage_read_node_ids)
+            for model_io in self.model_ios
+        )
+
+    @property
+    def event_voltage_read_count(self) -> int:
+        return sum(
+            len(model_io.event_voltage_read_node_ids)
+            for model_io in self.model_ios
+        )
+
+    @property
+    def static_output_write_count(self) -> int:
+        return sum(
+            len(model_io.static_output_write_node_ids)
+            for model_io in self.model_ios
+        )
+
+    @property
+    def dynamic_voltage_read_count(self) -> int:
+        return sum(model_io.dynamic_voltage_read_count for model_io in self.model_ios)
+
+    @property
+    def dynamic_output_write_count(self) -> int:
+        return sum(model_io.dynamic_output_write_count for model_io in self.model_ios)
 
 
 @dataclass
@@ -471,10 +505,11 @@ def build_indexed_model_io_plan(
 ) -> IndexedModelIOPlan:
     """Build a sidecar model IO plan without changing dict-backed execution."""
 
-    model_entries: List[Tuple[Tuple[int, ...], Any, List[str], List[str]]] = []
+    model_entries = []
     io_names: List[str] = []
     for root_index, model in enumerate(getattr(simulator, "models", []) or []):
         for path, tree_model in _iter_model_tree_with_path(model, (root_index,)):
+            model_cls = getattr(tree_model, "__class__", type(tree_model))
             mapped_ports = [
                 _resolve_model_node(tree_model, local_name)
                 for local_name in getattr(tree_model, "node_map", {}).keys()
@@ -483,9 +518,42 @@ def build_indexed_model_io_plan(
                 _resolve_model_node(tree_model, local_name)
                 for local_name in getattr(tree_model, "output_nodes", {}).keys()
             ]
-            model_entries.append((path, tree_model, mapped_ports, output_nodes))
+            static_reads = [
+                _resolve_model_node(tree_model, local_name)
+                for local_name in getattr(model_cls, "_static_voltage_read_nodes", ()) or ()
+            ]
+            event_reads = [
+                _resolve_model_node(tree_model, local_name)
+                for local_name in getattr(model_cls, "_event_voltage_read_nodes", ()) or ()
+            ]
+            static_writes = [
+                _resolve_model_node(tree_model, local_name)
+                for local_name in getattr(model_cls, "_static_output_write_nodes", ()) or ()
+            ]
+            dynamic_read_count = int(
+                getattr(model_cls, "_dynamic_voltage_read_count", 0) or 0
+            )
+            dynamic_write_count = int(
+                getattr(model_cls, "_dynamic_output_write_count", 0) or 0
+            )
+            model_entries.append(
+                (
+                    path,
+                    tree_model,
+                    mapped_ports,
+                    output_nodes,
+                    static_reads,
+                    event_reads,
+                    static_writes,
+                    dynamic_read_count,
+                    dynamic_write_count,
+                )
+            )
             io_names.extend(mapped_ports)
             io_names.extend(output_nodes)
+            io_names.extend(static_reads)
+            io_names.extend(event_reads)
+            io_names.extend(static_writes)
 
     index = build_node_index(extra_nodes, io_names)
     model_ios = tuple(
@@ -494,8 +562,23 @@ def build_indexed_model_io_plan(
             model_class=getattr(getattr(model, "__class__", type(model)), "__name__", "model"),
             mapped_port_node_ids=_id_tuple(index, mapped_ports),
             output_node_ids=_id_tuple(index, output_nodes),
+            static_voltage_read_node_ids=_id_tuple(index, static_reads),
+            event_voltage_read_node_ids=_id_tuple(index, event_reads),
+            static_output_write_node_ids=_id_tuple(index, static_writes),
+            dynamic_voltage_read_count=dynamic_read_count,
+            dynamic_output_write_count=dynamic_write_count,
         )
-        for path, model, mapped_ports, output_nodes in model_entries
+        for (
+            path,
+            model,
+            mapped_ports,
+            output_nodes,
+            static_reads,
+            event_reads,
+            static_writes,
+            dynamic_read_count,
+            dynamic_write_count,
+        ) in model_entries
     )
     return IndexedModelIOPlan(node_index=index, model_ios=model_ios)
 
