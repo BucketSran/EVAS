@@ -99,6 +99,8 @@ class CompiledModel:
         self._indexed_output_writer: Optional[Callable[[str, float], None]] = None
         self._indexed_voltage_probe: Optional[Callable[[str, str, float, bool], None]] = None
         self._indexed_voltage_reader: Optional[Callable[[str, str], Optional[float]]] = None
+        self._node_resolution_cache_enabled: bool = False
+        self._node_resolution_cache: Dict[str, str] = {}
         # Per-instance deterministic RNG streams.
         self._rng_default = random.Random(0)
         self._rng_streams: Dict[int, random.Random] = {}
@@ -160,6 +162,39 @@ class CompiledModel:
         if self._event_context_active or self._indexed_voltage_reader is None:
             return None
         return self._indexed_voltage_reader(local_node, external_node)
+
+    def _set_node_resolution_cache_enabled(self, enabled: bool):
+        """Cache local-to-external node mapping for the duration of a run."""
+        self._node_resolution_cache_enabled = bool(enabled)
+        self._node_resolution_cache.clear()
+        for child in self._child_models:
+            child._set_node_resolution_cache_enabled(enabled)
+
+    def _resolve_external_node_uncached(self, node: str) -> str:
+        """Resolve a local model node through node_map and one parent indirection."""
+        ext = self.node_map.get(node, node)
+        if (
+            isinstance(ext, str)
+            and ext
+            and ext[0] == '@'
+            and ext.startswith('@parent:')
+            and self._parent_model is not None
+        ):
+            pnode = ext[len('@parent:'):]
+            ext = self._parent_model.node_map.get(pnode, pnode)
+        return ext
+
+    def _resolve_external_node(self, node: str) -> str:
+        """Resolve a node name, optionally reusing the run-local mapping cache."""
+        if not self.node_map:
+            return node
+        if not self._node_resolution_cache_enabled:
+            return self._resolve_external_node_uncached(node)
+        ext = self._node_resolution_cache.get(node)
+        if ext is None:
+            ext = self._resolve_external_node_uncached(node)
+            self._node_resolution_cache[node] = ext
+        return ext
 
     def _should_update_discrete_state(self, key: str, time: float) -> bool:
         """Gate self-referential continuous real updates to the nominal tran grid.
@@ -445,16 +480,7 @@ class CompiledModel:
             return 0.0
 
         # Check if it's a mapped external node
-        ext = self.node_map.get(node, node)
-        if (
-            isinstance(ext, str)
-            and ext
-            and ext[0] == '@'
-            and ext.startswith('@parent:')
-            and self._parent_model is not None
-        ):
-            pnode = ext[len('@parent:'):]
-            ext = self._parent_model.node_map.get(pnode, pnode)
+        ext = self._resolve_external_node(node)
         if self._event_context_active and isinstance(ext, str):
             if ext in self._step_prev_node_voltages:
                 t0 = self._step_prev_time
@@ -516,16 +542,7 @@ class CompiledModel:
         if node not in self.output_nodes:
             self._output_nodes_version += 1
         self.output_nodes[node] = value
-        ext = self.node_map.get(node, node)
-        if (
-            isinstance(ext, str)
-            and ext
-            and ext[0] == '@'
-            and ext.startswith('@parent:')
-            and self._parent_model is not None
-        ):
-            pnode = ext[len('@parent:'):]
-            ext = self._parent_model.node_map.get(pnode, pnode)
+        ext = self._resolve_external_node(node)
         node_voltages[ext] = value
         if self._indexed_output_writer is not None:
             self._indexed_output_writer(ext, value)
@@ -630,17 +647,7 @@ class CompiledModel:
             self._event_time = cross_time
 
             def resolve_node(node: str) -> str:
-                ext = self.node_map.get(node, node)
-                if (
-                    isinstance(ext, str)
-                    and ext
-                    and ext[0] == '@'
-                    and ext.startswith('@parent:')
-                    and self._parent_model is not None
-                ):
-                    pnode = ext[len('@parent:'):]
-                    ext = self._parent_model.node_map.get(pnode, pnode)
-                return ext
+                return self._resolve_external_node(node)
 
             def event_node_value(node: str) -> float:
                 ext = resolve_node(node)

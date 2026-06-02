@@ -468,6 +468,8 @@ class Simulator:
             "indexed_voltage_reads": 0,
             "model_post_update_calls": 0,
             "model_post_update_skips": 0,
+            "node_resolution_cache_entries": 0,
+            "node_resolution_cache_models": 0,
             "source_breakpoint_scan_calls": 0,
             "model_breakpoint_scan_calls": 0,
             "bound_step_scan_calls": 0,
@@ -537,9 +539,17 @@ class Simulator:
                 if setter is not None:
                     setter(reader)
 
+        def _set_model_node_resolution_cache_enabled(enabled: bool):
+            for model in self.models:
+                setter = getattr(model, "_set_node_resolution_cache_enabled", None)
+                if setter is not None:
+                    setter(enabled)
+
         _set_model_indexed_output_writer(None)
         _set_model_indexed_voltage_probe(None)
         _set_model_indexed_voltage_reader(None)
+        _set_model_node_resolution_cache_enabled(False)
+        _set_model_node_resolution_cache_enabled(True)
 
         source_nodes = {src.node for src in self.sources}
         source_future_waveforms = {src.node: src.waveform for src in self.sources}
@@ -1126,9 +1136,32 @@ class Simulator:
 
         _aggregate_model_timer_stats()
 
+        def _aggregate_node_resolution_cache_stats():
+            entries = 0
+            models_with_entries = 0
+
+            def _visit(model):
+                nonlocal entries, models_with_entries
+                cache = getattr(model, "_node_resolution_cache", {}) or {}
+                size = len(cache)
+                if size:
+                    models_with_entries += 1
+                    entries += size
+                for child in getattr(model, "_child_models", []) or []:
+                    _visit(child)
+
+            for model in self.models:
+                _visit(model)
+
+            self._perf_stats["node_resolution_cache_entries"] = entries
+            self._perf_stats["node_resolution_cache_models"] = models_with_entries
+
+        _aggregate_node_resolution_cache_stats()
+
         _set_model_indexed_output_writer(None)
         _set_model_indexed_voltage_probe(None)
         _set_model_indexed_voltage_reader(None)
+        _set_model_node_resolution_cache_enabled(False)
 
         return SimResult(time=time_arr, signals=signals,
                          step_sizes=np.array(self._step_sizes))

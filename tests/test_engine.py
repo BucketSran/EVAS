@@ -743,6 +743,45 @@ class TestCompiledModelHelpers:
 
         assert self.model._get_voltage("inp", {"VIN": 0.7}) == pytest.approx(1.3)
 
+    def test_node_resolution_cache_resolves_mapped_reads_and_writes(self):
+        self.model.node_map["inp"] = "VIN"
+        self.model.node_map["out"] = "VOUT"
+        self.model._set_node_resolution_cache_enabled(True)
+        nv = {"VIN": 0.7}
+
+        assert self.model._get_voltage("inp", nv) == pytest.approx(0.7)
+        self.model._set_output("out", 1.1, nv)
+
+        assert nv["VOUT"] == pytest.approx(1.1)
+        assert self.model._node_resolution_cache == {"inp": "VIN", "out": "VOUT"}
+
+    def test_node_resolution_cache_resolves_parent_mapped_nodes(self):
+        parent = CompiledModel()
+        parent.node_map["out"] = "OUT"
+        child = CompiledModel()
+        child.node_map["z"] = "@parent:out"
+        child._parent_model = parent
+        parent._child_models = [child]
+        parent._set_node_resolution_cache_enabled(True)
+        nv = {}
+
+        child._set_output("z", 1.1, nv)
+
+        assert nv["OUT"] == pytest.approx(1.1)
+        assert child._node_resolution_cache == {"z": "OUT"}
+
+    def test_node_resolution_cache_disable_clears_stale_mapping(self):
+        self.model.node_map["inp"] = "VIN"
+        self.model._set_node_resolution_cache_enabled(True)
+        assert self.model._get_voltage("inp", {"VIN": 0.7}) == pytest.approx(0.7)
+
+        self.model.node_map["inp"] = "VIN2"
+        assert self.model._get_voltage("inp", {"VIN": 0.7, "VIN2": 0.9}) == pytest.approx(0.7)
+        self.model._set_node_resolution_cache_enabled(False)
+
+        assert self.model._node_resolution_cache == {}
+        assert self.model._get_voltage("inp", {"VIN": 0.7, "VIN2": 0.9}) == pytest.approx(0.9)
+
     def test_get_voltage_interpolates_inside_event_context(self):
         self.model._prepare_step({"vin": 0.0, "rst": 0.0}, {"vin": 1.0, "rst": 1.0}, 0.0, 10e-9)
         self.model._event_time = 4e-9
@@ -923,6 +962,28 @@ endmodule
         assert self.model._cmp_ge(0.5 - 1e-16, 0.5) is False
         assert self.model._cmp_le(0.5 + 1e-16, 0.5) is False
 
+    def test_simulator_clears_node_resolution_cache_after_run(self):
+        class MirrorModel(CompiledModel):
+            def __init__(self):
+                super().__init__()
+                self.node_map = {"inp": "vin", "out": "vout"}
+
+            def evaluate(self, node_voltages, time):
+                self._set_output("out", self._get_voltage("inp", node_voltages), node_voltages)
+
+        model = MirrorModel()
+        sim = Simulator()
+        sim.add_source("vin", dc(0.25))
+        sim.add_model(model)
+        sim.record("vout")
+
+        result = sim.run(tstop=2e-9, tstep=1e-9)
+
+        assert result.signals["vout"][-1] == pytest.approx(0.25)
+        assert sim._perf_stats["node_resolution_cache_entries"] >= 2
+        assert sim._perf_stats["node_resolution_cache_models"] == 1
+        assert model._node_resolution_cache_enabled is False
+        assert model._node_resolution_cache == {}
 
     def test_set_output_writes_node_voltages(self):
         nv = {}
