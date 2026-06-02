@@ -454,6 +454,9 @@ class Simulator:
             "indexed_model_io_models": 0,
             "indexed_model_io_outputs": 0,
             "indexed_model_io_refreshes": 0,
+            "indexed_output_write_through_nodes": 0,
+            "indexed_output_write_throughs": 0,
+            "indexed_post_model_sync_repairs": 0,
             "steps_total": 0,
         }
         self._profile_times: Dict[str, float] = {}
@@ -470,6 +473,14 @@ class Simulator:
             if profile_clock is not None:
                 elapsed = profile_clock() - start
                 self._profile_times[name] = self._profile_times.get(name, 0.0) + elapsed
+
+        def _set_model_indexed_output_writer(writer):
+            for model in self.models:
+                setter = getattr(model, "_set_indexed_output_writer", None)
+                if setter is not None:
+                    setter(writer)
+
+        _set_model_indexed_output_writer(None)
 
         source_nodes = {src.node for src in self.sources}
         source_future_waveforms = {src.node: src.waveform for src in self.sources}
@@ -573,6 +584,7 @@ class Simulator:
         indexed_array = None
         indexed_model_io_versions = None
         indexed_model_io_plan = None
+        indexed_output_nodes_seen: set[str] = set()
         if indexed_arrays:
             indexed_array = IndexedVoltageArray.from_names(
                 sorted(set(self.node_voltages) | set(self.recorded_signals) | source_nodes | model_output_nodes)
@@ -589,6 +601,9 @@ class Simulator:
                 "max_abs_diff": 0.0,
                 "max_abs_diff_node": "",
                 "dynamic_nodes": 0,
+                "output_write_through_nodes": 0,
+                "output_write_throughs": 0,
+                "post_model_sync_repairs": 0,
             }
 
         def _model_tree_output_versions() -> tuple[int, ...]:
@@ -647,6 +662,15 @@ class Simulator:
                 "indexed_array_values_checked"
             ]
             self._indexed_array_stats["dynamic_nodes"] = indexed_array.dynamic_interns
+            self._indexed_array_stats["output_write_throughs"] = self._perf_stats[
+                "indexed_output_write_throughs"
+            ]
+            self._indexed_array_stats["output_write_through_nodes"] = self._perf_stats[
+                "indexed_output_write_through_nodes"
+            ]
+            self._indexed_array_stats["post_model_sync_repairs"] = self._perf_stats[
+                "indexed_post_model_sync_repairs"
+            ]
             self._perf_stats["indexed_array_dynamic_nodes"] = indexed_array.dynamic_interns
 
         def _record_indexed_array_diff(max_diff: float, max_node: str, checked: int):
@@ -662,6 +686,16 @@ class Simulator:
 
         if indexed_array is not None:
             _refresh_indexed_model_io_plan(force=True)
+
+            def _indexed_output_write_through(node: str, value: float):
+                indexed_array.set(node, value)
+                indexed_output_nodes_seen.add(node)
+                self._perf_stats["indexed_output_write_throughs"] += 1
+                self._perf_stats["indexed_output_write_through_nodes"] = len(
+                    indexed_output_nodes_seen
+                )
+
+            _set_model_indexed_output_writer(_indexed_output_write_through)
             max_diff, max_node, checked = indexed_array.max_abs_diff_mapping(self.node_voltages)
             _record_indexed_array_diff(max_diff, max_node, checked)
 
@@ -818,10 +852,13 @@ class Simulator:
             if indexed_array is not None:
                 _section_start = profile_clock() if profile_clock is not None else 0.0
                 _refresh_indexed_model_io_plan()
-                indexed_array.update_from_mapping(self.node_voltages)
                 self._perf_stats["indexed_array_syncs"] += 1
                 max_diff, max_node, checked = indexed_array.max_abs_diff_mapping(self.node_voltages)
                 _record_indexed_array_diff(max_diff, max_node, checked)
+                if max_diff != 0.0:
+                    indexed_array.update_from_mapping(self.node_voltages)
+                    self._perf_stats["indexed_post_model_sync_repairs"] += 1
+                    _refresh_indexed_array_stats()
                 if profile_clock is not None:
                     _add_profile_time("indexed_array_sync_s", _section_start)
 
@@ -939,6 +976,8 @@ class Simulator:
             signals[name] = np.array(data)
         if profile_clock is not None:
             _add_profile_time("result_array_conversion_s", _section_start)
+
+        _set_model_indexed_output_writer(None)
 
         return SimResult(time=time_arr, signals=signals,
                          step_sizes=np.array(self._step_sizes))

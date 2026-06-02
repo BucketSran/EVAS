@@ -8,7 +8,7 @@ and state variable management.
 import math
 import random
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from evas.compiler.ast_nodes import *
 from evas.simulator.engine import (
@@ -95,6 +95,7 @@ class CompiledModel:
         self._next_fd: int = 1
         self._child_models: List["CompiledModel"] = []
         self._parent_model: Optional["CompiledModel"] = None
+        self._indexed_output_writer: Optional[Callable[[str, float], None]] = None
         # Per-instance deterministic RNG streams.
         self._rng_default = random.Random(0)
         self._rng_streams: Dict[int, random.Random] = {}
@@ -126,6 +127,12 @@ class CompiledModel:
         self._discrete_update_buckets.clear()
         for child in self._child_models:
             child._set_nominal_step(step)
+
+    def _set_indexed_output_writer(self, writer: Optional[Callable[[str, float], None]]):
+        """Install an opt-in output write-through hook for indexed sidecars."""
+        self._indexed_output_writer = writer
+        for child in self._child_models:
+            child._set_indexed_output_writer(writer)
 
     def _should_update_discrete_state(self, key: str, time: float) -> bool:
         """Gate self-referential continuous real updates to the nominal tran grid.
@@ -451,6 +458,8 @@ class CompiledModel:
                 self._output_nodes_version += 1
             self.output_nodes[node] = value
             node_voltages[node] = value
+            if self._indexed_output_writer is not None:
+                self._indexed_output_writer(node, value)
             return
 
         if node not in self.output_nodes:
@@ -467,6 +476,8 @@ class CompiledModel:
             pnode = ext[len('@parent:'):]
             ext = self._parent_model.node_map.get(pnode, pnode)
         node_voltages[ext] = value
+        if self._indexed_output_writer is not None:
+            self._indexed_output_writer(ext, value)
 
     def _transition(self, key: str, time: float, target: float,
                     delay: float = 0.0, rise: float = 0.0, fall: float = 0.0) -> float:

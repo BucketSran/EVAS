@@ -659,8 +659,12 @@ class TestSimulator:
         assert indexed._perf_stats["indexed_model_io_mapped_ports"] == 2
         assert indexed._perf_stats["indexed_model_io_outputs"] == 1
         assert indexed._perf_stats["indexed_model_io_refreshes"] >= 1
+        assert indexed._perf_stats["indexed_output_write_throughs"] > 0
+        assert indexed._perf_stats["indexed_output_write_through_nodes"] == 1
+        assert indexed._perf_stats["indexed_post_model_sync_repairs"] == 0
         assert indexed._indexed_model_io_stats["output_count"] == 1
         assert indexed._indexed_array_stats["max_abs_diff"] == pytest.approx(0.0)
+        assert indexed._indexed_array_stats["output_write_through_nodes"] == 1
 
 
 # ===========================================================================
@@ -864,6 +868,29 @@ endmodule
         nv = {}
         self.model._set_output("q", 0.9, nv)
         assert nv["q_ext"] == pytest.approx(0.9)
+
+    def test_indexed_output_writer_sees_resolved_output_node(self):
+        calls = []
+        self.model.node_map["q"] = "q_ext"
+        self.model._set_indexed_output_writer(lambda node, value: calls.append((node, value)))
+
+        self.model._set_output("q", 0.9, {})
+
+        assert calls == [("q_ext", pytest.approx(0.9))]
+
+    def test_indexed_output_writer_resolves_parent_mapped_node(self):
+        parent = CompiledModel()
+        parent.node_map["out"] = "OUT"
+        child = CompiledModel()
+        child.node_map["z"] = "@parent:out"
+        child._parent_model = parent
+        parent._child_models = [child]
+        calls = []
+        parent._set_indexed_output_writer(lambda node, value: calls.append((node, value)))
+
+        child._set_output("z", 1.1, {})
+
+        assert calls == [("OUT", pytest.approx(1.1))]
 
     def test_transition_first_call_returns_target(self):
         nv = {}

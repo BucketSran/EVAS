@@ -793,6 +793,8 @@ class TestIndexedMigrationHarness:
         assert "Indexed model IO plan:" in log
         assert "mapped_port_count = 2" in log
         assert "output_count = 1" in log
+        assert "output_write_throughs =" in log
+        assert "post_model_sync_repairs = 0" in log
         assert "max_abs_diff = 0.0" in log
 
 
