@@ -1039,6 +1039,10 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write("Indexed voltage read probe:")
         for key, value in sorted(sim._indexed_voltage_probe_stats.items()):
             log.write(f"    {key} = {value}")
+    if getattr(sim, "_indexed_voltage_read_stats", None):
+        log.write("Indexed voltage array reads:")
+        for key, value in sorted(sim._indexed_voltage_read_stats.items()):
+            log.write(f"    {key} = {value}")
 
     # Signal range summary
     log.write("")

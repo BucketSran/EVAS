@@ -462,6 +462,9 @@ class Simulator:
             "indexed_voltage_probe_mismatches": 0,
             "indexed_voltage_probe_missing_nodes": 0,
             "indexed_voltage_probes": 0,
+            "indexed_voltage_read_fallbacks": 0,
+            "indexed_voltage_read_nodes": 0,
+            "indexed_voltage_reads": 0,
             "steps_total": 0,
         }
         self._profile_times: Dict[str, float] = {}
@@ -469,6 +472,7 @@ class Simulator:
         self._indexed_array_stats: Dict[str, object] = {}
         self._indexed_model_io_stats: Dict[str, object] = {}
         self._indexed_voltage_probe_stats: Dict[str, object] = {}
+        self._indexed_voltage_read_stats: Dict[str, object] = {}
         profile_clock = (
             _wall_time.perf_counter
             if (profile_sections or indexed_snapshot_profile or indexed_arrays)
@@ -492,8 +496,15 @@ class Simulator:
                 if setter is not None:
                     setter(probe)
 
+        def _set_model_indexed_voltage_reader(reader):
+            for model in self.models:
+                setter = getattr(model, "_set_indexed_voltage_reader", None)
+                if setter is not None:
+                    setter(reader)
+
         _set_model_indexed_output_writer(None)
         _set_model_indexed_voltage_probe(None)
+        _set_model_indexed_voltage_reader(None)
 
         source_nodes = {src.node for src in self.sources}
         source_future_waveforms = {src.node: src.waveform for src in self.sources}
@@ -599,6 +610,7 @@ class Simulator:
         indexed_model_io_plan = None
         indexed_output_nodes_seen: set[str] = set()
         indexed_voltage_probe_max_node = ""
+        indexed_voltage_read_nodes_seen: set[str] = set()
         if indexed_arrays:
             indexed_array = IndexedVoltageArray.from_names(
                 sorted(set(self.node_voltages) | set(self.recorded_signals) | source_nodes | model_output_nodes)
@@ -694,6 +706,11 @@ class Simulator:
                 "max_abs_diff": self._perf_stats["indexed_voltage_probe_max_abs_diff"],
                 "max_abs_diff_node": indexed_voltage_probe_max_node,
             }
+            self._indexed_voltage_read_stats = {
+                "reads": self._perf_stats["indexed_voltage_reads"],
+                "read_nodes": self._perf_stats["indexed_voltage_read_nodes"],
+                "fallbacks": self._perf_stats["indexed_voltage_read_fallbacks"],
+            }
 
         def _record_indexed_array_diff(max_diff: float, max_node: str, checked: int):
             if indexed_array is None:
@@ -742,8 +759,20 @@ class Simulator:
                     self._perf_stats["indexed_voltage_probe_mismatches"] += 1
                 _refresh_indexed_array_stats()
 
+            def _indexed_voltage_read(local_node: str, external_node: str) -> Optional[float]:
+                if not indexed_array.node_index.has(external_node):
+                    self._perf_stats["indexed_voltage_read_fallbacks"] += 1
+                    return None
+                indexed_voltage_read_nodes_seen.add(external_node)
+                self._perf_stats["indexed_voltage_reads"] += 1
+                self._perf_stats["indexed_voltage_read_nodes"] = len(
+                    indexed_voltage_read_nodes_seen
+                )
+                return indexed_array.get(external_node, 0.0)
+
             _set_model_indexed_output_writer(_indexed_output_write_through)
             _set_model_indexed_voltage_probe(_indexed_voltage_probe)
+            _set_model_indexed_voltage_reader(_indexed_voltage_read)
             max_diff, max_node, checked = indexed_array.max_abs_diff_mapping(self.node_voltages)
             _record_indexed_array_diff(max_diff, max_node, checked)
 
@@ -1027,6 +1056,7 @@ class Simulator:
 
         _set_model_indexed_output_writer(None)
         _set_model_indexed_voltage_probe(None)
+        _set_model_indexed_voltage_reader(None)
 
         return SimResult(time=time_arr, signals=signals,
                          step_sizes=np.array(self._step_sizes))

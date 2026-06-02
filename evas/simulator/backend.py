@@ -97,6 +97,7 @@ class CompiledModel:
         self._parent_model: Optional["CompiledModel"] = None
         self._indexed_output_writer: Optional[Callable[[str, float], None]] = None
         self._indexed_voltage_probe: Optional[Callable[[str, str, float, bool], None]] = None
+        self._indexed_voltage_reader: Optional[Callable[[str, str], Optional[float]]] = None
         # Per-instance deterministic RNG streams.
         self._rng_default = random.Random(0)
         self._rng_streams: Dict[int, random.Random] = {}
@@ -143,6 +144,21 @@ class CompiledModel:
         self._indexed_voltage_probe = probe
         for child in self._child_models:
             child._set_indexed_voltage_probe(probe)
+
+    def _set_indexed_voltage_reader(
+        self,
+        reader: Optional[Callable[[str, str], Optional[float]]],
+    ):
+        """Install an opt-in non-event voltage reader for indexed sidecars."""
+        self._indexed_voltage_reader = reader
+        for child in self._child_models:
+            child._set_indexed_voltage_reader(reader)
+
+    def _read_indexed_voltage(self, local_node: str, external_node: str) -> Optional[float]:
+        """Read from an indexed sidecar only outside event interpolation contexts."""
+        if self._event_context_active or self._indexed_voltage_reader is None:
+            return None
+        return self._indexed_voltage_reader(local_node, external_node)
 
     def _should_update_discrete_state(self, key: str, time: float) -> bool:
         """Gate self-referential continuous real updates to the nominal tran grid.
@@ -410,6 +426,9 @@ class CompiledModel:
     def _get_voltage(self, node: str, node_voltages: Dict[str, float]) -> float:
         """Get voltage of a node, resolving through node_map."""
         if not self.node_map and not self._event_context_active:
+            indexed_value = self._read_indexed_voltage(node, node)
+            if indexed_value is not None:
+                return indexed_value
             if node in node_voltages:
                 value = node_voltages[node]
                 if self._indexed_voltage_probe is not None:
@@ -464,6 +483,9 @@ class CompiledModel:
                     if self._indexed_voltage_probe is not None:
                         self._indexed_voltage_probe(node, ext, value, True)
                     return value
+        indexed_value = self._read_indexed_voltage(node, ext)
+        if indexed_value is not None:
+            return indexed_value
         if ext in node_voltages:
             value = node_voltages[ext]
             if self._indexed_voltage_probe is not None:

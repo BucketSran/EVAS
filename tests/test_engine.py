@@ -662,12 +662,16 @@ class TestSimulator:
         assert indexed._perf_stats["indexed_output_write_throughs"] > 0
         assert indexed._perf_stats["indexed_output_write_through_nodes"] == 1
         assert indexed._perf_stats["indexed_post_model_sync_repairs"] == 0
-        assert indexed._perf_stats["indexed_voltage_probes"] > 0
+        assert indexed._perf_stats["indexed_voltage_reads"] > 0
+        assert indexed._perf_stats["indexed_voltage_read_nodes"] == 1
+        assert indexed._perf_stats["indexed_voltage_read_fallbacks"] == 0
         assert indexed._perf_stats["indexed_voltage_probe_mismatches"] == 0
         assert indexed._perf_stats["indexed_voltage_probe_missing_nodes"] == 0
         assert indexed._indexed_model_io_stats["output_count"] == 1
         assert indexed._indexed_array_stats["max_abs_diff"] == pytest.approx(0.0)
         assert indexed._indexed_array_stats["output_write_through_nodes"] == 1
+        assert indexed._indexed_voltage_read_stats["reads"] > 0
+        assert indexed._indexed_voltage_read_stats["fallbacks"] == 0
         assert indexed._indexed_voltage_probe_stats["mismatches"] == 0
 
 
@@ -692,6 +696,21 @@ class TestCompiledModelHelpers:
         nv = {"out_external": 0.9}
         assert self.model._get_voltage("out_internal", nv) == pytest.approx(0.9)
 
+    def test_get_voltage_non_event_prefers_indexed_reader(self):
+        self.model._set_indexed_voltage_reader(
+            lambda local, ext: 1.2 if ext == "vin" else None
+        )
+
+        assert self.model._get_voltage("vin", {"vin": 0.1}) == pytest.approx(1.2)
+
+    def test_get_voltage_mapped_non_event_prefers_indexed_reader(self):
+        self.model.node_map["inp"] = "VIN"
+        self.model._set_indexed_voltage_reader(
+            lambda local, ext: 1.3 if ext == "VIN" else None
+        )
+
+        assert self.model._get_voltage("inp", {"VIN": 0.7}) == pytest.approx(1.3)
+
     def test_get_voltage_interpolates_inside_event_context(self):
         self.model._prepare_step({"vin": 0.0, "rst": 0.0}, {"vin": 1.0, "rst": 1.0}, 0.0, 10e-9)
         self.model._event_time = 4e-9
@@ -701,6 +720,18 @@ class TestCompiledModelHelpers:
         assert self.model._get_voltage("rst", {"rst": 1.0}) == pytest.approx(0.4)
         self.model._event_context_active = False
         assert self.model._get_voltage("vin", {"vin": 1.0}) == pytest.approx(1.0)
+
+    def test_get_voltage_event_context_ignores_indexed_reader(self):
+        calls = []
+        self.model._set_indexed_voltage_reader(
+            lambda local, ext: calls.append((local, ext)) or 1.2
+        )
+        self.model._prepare_step({"vin": 0.0}, {"vin": 1.0}, 0.0, 10e-9)
+        self.model._event_time = 4e-9
+        self.model._event_context_active = True
+
+        assert self.model._get_voltage("vin", {"vin": 1.0}) == pytest.approx(0.4)
+        assert calls == []
 
     def test_prepare_step_skips_future_snapshot_when_unneeded(self):
         self.model._prepare_step(
