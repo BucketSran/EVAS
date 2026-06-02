@@ -25,6 +25,8 @@ from evas.simulator.engine import (
 )
 from evas.simulator.backend import CompiledModel
 from evas.simulator.backend import CompilationError
+from evas.simulator.backend import compile_module
+from evas.compiler.parser import parse
 
 
 # ===========================================================================
@@ -740,6 +742,49 @@ class TestSimulator:
         assert indexed._indexed_voltage_read_stats["fallbacks"] == 0
         assert indexed._indexed_voltage_probe_stats["mismatches"] == 0
 
+    def test_static_branch_fastpath_matches_default_and_counts_hits(self):
+        src = """\
+`include "disciplines.vams"
+module pass_through(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    analog begin
+        V(vout) <+ V(vin);
+    end
+endmodule
+"""
+        DefaultModel = compile_module(parse(src))
+        FastModel = compile_module(parse(src), static_branch_fastpath_codegen=True)
+
+        def run_model(model_cls, enabled):
+            model = model_cls()
+            model.node_map = {"vin": "VIN", "vout": "VOUT"}
+            sim = Simulator()
+            sim.add_source("VIN", ramp(0.0, 1.0, 0.0, 1e-9))
+            sim.add_model(model)
+            sim.record("VOUT")
+            result = sim.run(
+                tstop=2e-9,
+                tstep=1e-9,
+                static_branch_fastpath=enabled,
+            )
+            return result, sim, model
+
+        default_result, default_sim, _ = run_model(DefaultModel, False)
+        fast_result, fast_sim, fast_model = run_model(FastModel, True)
+
+        assert fast_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert fast_result.step_sizes.tolist() == pytest.approx(default_result.step_sizes.tolist())
+        assert fast_result.signals["VOUT"].tolist() == pytest.approx(
+            default_result.signals["VOUT"].tolist()
+        )
+        assert default_sim._perf_stats["static_branch_fastpath_codegen_models"] == 0
+        assert fast_sim._perf_stats["static_branch_fastpath_codegen_models"] == 1
+        assert fast_sim._perf_stats["static_branch_fastpath_static_read_nodes"] == 1
+        assert fast_sim._perf_stats["static_branch_fastpath_static_write_nodes"] == 1
+        assert fast_sim._perf_stats["static_branch_fastpath_fallbacks_total"] == 0
+        assert fast_model._static_branch_fastpath_enabled is False
+
 
 # ===========================================================================
 # CompiledModel base-class helpers
@@ -837,6 +882,20 @@ class TestCompiledModelHelpers:
 
         assert self.model._get_voltage("vin", {"vin": 1.0}) == pytest.approx(0.4)
         assert calls == []
+
+    def test_static_branch_voltage_falls_back_to_event_interpolation(self):
+        calls = []
+        self.model._set_static_branch_fastpath_enabled(True)
+        self.model._set_indexed_voltage_reader(
+            lambda local, ext: calls.append((local, ext)) or 1.2
+        )
+        self.model._prepare_step({"vin": 0.0}, {"vin": 1.0}, 0.0, 10e-9)
+        self.model._event_time = 4e-9
+        self.model._event_context_active = True
+
+        assert self.model._get_static_branch_voltage("vin", {"vin": 1.0}) == pytest.approx(0.4)
+        assert calls == []
+        assert self.model._perf_stats["static_branch_fastpath_fallbacks"] == 1
 
     def test_prepare_step_skips_future_snapshot_when_unneeded(self):
         self.model._prepare_step(

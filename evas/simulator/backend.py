@@ -31,6 +31,7 @@ class CompiledModel:
     _static_output_write_nodes = ()
     _dynamic_voltage_read_count = 0
     _dynamic_output_write_count = 0
+    _static_branch_fastpath_codegen = False
     _cmp_eps: float = 0.0
     _needs_future_node_voltages: bool = False
     _has_dynamic_breakpoints: bool = True
@@ -94,6 +95,7 @@ class CompiledModel:
             "timer_state_updates": 0,
             "cross_fires": 0,
             "above_fires": 0,
+            "static_branch_fastpath_fallbacks": 0,
         }
         # Lazy-allocated integrator states (only used when idt/idtmod appears)
         self._idt_states: Optional[Dict[str, Dict[str, float]]] = None
@@ -104,6 +106,7 @@ class CompiledModel:
         self._indexed_output_writer: Optional[Callable[[str, float], None]] = None
         self._indexed_voltage_probe: Optional[Callable[[str, str, float, bool], None]] = None
         self._indexed_voltage_reader: Optional[Callable[[str, str], Optional[float]]] = None
+        self._static_branch_fastpath_enabled: bool = False
         self._node_resolution_cache_enabled: bool = False
         self._node_resolution_cache: Dict[str, str] = {}
         # Per-instance deterministic RNG streams.
@@ -167,6 +170,14 @@ class CompiledModel:
         if self._event_context_active or self._indexed_voltage_reader is None:
             return None
         return self._indexed_voltage_reader(local_node, external_node)
+
+    def _set_static_branch_fastpath_enabled(self, enabled: bool):
+        """Enable opt-in helpers for static, non-dynamic branch read/write code."""
+        self._static_branch_fastpath_enabled = bool(enabled)
+        if enabled:
+            self._perf_stats["static_branch_fastpath_fallbacks"] = 0
+        for child in self._child_models:
+            child._set_static_branch_fastpath_enabled(enabled)
 
     def _set_node_resolution_cache_enabled(self, enabled: bool):
         """Cache local-to-external node mapping for the duration of a run."""
@@ -533,6 +544,36 @@ class CompiledModel:
             self._indexed_voltage_probe(node, ext, 0.0, False)
         return 0.0
 
+    def _get_static_branch_voltage(self, node: str, node_voltages: Dict[str, float]) -> float:
+        """Fast helper for compile-time-static branch voltage reads.
+
+        Event contexts intentionally fall back to ``_get_voltage`` because
+        crossing-time reads may need interpolation between previous/current
+        step values rather than a current-step dict/array lookup.
+        """
+        if self._event_context_active:
+            self._perf_stats["static_branch_fastpath_fallbacks"] += 1
+            return self._get_voltage(node, node_voltages)
+
+        ext = self._resolve_external_node(node)
+        indexed_value = self._read_indexed_voltage(node, ext)
+        if indexed_value is not None:
+            return indexed_value
+
+        if ext in node_voltages:
+            value = node_voltages[ext]
+            if self._indexed_voltage_probe is not None:
+                self._indexed_voltage_probe(node, ext, value, False)
+            return value
+        if node in self.output_nodes:
+            value = self.output_nodes[node]
+            if self._indexed_voltage_probe is not None:
+                self._indexed_voltage_probe(node, ext, value, False)
+            return value
+        if self._indexed_voltage_probe is not None:
+            self._indexed_voltage_probe(node, ext, 0.0, False)
+        return 0.0
+
     def _set_output(self, node: str, value: float, node_voltages: Dict[str, float]):
         """Set an output node voltage."""
         if not self.node_map:
@@ -542,6 +583,21 @@ class CompiledModel:
             node_voltages[node] = value
             if self._indexed_output_writer is not None:
                 self._indexed_output_writer(node, value)
+            return
+
+        if node not in self.output_nodes:
+            self._output_nodes_version += 1
+        self.output_nodes[node] = value
+        ext = self._resolve_external_node(node)
+        node_voltages[ext] = value
+        if self._indexed_output_writer is not None:
+            self._indexed_output_writer(ext, value)
+
+    def _set_static_branch_output(self, node: str, value: float, node_voltages: Dict[str, float]):
+        """Fast helper for compile-time-static branch voltage contributions."""
+        if self._event_context_active:
+            self._perf_stats["static_branch_fastpath_fallbacks"] += 1
+            self._set_output(node, value, node_voltages)
             return
 
         if node not in self.output_nodes:
@@ -850,21 +906,35 @@ class CompiledModel:
         return rng.randint(-2147483648, 2147483647)
 
 
-def compile_module(module: Module, default_transition: float = None) -> type:
+def compile_module(
+    module: Module,
+    default_transition: float = None,
+    static_branch_fastpath_codegen: bool = False,
+) -> type:
     """
     Compile a Module AST into a Python class.
 
     Returns a class (subclass of CompiledModel) that can be instantiated
     and connected to a Simulator.
     """
-    compiler = _ModuleCompiler(module, default_transition)
+    compiler = _ModuleCompiler(
+        module,
+        default_transition,
+        static_branch_fastpath_codegen=static_branch_fastpath_codegen,
+    )
     return compiler.compile()
 
 
 class _ModuleCompiler:
-    def __init__(self, module: Module, default_transition: float = None):
+    def __init__(
+        self,
+        module: Module,
+        default_transition: float = None,
+        static_branch_fastpath_codegen: bool = False,
+    ):
         self.module = module
         self.default_transition = default_transition or 1e-12
+        self.static_branch_fastpath_codegen = bool(static_branch_fastpath_codegen)
         self._trans_counter = 0
         self._cross_counter = 0
         self._above_counter = 0
@@ -1088,6 +1158,7 @@ class _ModuleCompiler:
         cls = namespace[f'{mod.name}_Model']
         cls._uses_idtmod = self._uses_idtmod
         cls._needs_future_node_voltages = self._needs_future_node_voltages
+        cls._static_branch_fastpath_codegen = self.static_branch_fastpath_codegen
         branch_io = (
             self._collect_static_branch_io(mod.analog_block.body)
             if mod.analog_block
@@ -2793,6 +2864,8 @@ class _ModuleCompiler:
                 idx_expr2 = self._compile_expr(branch.node1_index2)
                 return [f"{prefix}self._set_output(f'{node}[{{int({idx_expr})}}][{{int({idx_expr2})}}]', {expr}, nv)"]
             return [f"{prefix}self._set_output(f'{node}[{{int({idx_expr})}}]', {expr}, nv)"]
+        if self.static_branch_fastpath_codegen:
+            return [f"{prefix}self._set_static_branch_output({node!r}, {expr}, nv)"]
         else:
             return [f"{prefix}self._set_output({node!r}, {expr}, nv)"]
 
@@ -3117,6 +3190,8 @@ class _ModuleCompiler:
                 idx2 = self._compile_expr(index_expr2)
                 return f"self._get_voltage(f'{node}[{{int({idx})}}][{{int({idx2})}}]', nv)"
             return f"self._get_voltage(f'{node}[{{int({idx})}}]', nv)"
+        if self.static_branch_fastpath_codegen:
+            return f"self._get_static_branch_voltage({node!r}, nv)"
         return f"self._get_voltage({node!r}, nv)"
 
     def _compile_instance_target(self, expr: Expr) -> str:
@@ -3362,7 +3437,11 @@ class _ModuleCompiler:
         return 0
 
 
-def compile_va_file(va_path: str, source_dir: str = None) -> type:
+def compile_va_file(
+    va_path: str,
+    source_dir: str = None,
+    static_branch_fastpath_codegen: bool = False,
+) -> type:
     """
     Compile a .va file into a Python model class.
 
@@ -3385,4 +3464,8 @@ def compile_va_file(va_path: str, source_dir: str = None) -> type:
     if default_trans is None:
         default_trans = 1e-12
 
-    return compile_module(module, default_trans)
+    return compile_module(
+        module,
+        default_trans,
+        static_branch_fastpath_codegen=static_branch_fastpath_codegen,
+    )

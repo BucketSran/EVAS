@@ -808,6 +808,44 @@ class TestIndexedMigrationHarness:
         assert "missing_nodes = 0" in log
         assert "max_abs_diff = 0.0" in log
 
+    def test_evas_simulate_logs_static_branch_fastpath_when_opted_in(self, tmp_path, monkeypatch):
+        va = tmp_path / "pass_through.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module pass_through(vin, vout);
+                input vin;
+                output vout;
+                electrical vin, vout;
+
+                analog begin
+                    V(vout) <+ V(vin);
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_pass_through.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (vin 0) vsource type=dc dc=0.75
+            I0 (vin vout) pass_through
+            tran tran stop=2n step=1n
+            save vin:3f vout:3f
+            ahdl_include "pass_through.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_STATIC_BRANCH_FASTPATH", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_static_branch_fastpath = true" in log
+        assert "static_branch_fastpath_codegen_models = 1" in log
+        assert "static_branch_fastpath_static_read_nodes = 1" in log
+        assert "static_branch_fastpath_static_write_nodes = 1" in log
+        assert "static_branch_fastpath_fallbacks_total = 0" in log
+        assert (out_dir / "tran.csv").exists()
+
     def test_evas_simulate_logs_model_eval_profile_when_opted_in(self, tmp_path, monkeypatch):
         va = tmp_path / "pass_through.va"
         va.write_text(textwrap.dedent("""\

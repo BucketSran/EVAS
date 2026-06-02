@@ -209,12 +209,15 @@ module bus_drive(VSS);
 endmodule
 """
     ModelCls = compile_module(parse(src))
+    FastModelCls = compile_module(parse(src), static_branch_fastpath_codegen=True)
 
     assert ModelCls._static_voltage_read_nodes == ("VSS",)
     assert ModelCls._event_voltage_read_nodes == ()
     assert ModelCls._static_output_write_nodes == ()
     assert ModelCls._dynamic_voltage_read_count == 0
     assert ModelCls._dynamic_output_write_count == 1
+    assert "_set_output(f'dout[" in FastModelCls._generated_code
+    assert "_set_static_branch_output('dout'" not in FastModelCls._generated_code
 
 
 def test_indexed_model_io_plan_includes_static_branch_io_nodes():

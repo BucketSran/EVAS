@@ -410,7 +410,8 @@ class Simulator:
             profile_model_eval: bool = False,
             profile_model_io: bool = False,
             indexed_snapshot_profile: bool = False,
-            indexed_arrays: bool = False) -> SimResult:
+            indexed_arrays: bool = False,
+            static_branch_fastpath: bool = False) -> SimResult:
         """Run transient simulation with adaptive step control near cross events."""
         if tstep is None:
             tstep = tstop / 10000
@@ -467,6 +468,10 @@ class Simulator:
             "indexed_voltage_read_fallbacks": 0,
             "indexed_voltage_read_nodes": 0,
             "indexed_voltage_reads": 0,
+            "static_branch_fastpath_codegen_models": 0,
+            "static_branch_fastpath_fallbacks_total": 0,
+            "static_branch_fastpath_static_read_nodes": 0,
+            "static_branch_fastpath_static_write_nodes": 0,
             "model_post_update_calls": 0,
             "model_post_update_skips": 0,
             "node_resolution_cache_entries": 0,
@@ -595,11 +600,20 @@ class Simulator:
                 if setter is not None:
                     setter(enabled)
 
+        def _set_model_static_branch_fastpath_enabled(enabled: bool):
+            for model in self.models:
+                setter = getattr(model, "_set_static_branch_fastpath_enabled", None)
+                if setter is not None:
+                    setter(enabled)
+
         _set_model_indexed_output_writer(None)
         _set_model_indexed_voltage_probe(None)
         _set_model_indexed_voltage_reader(None)
         _set_model_node_resolution_cache_enabled(False)
+        _set_model_static_branch_fastpath_enabled(False)
         _set_model_node_resolution_cache_enabled(True)
+        if static_branch_fastpath:
+            _set_model_static_branch_fastpath_enabled(True)
         if model_io_profile_enabled:
             _set_model_indexed_output_writer(_record_model_io_output_write)
             _set_model_indexed_voltage_probe(_record_model_io_voltage_read)
@@ -1183,12 +1197,13 @@ class Simulator:
         if profile_clock is not None:
             _add_profile_time("result_array_conversion_s", _section_start)
 
-        def _aggregate_model_timer_stats():
+        def _aggregate_model_perf_stats():
             keys = {
                 "timer_breakpoint_cache_hits": "timer_breakpoint_cache_hits_total",
                 "timer_breakpoint_hits": "timer_breakpoint_hits_total",
                 "timer_breakpoint_scans": "timer_breakpoint_scans_total",
                 "timer_state_updates": "timer_state_updates_total",
+                "static_branch_fastpath_fallbacks": "static_branch_fastpath_fallbacks_total",
             }
 
             def _visit(model):
@@ -1201,7 +1216,38 @@ class Simulator:
             for model in self.models:
                 _visit(model)
 
-        _aggregate_model_timer_stats()
+        _aggregate_model_perf_stats()
+
+        def _aggregate_static_branch_fastpath_plan_stats():
+            if not static_branch_fastpath:
+                return
+
+            models = 0
+            read_nodes = 0
+            write_nodes = 0
+
+            def _visit(model):
+                nonlocal models, read_nodes, write_nodes
+                model_cls = getattr(model, "__class__", type(model))
+                if bool(getattr(model_cls, "_static_branch_fastpath_codegen", False)):
+                    models += 1
+                    read_nodes += len(
+                        getattr(model_cls, "_static_voltage_read_nodes", ()) or ()
+                    )
+                    write_nodes += len(
+                        getattr(model_cls, "_static_output_write_nodes", ()) or ()
+                    )
+                for child in getattr(model, "_child_models", []) or []:
+                    _visit(child)
+
+            for model in self.models:
+                _visit(model)
+
+            self._perf_stats["static_branch_fastpath_codegen_models"] = models
+            self._perf_stats["static_branch_fastpath_static_read_nodes"] = read_nodes
+            self._perf_stats["static_branch_fastpath_static_write_nodes"] = write_nodes
+
+        _aggregate_static_branch_fastpath_plan_stats()
 
         def _aggregate_node_resolution_cache_stats():
             entries = 0
@@ -1230,6 +1276,7 @@ class Simulator:
         _set_model_indexed_voltage_probe(None)
         _set_model_indexed_voltage_reader(None)
         _set_model_node_resolution_cache_enabled(False)
+        _set_model_static_branch_fastpath_enabled(False)
 
         return SimResult(time=time_arr, signals=signals,
                          step_sizes=np.array(self._step_sizes))

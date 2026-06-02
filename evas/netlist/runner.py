@@ -85,7 +85,11 @@ def _first_param(params: Dict[str, object], *keys: str, default: object = None) 
 # VA model compilation
 # ---------------------------------------------------------------------------
 
-def _compile_va(va_path: str, source_dir: str = None):
+def _compile_va(
+    va_path: str,
+    source_dir: str = None,
+    static_branch_fastpath_codegen: bool = False,
+):
     """Compile a .va file. Returns (ModelClass, Module) tuple."""
     if source_dir is None:
         source_dir = str(Path(va_path).parent)
@@ -96,7 +100,11 @@ def _compile_va(va_path: str, source_dir: str = None):
     _validate_va_spectre_compat(module)
     if default_trans is None:
         default_trans = 1e-12
-    cls = compile_module(module, default_trans)
+    cls = compile_module(
+        module,
+        default_trans,
+        static_branch_fastpath_codegen=static_branch_fastpath_codegen,
+    )
     return cls, module
 
 
@@ -757,6 +765,15 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
             log_file.close()
         return False
 
+    simopt = netlist.simulator_options or {}
+    static_branch_fastpath = _simopt_bool(
+        simopt,
+        'evas_static_branch_fastpath',
+        False,
+    ) or os.environ.get("EVAS_STATIC_BRANCH_FASTPATH", "").strip().lower() in {
+        "1", "true", "yes", "on", "enabled"
+    }
+
     # 2. Compile VA models
     models_by_name = {}
     for inc in netlist.ahdl_includes:
@@ -788,7 +805,10 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
             warnings += 1
 
         try:
-            cls, module = _compile_va(str(va_path))
+            cls, module = _compile_va(
+                str(va_path),
+                static_branch_fastpath_codegen=static_branch_fastpath,
+            )
         except Exception as e:
             log.write(f"ERROR: Failed to compile Verilog-A file {va_path.name}: {e}")
             errors += 1
@@ -889,7 +909,6 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
 
     tstop = netlist.tran.stop
     tstep = netlist.tran.step
-    simopt = netlist.simulator_options or {}
     reltol = float(simopt.get('reltol', 1e-3))
     vabstol = float(simopt.get('vabstol', 1e-6))
     iabstol = float(simopt.get('iabstol', 1e-12))
@@ -999,6 +1018,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write("    evas_indexed_snapshot_profile = true")
     if indexed_arrays:
         log.write("    evas_indexed_arrays = true")
+    if static_branch_fastpath:
+        log.write("    evas_static_branch_fastpath = true")
     log.write("")
 
     t_sim_start = time.time()
@@ -1013,7 +1034,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
                      profile_model_eval=profile_model_eval,
                      profile_model_io=profile_model_io,
                      indexed_snapshot_profile=indexed_snapshot_profile,
-                     indexed_arrays=indexed_arrays)
+                     indexed_arrays=indexed_arrays,
+                     static_branch_fastpath=static_branch_fastpath)
 
     for pct in range(10, 101, 10):
         t_at = tstop * pct / 100.0
