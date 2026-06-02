@@ -38,6 +38,9 @@ class NodeIndex:
         except KeyError as exc:
             raise KeyError(f"unknown node: {name}") from exc
 
+    def has(self, name: str) -> bool:
+        return name in self._ids
+
     def name_of(self, node_id: int) -> str:
         try:
             return self._names[node_id]
@@ -137,6 +140,71 @@ def copy_values_into(target: MutableSequence[float], source: Sequence[float]) ->
         raise ValueError(f"target length {len(target)} does not match source length {len(source)}")
     for idx, value in enumerate(source):
         target[idx] = float(value)
+
+
+@dataclass
+class IndexedVoltageSnapshotter:
+    """Opt-in profiler for dict voltage snapshots.
+
+    It mirrors a mapping into stable node-id order and returns array snapshots.
+    The current simulator still consumes dicts; this helper exists so migration
+    work can measure and validate the indexed representation before relying on
+    it in the hot loop.
+    """
+
+    node_index: NodeIndex
+    values: List[float] = field(default_factory=list)
+    dynamic_interns: int = 0
+
+    @classmethod
+    def from_names(cls, names: Iterable[str]) -> "IndexedVoltageSnapshotter":
+        node_index = build_node_index(names)
+        return cls(node_index=node_index, values=[0.0] * len(node_index))
+
+    @classmethod
+    def from_mapping(cls, voltages: Mapping[str, float]) -> "IndexedVoltageSnapshotter":
+        snapshotter = cls.from_names(voltages.keys())
+        snapshotter.update_from_mapping(voltages)
+        return snapshotter
+
+    @property
+    def node_count(self) -> int:
+        return len(self.node_index)
+
+    def _ensure_nodes(self, names: Iterable[str]) -> None:
+        before = len(self.node_index)
+        for name in names:
+            if not self.node_index.has(name):
+                self.node_index.intern(name)
+        added = len(self.node_index) - before
+        if added:
+            self.values.extend([0.0] * added)
+            self.dynamic_interns += added
+
+    def update_from_mapping(self, voltages: Mapping[str, float]) -> None:
+        self._ensure_nodes(voltages.keys())
+        for name, value in voltages.items():
+            self.values[self.node_index.id_of(name)] = float(value)
+
+    def snapshot_from_mapping(self, voltages: Mapping[str, float]) -> List[float]:
+        self.update_from_mapping(voltages)
+        return list(self.values)
+
+    def max_abs_diff(self, snapshot: Sequence[float], voltages: Mapping[str, float]) -> Tuple[float, str, int]:
+        if len(snapshot) != len(self.node_index):
+            raise ValueError(
+                f"snapshot length {len(snapshot)} does not match node count {len(self.node_index)}"
+            )
+        max_diff = 0.0
+        max_node = ""
+        checked = 0
+        for name, value in voltages.items():
+            diff = abs(float(value) - float(snapshot[self.node_index.id_of(name)]))
+            checked += 1
+            if diff > max_diff:
+                max_diff = diff
+                max_node = name
+        return max_diff, max_node, checked
 
 
 @dataclass

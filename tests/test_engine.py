@@ -584,6 +584,21 @@ class TestSimulator:
         assert fast._perf_stats["dynamic_step_shrinks"] == 0
         assert fast._perf_stats["err_ratio_skipped_sources"] > 0
 
+    def test_indexed_snapshot_profile_records_sidecar_timing_without_changing_result(self):
+        sim = Simulator()
+        sim.add_source("vin", ramp(0.0, 1.0, 0.0, 1e-9))
+        sim.record("vin")
+
+        result = sim.run(tstop=2e-9, tstep=1e-9, indexed_snapshot_profile=True)
+
+        assert result.signals["vin"][-1] == pytest.approx(1.0)
+        assert sim._perf_stats["indexed_prev_snapshots"] == sim._perf_stats["steps_total"]
+        assert sim._perf_stats["indexed_snapshot_mismatches"] == 0
+        assert sim._indexed_snapshot_stats["max_abs_diff"] == pytest.approx(0.0)
+        assert sim._indexed_snapshot_stats["snapshots"] == sim._perf_stats["steps_total"]
+        assert "dict_prev_snapshot_s" in sim._profile_times
+        assert "indexed_prev_snapshot_s" in sim._profile_times
+
 
 # ===========================================================================
 # CompiledModel base-class helpers

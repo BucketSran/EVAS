@@ -5,6 +5,7 @@ import pytest
 
 from evas.simulator.indexed import (
     IndexedVoltages,
+    IndexedVoltageSnapshotter,
     NodeIndex,
     StateIndex,
     build_indexed_run_plan,
@@ -86,6 +87,27 @@ def test_copy_values_into_validates_lengths_and_copies_float_values():
     assert target == pytest.approx([1.0, 2.5])
     with pytest.raises(ValueError, match="target length"):
         copy_values_into(target, [1.0])
+
+
+def test_indexed_voltage_snapshotter_tracks_mapping_updates_and_diffs():
+    snapshotter = IndexedVoltageSnapshotter.from_names(["vin", "vout"])
+
+    first = snapshotter.snapshot_from_mapping({"vin": 0.25, "vout": 0.75})
+    assert first == pytest.approx([0.25, 0.75])
+    diff, node, checked = snapshotter.max_abs_diff(first, {"vin": 0.25, "vout": 0.75})
+    assert diff == pytest.approx(0.0)
+    assert node == ""
+    assert checked == 2
+
+    second = snapshotter.snapshot_from_mapping({"vin": 0.5, "vout": 0.9, "clk": 1.0})
+    assert snapshotter.node_index.names == ("vin", "vout", "clk")
+    assert snapshotter.dynamic_interns == 1
+    assert second == pytest.approx([0.5, 0.9, 1.0])
+
+    diff, node, checked = snapshotter.max_abs_diff([0.4, 0.9, 1.0], {"vin": 0.5, "clk": 1.0})
+    assert diff == pytest.approx(0.1)
+    assert node == "vin"
+    assert checked == 2
 
 
 def test_indexed_run_plan_collects_sources_records_and_model_nodes():

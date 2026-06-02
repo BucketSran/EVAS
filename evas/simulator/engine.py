@@ -16,6 +16,8 @@ from typing import Callable, Dict, List, Optional
 
 import numpy as np
 
+from evas.simulator.indexed import IndexedVoltageSnapshotter
+
 
 class _LazyFutureNodeVoltages:
     """Resolve future source values only when cross exact-touch handling needs them."""
@@ -400,7 +402,8 @@ class Simulator:
             min_step: float = None,
             record_step: float = None,
             skip_source_error_control: bool = False,
-            profile_sections: bool = False) -> SimResult:
+            profile_sections: bool = False,
+            indexed_snapshot_profile: bool = False) -> SimResult:
         """Run transient simulation with adaptive step control near cross events."""
         if tstep is None:
             tstep = tstop / 10000
@@ -430,10 +433,15 @@ class Simulator:
             "err_ratio_skipped_sources": 0,
             "future_node_snapshots": 0,
             "future_node_lazy_descriptors": 0,
+            "indexed_prev_snapshots": 0,
+            "indexed_snapshot_dynamic_nodes": 0,
+            "indexed_snapshot_mismatches": 0,
+            "indexed_snapshot_values_checked": 0,
             "steps_total": 0,
         }
         self._profile_times: Dict[str, float] = {}
-        profile_clock = _wall_time.perf_counter if profile_sections else None
+        self._indexed_snapshot_stats: Dict[str, object] = {}
+        profile_clock = _wall_time.perf_counter if (profile_sections or indexed_snapshot_profile) else None
 
         def _add_profile_time(name: str, start: float):
             if profile_clock is not None:
@@ -525,6 +533,19 @@ class Simulator:
             return model_output_nodes
 
         _refresh_model_output_nodes()
+        indexed_snapshotter = None
+        if indexed_snapshot_profile:
+            indexed_snapshotter = IndexedVoltageSnapshotter.from_names(
+                sorted(set(self.node_voltages) | set(self.recorded_signals) | source_nodes | model_output_nodes)
+            )
+            self._indexed_snapshot_stats = {
+                "node_count": indexed_snapshotter.node_count,
+                "snapshots": 0,
+                "checked_values": 0,
+                "max_abs_diff": 0.0,
+                "max_abs_diff_node": "",
+                "dynamic_nodes": 0,
+            }
 
         # Record initial state
         self._record_point(0.0)
@@ -591,6 +612,29 @@ class Simulator:
             prev_nv = dict(self.node_voltages)
             if profile_clock is not None:
                 _add_profile_time("dict_prev_snapshot_s", _section_start)
+            if indexed_snapshotter is not None:
+                _section_start = profile_clock() if profile_clock is not None else 0.0
+                prev_indexed_snapshot = indexed_snapshotter.snapshot_from_mapping(prev_nv)
+                max_diff, max_node, checked = indexed_snapshotter.max_abs_diff(
+                    prev_indexed_snapshot,
+                    prev_nv,
+                )
+                self._perf_stats["indexed_prev_snapshots"] += 1
+                self._perf_stats["indexed_snapshot_values_checked"] += checked
+                if max_diff > float(self._indexed_snapshot_stats["max_abs_diff"]):
+                    self._indexed_snapshot_stats["max_abs_diff"] = max_diff
+                    self._indexed_snapshot_stats["max_abs_diff_node"] = max_node
+                if max_diff != 0.0:
+                    self._perf_stats["indexed_snapshot_mismatches"] += 1
+                self._indexed_snapshot_stats["snapshots"] = self._perf_stats["indexed_prev_snapshots"]
+                self._indexed_snapshot_stats["checked_values"] = self._perf_stats[
+                    "indexed_snapshot_values_checked"
+                ]
+                self._indexed_snapshot_stats["node_count"] = indexed_snapshotter.node_count
+                self._indexed_snapshot_stats["dynamic_nodes"] = indexed_snapshotter.dynamic_interns
+                self._perf_stats["indexed_snapshot_dynamic_nodes"] = indexed_snapshotter.dynamic_interns
+                if profile_clock is not None:
+                    _add_profile_time("indexed_prev_snapshot_s", _section_start)
             time += dt
 
             # Update source voltages
