@@ -795,6 +795,9 @@ class TestIndexedMigrationHarness:
         assert "output_count = 1" in log
         assert "output_write_throughs =" in log
         assert "post_model_sync_repairs = 0" in log
+        assert "Indexed voltage read probe:" in log
+        assert "mismatches = 0" in log
+        assert "missing_nodes = 0" in log
         assert "max_abs_diff = 0.0" in log
 
 

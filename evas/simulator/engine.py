@@ -457,12 +457,18 @@ class Simulator:
             "indexed_output_write_through_nodes": 0,
             "indexed_output_write_throughs": 0,
             "indexed_post_model_sync_repairs": 0,
+            "indexed_voltage_probe_event_skips": 0,
+            "indexed_voltage_probe_max_abs_diff": 0.0,
+            "indexed_voltage_probe_mismatches": 0,
+            "indexed_voltage_probe_missing_nodes": 0,
+            "indexed_voltage_probes": 0,
             "steps_total": 0,
         }
         self._profile_times: Dict[str, float] = {}
         self._indexed_snapshot_stats: Dict[str, object] = {}
         self._indexed_array_stats: Dict[str, object] = {}
         self._indexed_model_io_stats: Dict[str, object] = {}
+        self._indexed_voltage_probe_stats: Dict[str, object] = {}
         profile_clock = (
             _wall_time.perf_counter
             if (profile_sections or indexed_snapshot_profile or indexed_arrays)
@@ -480,7 +486,14 @@ class Simulator:
                 if setter is not None:
                     setter(writer)
 
+        def _set_model_indexed_voltage_probe(probe):
+            for model in self.models:
+                setter = getattr(model, "_set_indexed_voltage_probe", None)
+                if setter is not None:
+                    setter(probe)
+
         _set_model_indexed_output_writer(None)
+        _set_model_indexed_voltage_probe(None)
 
         source_nodes = {src.node for src in self.sources}
         source_future_waveforms = {src.node: src.waveform for src in self.sources}
@@ -585,6 +598,7 @@ class Simulator:
         indexed_model_io_versions = None
         indexed_model_io_plan = None
         indexed_output_nodes_seen: set[str] = set()
+        indexed_voltage_probe_max_node = ""
         if indexed_arrays:
             indexed_array = IndexedVoltageArray.from_names(
                 sorted(set(self.node_voltages) | set(self.recorded_signals) | source_nodes | model_output_nodes)
@@ -672,6 +686,14 @@ class Simulator:
                 "indexed_post_model_sync_repairs"
             ]
             self._perf_stats["indexed_array_dynamic_nodes"] = indexed_array.dynamic_interns
+            self._indexed_voltage_probe_stats = {
+                "probes": self._perf_stats["indexed_voltage_probes"],
+                "event_skips": self._perf_stats["indexed_voltage_probe_event_skips"],
+                "missing_nodes": self._perf_stats["indexed_voltage_probe_missing_nodes"],
+                "mismatches": self._perf_stats["indexed_voltage_probe_mismatches"],
+                "max_abs_diff": self._perf_stats["indexed_voltage_probe_max_abs_diff"],
+                "max_abs_diff_node": indexed_voltage_probe_max_node,
+            }
 
         def _record_indexed_array_diff(max_diff: float, max_node: str, checked: int):
             if indexed_array is None:
@@ -695,7 +717,33 @@ class Simulator:
                     indexed_output_nodes_seen
                 )
 
+            def _indexed_voltage_probe(
+                local_node: str,
+                external_node: str,
+                dict_value: float,
+                event_context: bool,
+            ):
+                nonlocal indexed_voltage_probe_max_node
+                if event_context:
+                    self._perf_stats["indexed_voltage_probe_event_skips"] += 1
+                    _refresh_indexed_array_stats()
+                    return
+                self._perf_stats["indexed_voltage_probes"] += 1
+                if not indexed_array.node_index.has(external_node):
+                    self._perf_stats["indexed_voltage_probe_missing_nodes"] += 1
+                    _refresh_indexed_array_stats()
+                    return
+                array_value = indexed_array.get(external_node, 0.0)
+                diff = abs(float(array_value) - float(dict_value))
+                if diff > self._perf_stats["indexed_voltage_probe_max_abs_diff"]:
+                    self._perf_stats["indexed_voltage_probe_max_abs_diff"] = diff
+                    indexed_voltage_probe_max_node = external_node or local_node
+                if diff != 0.0:
+                    self._perf_stats["indexed_voltage_probe_mismatches"] += 1
+                _refresh_indexed_array_stats()
+
             _set_model_indexed_output_writer(_indexed_output_write_through)
+            _set_model_indexed_voltage_probe(_indexed_voltage_probe)
             max_diff, max_node, checked = indexed_array.max_abs_diff_mapping(self.node_voltages)
             _record_indexed_array_diff(max_diff, max_node, checked)
 
@@ -978,6 +1026,7 @@ class Simulator:
             _add_profile_time("result_array_conversion_s", _section_start)
 
         _set_model_indexed_output_writer(None)
+        _set_model_indexed_voltage_probe(None)
 
         return SimResult(time=time_arr, signals=signals,
                          step_sizes=np.array(self._step_sizes))

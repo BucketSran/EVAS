@@ -662,9 +662,13 @@ class TestSimulator:
         assert indexed._perf_stats["indexed_output_write_throughs"] > 0
         assert indexed._perf_stats["indexed_output_write_through_nodes"] == 1
         assert indexed._perf_stats["indexed_post_model_sync_repairs"] == 0
+        assert indexed._perf_stats["indexed_voltage_probes"] > 0
+        assert indexed._perf_stats["indexed_voltage_probe_mismatches"] == 0
+        assert indexed._perf_stats["indexed_voltage_probe_missing_nodes"] == 0
         assert indexed._indexed_model_io_stats["output_count"] == 1
         assert indexed._indexed_array_stats["max_abs_diff"] == pytest.approx(0.0)
         assert indexed._indexed_array_stats["output_write_through_nodes"] == 1
+        assert indexed._indexed_voltage_probe_stats["mismatches"] == 0
 
 
 # ===========================================================================
@@ -891,6 +895,18 @@ endmodule
         child._set_output("z", 1.1, {})
 
         assert calls == [("OUT", pytest.approx(1.1))]
+
+    def test_indexed_voltage_probe_sees_resolved_read_node(self):
+        calls = []
+        self.model.node_map["inp"] = "VIN"
+        self.model._set_indexed_voltage_probe(
+            lambda local, ext, value, event: calls.append((local, ext, value, event))
+        )
+
+        value = self.model._get_voltage("inp", {"VIN": 0.7})
+
+        assert value == pytest.approx(0.7)
+        assert calls == [("inp", "VIN", pytest.approx(0.7), False)]
 
     def test_transition_first_call_returns_target(self):
         nv = {}

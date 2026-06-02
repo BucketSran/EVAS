@@ -96,6 +96,7 @@ class CompiledModel:
         self._child_models: List["CompiledModel"] = []
         self._parent_model: Optional["CompiledModel"] = None
         self._indexed_output_writer: Optional[Callable[[str, float], None]] = None
+        self._indexed_voltage_probe: Optional[Callable[[str, str, float, bool], None]] = None
         # Per-instance deterministic RNG streams.
         self._rng_default = random.Random(0)
         self._rng_streams: Dict[int, random.Random] = {}
@@ -133,6 +134,15 @@ class CompiledModel:
         self._indexed_output_writer = writer
         for child in self._child_models:
             child._set_indexed_output_writer(writer)
+
+    def _set_indexed_voltage_probe(
+        self,
+        probe: Optional[Callable[[str, str, float, bool], None]],
+    ):
+        """Install an opt-in voltage-read probe for indexed sidecars."""
+        self._indexed_voltage_probe = probe
+        for child in self._child_models:
+            child._set_indexed_voltage_probe(probe)
 
     def _should_update_discrete_state(self, key: str, time: float) -> bool:
         """Gate self-referential continuous real updates to the nominal tran grid.
@@ -401,9 +411,17 @@ class CompiledModel:
         """Get voltage of a node, resolving through node_map."""
         if not self.node_map and not self._event_context_active:
             if node in node_voltages:
-                return node_voltages[node]
+                value = node_voltages[node]
+                if self._indexed_voltage_probe is not None:
+                    self._indexed_voltage_probe(node, node, value, False)
+                return value
             if node in self.output_nodes:
-                return self.output_nodes[node]
+                value = self.output_nodes[node]
+                if self._indexed_voltage_probe is not None:
+                    self._indexed_voltage_probe(node, node, value, False)
+                return value
+            if self._indexed_voltage_probe is not None:
+                self._indexed_voltage_probe(node, node, 0.0, False)
             return 0.0
 
         # Check if it's a mapped external node
@@ -443,12 +461,22 @@ class CompiledModel:
                             value += math.copysign(max(1e-12, abs(value) * 1e-12), cross_dir)
                     elif abs(v1 - v0) > 1e-30:
                         value += math.copysign(max(1e-12, abs(value) * 1e-12), v1 - v0)
+                    if self._indexed_voltage_probe is not None:
+                        self._indexed_voltage_probe(node, ext, value, True)
                     return value
         if ext in node_voltages:
-            return node_voltages[ext]
+            value = node_voltages[ext]
+            if self._indexed_voltage_probe is not None:
+                self._indexed_voltage_probe(node, ext, value, False)
+            return value
         # Check output nodes (self-driven)
         if node in self.output_nodes:
-            return self.output_nodes[node]
+            value = self.output_nodes[node]
+            if self._indexed_voltage_probe is not None:
+                self._indexed_voltage_probe(node, ext, value, False)
+            return value
+        if self._indexed_voltage_probe is not None:
+            self._indexed_voltage_probe(node, ext, 0.0, False)
         return 0.0
 
     def _set_output(self, node: str, value: float, node_voltages: Dict[str, float]):
