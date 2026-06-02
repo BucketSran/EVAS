@@ -468,6 +468,13 @@ class Simulator:
             "indexed_voltage_reads": 0,
             "model_post_update_calls": 0,
             "model_post_update_skips": 0,
+            "source_breakpoint_scan_calls": 0,
+            "model_breakpoint_scan_calls": 0,
+            "bound_step_scan_calls": 0,
+            "timer_breakpoint_cache_hits_total": 0,
+            "timer_breakpoint_hits_total": 0,
+            "timer_breakpoint_scans_total": 0,
+            "timer_state_updates_total": 0,
             "steps_total": 0,
         }
         self._profile_times: Dict[str, float] = {}
@@ -826,6 +833,7 @@ class Simulator:
 
             # Check for breakpoints from sources (PWL knees, pulse edges)
             _section_start = profile_clock() if profile_clock is not None else 0.0
+            self._perf_stats["source_breakpoint_scan_calls"] += len(source_breakpoint_sources)
             for src in source_breakpoint_sources:
                 bp = src.next_breakpoint(time)
                 if bp is not None and bp > time and bp < time + dt:
@@ -839,6 +847,7 @@ class Simulator:
 
             # Check for breakpoints from transition operators
             _section_start = profile_clock() if profile_clock is not None else 0.0
+            self._perf_stats["model_breakpoint_scan_calls"] += len(breakpoint_models)
             for model in breakpoint_models:
                 bp = model.next_breakpoint(time)
                 if bp is not None and bp > time and bp < time + dt:
@@ -852,6 +861,7 @@ class Simulator:
 
             # Respect $bound_step from models
             _section_start = profile_clock() if profile_clock is not None else 0.0
+            self._perf_stats["bound_step_scan_calls"] += len(bound_step_models)
             for model in bound_step_models:
                 bs = model._bound_step
                 if bs > 0 and dt > bs:
@@ -1095,6 +1105,26 @@ class Simulator:
             signals[name] = np.array(data)
         if profile_clock is not None:
             _add_profile_time("result_array_conversion_s", _section_start)
+
+        def _aggregate_model_timer_stats():
+            keys = {
+                "timer_breakpoint_cache_hits": "timer_breakpoint_cache_hits_total",
+                "timer_breakpoint_hits": "timer_breakpoint_hits_total",
+                "timer_breakpoint_scans": "timer_breakpoint_scans_total",
+                "timer_state_updates": "timer_state_updates_total",
+            }
+
+            def _visit(model):
+                perf = getattr(model, "_perf_stats", {}) or {}
+                for source_key, dest_key in keys.items():
+                    self._perf_stats[dest_key] += int(perf.get(source_key, 0) or 0)
+                for child in getattr(model, "_child_models", []) or []:
+                    _visit(child)
+
+            for model in self.models:
+                _visit(model)
+
+        _aggregate_model_timer_stats()
 
         _set_model_indexed_output_writer(None)
         _set_model_indexed_voltage_probe(None)

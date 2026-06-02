@@ -1619,6 +1619,14 @@ endmodule
         # At 50ns, timer should have fired at 10, 20, 30, 40, 50 → count=5
         final_val = result.signals["out"][-1]
         assert final_val == pytest.approx(5.0, abs=1.0)
+        assert sim._perf_stats["model_breakpoint_scan_calls"] == sim._perf_stats["steps_total"]
+        assert sim._perf_stats["timer_breakpoint_scans_total"] == model._perf_stats[
+            "timer_breakpoint_scans"
+        ]
+        assert sim._perf_stats["timer_breakpoint_hits_total"] == model._perf_stats[
+            "timer_breakpoint_hits"
+        ]
+        assert sim._perf_stats["timer_breakpoint_scans_total"] > 0
 
     VA_SRC_ABSOLUTE = """\
 `include "disciplines.vams"
@@ -2130,6 +2138,7 @@ endmodule
         result = sim.run(tstop=10e-9, tstep=10e-9)
         # Should have at least 10 steps (10ns / 1ns)
         assert len(result.time) >= 10
+        assert sim._perf_stats["bound_step_scan_calls"] == sim._perf_stats["steps_total"]
         # All step sizes (after first) should be <= 1ns + tolerance
         for dt in result.step_sizes[1:]:
             assert dt <= 1e-9 + 1e-15
@@ -2166,6 +2175,10 @@ endmodule
         result = sim.run(tstop=2e-9, tstep=1e-9)
 
         assert result.signals["out"][-1] == pytest.approx(1.0)
+        assert sim._perf_stats["source_breakpoint_scan_calls"] == 0
+        assert sim._perf_stats["model_breakpoint_scan_calls"] == 0
+        assert sim._perf_stats["bound_step_scan_calls"] == 0
+        assert sim._perf_stats["timer_breakpoint_scans_total"] == 0
         assert sim._perf_stats["model_post_update_calls"] == 0
         assert sim._perf_stats["model_post_update_skips"] == sim._perf_stats["steps_total"]
 
