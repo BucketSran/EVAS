@@ -331,6 +331,17 @@ class DynamicBranchAccessIO:
 
 
 @dataclass(frozen=True)
+class IndexedStateArrayLayout:
+    """Model-local array state layout for future indexed/native state storage."""
+
+    name: str
+    lo: int
+    hi: int
+    length: int
+    integer: bool
+
+
+@dataclass(frozen=True)
 class IndexedModelIO:
     """Node-id boundary for one compiled model instance."""
 
@@ -346,6 +357,10 @@ class IndexedModelIO:
     dynamic_branch_accesses: Tuple[DynamicBranchAccessIO, ...] = ()
     dynamic_voltage_read_count: int = 0
     dynamic_output_write_count: int = 0
+    state_scalar_names: Tuple[str, ...] = ()
+    state_scalar_ids: Tuple[int, ...] = ()
+    integer_state_names: Tuple[str, ...] = ()
+    state_array_layouts: Tuple[IndexedStateArrayLayout, ...] = ()
 
 
 @dataclass
@@ -417,6 +432,26 @@ class IndexedModelIOPlan:
     @property
     def dynamic_branch_access_count(self) -> int:
         return sum(len(model_io.dynamic_branch_accesses) for model_io in self.model_ios)
+
+    @property
+    def scalar_state_count(self) -> int:
+        return sum(len(model_io.state_scalar_names) for model_io in self.model_ios)
+
+    @property
+    def integer_state_count(self) -> int:
+        return sum(len(model_io.integer_state_names) for model_io in self.model_ios)
+
+    @property
+    def state_array_count(self) -> int:
+        return sum(len(model_io.state_array_layouts) for model_io in self.model_ios)
+
+    @property
+    def state_array_slot_count(self) -> int:
+        return sum(
+            array_layout.length
+            for model_io in self.model_ios
+            for array_layout in model_io.state_array_layouts
+        )
 
 
 @dataclass
@@ -590,6 +625,28 @@ def build_indexed_model_io_plan(
                     getattr(model_cls, "_dynamic_branch_accesses", ()) or ()
                 )
             )
+            state_index = StateIndex()
+            state_scalar_names = tuple(
+                str(name)
+                for name in getattr(model_cls, "_state_scalar_names", ()) or ()
+            )
+            state_scalar_ids = tuple(state_index.intern(name) for name in state_scalar_names)
+            integer_state_names = tuple(
+                str(name)
+                for name in getattr(model_cls, "_integer_state_names", ()) or ()
+            )
+            state_array_layouts = tuple(
+                IndexedStateArrayLayout(
+                    name=str(name),
+                    lo=int(lo),
+                    hi=int(hi),
+                    length=max(0, int(hi) - int(lo) + 1),
+                    integer=bool(integer),
+                )
+                for name, lo, hi, integer in (
+                    getattr(model_cls, "_state_array_ranges", ()) or ()
+                )
+            )
             model_entries.append(
                 (
                     path,
@@ -604,6 +661,10 @@ def build_indexed_model_io_plan(
                     dynamic_branch_accesses,
                     dynamic_read_count,
                     dynamic_write_count,
+                    state_scalar_names,
+                    state_scalar_ids,
+                    integer_state_names,
+                    state_array_layouts,
                 )
             )
             io_names.extend(mapped_ports)
@@ -629,6 +690,10 @@ def build_indexed_model_io_plan(
             dynamic_branch_accesses=dynamic_branch_accesses,
             dynamic_voltage_read_count=dynamic_read_count,
             dynamic_output_write_count=dynamic_write_count,
+            state_scalar_names=state_scalar_names,
+            state_scalar_ids=state_scalar_ids,
+            integer_state_names=integer_state_names,
+            state_array_layouts=state_array_layouts,
         )
         for (
             path,
@@ -643,6 +708,10 @@ def build_indexed_model_io_plan(
             dynamic_branch_accesses,
             dynamic_read_count,
             dynamic_write_count,
+            state_scalar_names,
+            state_scalar_ids,
+            integer_state_names,
+            state_array_layouts,
         ) in model_entries
     )
     return IndexedModelIOPlan(node_index=index, model_ios=model_ios)

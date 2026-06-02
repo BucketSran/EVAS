@@ -6,6 +6,7 @@ import pytest
 from evas.simulator.indexed import (
     DynamicBranchAccessIO,
     IndexedVoltages,
+    IndexedStateArrayLayout,
     IndexedVoltageArray,
     IndexedVoltageSnapshotter,
     NodeIndex,
@@ -248,6 +249,31 @@ endmodule
     )
 
 
+def test_compiled_model_records_state_layout_metadata():
+    src = """\
+`include "disciplines.vams"
+module state_probe(out);
+    output electrical out;
+    real x = 1.25;
+    integer code = 2;
+    genvar i;
+    real accum[3:0];
+    integer bins[0:2];
+    analog begin
+        V(out) <+ x + code;
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+
+    assert ModelCls._state_scalar_names == ("x", "code", "i")
+    assert ModelCls._integer_state_names == ("code", "i")
+    assert ModelCls._state_array_ranges == (
+        ("accum", 0, 3, False),
+        ("bins", 0, 2, True),
+    )
+
+
 def test_indexed_model_io_plan_includes_static_branch_io_nodes():
     src = """\
 `include "disciplines.vams"
@@ -319,6 +345,54 @@ endmodule
     assert plan.dynamic_branch_access_count == 1
     assert plan.dynamic_output_write_count == 1
     assert plan.dynamic_voltage_read_count == 0
+
+
+def test_indexed_model_io_plan_exposes_state_layouts():
+    src = """\
+`include "disciplines.vams"
+module state_probe(out);
+    output electrical out;
+    real x = 1.25;
+    integer code = 2;
+    genvar i;
+    real accum[3:0];
+    integer bins[0:2];
+    analog begin
+        V(out) <+ x + code;
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+    model = ModelCls()
+    sim = Simulator()
+    sim.add_model(model)
+
+    plan = build_indexed_model_io_plan(sim)
+    (model_io,) = plan.model_ios
+
+    assert model_io.state_scalar_names == ("x", "code", "i")
+    assert model_io.state_scalar_ids == (0, 1, 2)
+    assert model_io.integer_state_names == ("code", "i")
+    assert model_io.state_array_layouts == (
+        IndexedStateArrayLayout(
+            name="accum",
+            lo=0,
+            hi=3,
+            length=4,
+            integer=False,
+        ),
+        IndexedStateArrayLayout(
+            name="bins",
+            lo=0,
+            hi=2,
+            length=3,
+            integer=True,
+        ),
+    )
+    assert plan.scalar_state_count == 3
+    assert plan.integer_state_count == 2
+    assert plan.state_array_count == 2
+    assert plan.state_array_slot_count == 7
 
 
 def test_indexed_run_plan_collects_sources_records_and_model_nodes():

@@ -793,6 +793,10 @@ class TestIndexedMigrationHarness:
         assert "Indexed model IO plan:" in log
         assert "mapped_port_count = 2" in log
         assert "output_count = 1" in log
+        assert "scalar_state_count = 0" in log
+        assert "integer_state_count = 0" in log
+        assert "state_array_count = 0" in log
+        assert "state_array_slot_count = 0" in log
         assert "static_voltage_read_count = 1" in log
         assert "static_output_write_count = 1" in log
         assert "event_body_voltage_read_count = 0" in log

@@ -34,6 +34,9 @@ class CompiledModel:
     _dynamic_branch_accesses = ()
     _dynamic_voltage_read_count = 0
     _dynamic_output_write_count = 0
+    _state_scalar_names = ()
+    _integer_state_names = ()
+    _state_array_ranges = ()
     _static_branch_fastpath_codegen = False
     _cmp_eps: float = 0.0
     _needs_future_node_voltages: bool = False
@@ -1049,6 +1052,20 @@ class _ModuleCompiler:
             for idx, node in enumerate(sorted(branch_io["static_output_write_nodes"]))
         }
 
+        state_scalar_names = []
+        integer_state_names = []
+        state_array_ranges = []
+        for v in mod.variables:
+            is_integer = self._is_integer_decl(v)
+            if v.is_array:
+                hi = v.array_hi if v.array_hi is not None else 0
+                lo = v.array_lo if v.array_lo is not None else 0
+                state_array_ranges.append((v.name, min(hi, lo), max(hi, lo), is_integer))
+            else:
+                state_scalar_names.append(v.name)
+                if is_integer:
+                    integer_state_names.append(v.name)
+
         # Build arrays info
         array_vars = {}
         for v in mod.variables:
@@ -1264,6 +1281,9 @@ class _ModuleCompiler:
         )
         cls._dynamic_voltage_read_count = int(branch_io["dynamic_voltage_read_count"])
         cls._dynamic_output_write_count = int(branch_io["dynamic_output_write_count"])
+        cls._state_scalar_names = tuple(state_scalar_names)
+        cls._integer_state_names = tuple(integer_state_names)
+        cls._state_array_ranges = tuple(state_array_ranges)
         if mod.analog_block:
             cls._has_dynamic_breakpoints = self._statement_has_dynamic_breakpoints(mod.analog_block.body)
             cls._has_post_update_events = self._has_post_update_event(mod.analog_block.body)
@@ -3146,12 +3166,15 @@ class _ModuleCompiler:
     def _is_integer_variable(self, name: str) -> bool:
         for variable in self.module.variables:
             if variable.name == name:
-                return (
-                    variable.var_type == ParamType.INTEGER
-                    or getattr(variable.var_type, "name", "") == "INTEGER"
-                    or variable.var_type in {"integer", "genvar"}
-                )
+                return self._is_integer_decl(variable)
         return False
+
+    def _is_integer_decl(self, variable) -> bool:
+        return (
+            variable.var_type == ParamType.INTEGER
+            or getattr(variable.var_type, "name", "") == "INTEGER"
+            or variable.var_type in {"integer", "genvar"}
+        )
 
     def _compile_for(self, stmt: ForStatement, indent) -> List[str]:
         prefix = '    ' * indent
