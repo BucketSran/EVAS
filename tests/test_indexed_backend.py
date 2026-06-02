@@ -9,6 +9,7 @@ from evas.simulator.indexed import (
     IndexedVoltageSnapshotter,
     NodeIndex,
     StateIndex,
+    build_indexed_model_io_plan,
     build_indexed_run_plan,
     build_node_index,
     check_indexed_trace_round_trip,
@@ -131,6 +132,43 @@ def test_indexed_voltage_array_grows_and_reads_previous_snapshots():
     assert node == ""
     assert checked == 3
     assert array.to_mapping() == pytest.approx({"vin": 0.25, "vout": 0.9, "clk": 1.0})
+
+
+def test_indexed_model_io_plan_resolves_mapped_ports_outputs_and_parent_nodes():
+    parent = CompiledModel()
+    parent.node_map = {"inp": "VIN", "out": "VOUT"}
+    parent.output_nodes = {"out": 0.0}
+    parent._output_nodes_version = 1
+
+    child = CompiledModel()
+    child.node_map = {"a": "@parent:inp", "z": "@parent:out"}
+    child.output_nodes = {"z": 0.0}
+    child._output_nodes_version = 1
+    child._parent_model = parent
+    parent._child_models = [child]
+
+    sim = Simulator()
+    sim.add_model(parent)
+
+    plan = build_indexed_model_io_plan(sim, extra_nodes=["monitor"])
+
+    assert plan.node_index.names == ("monitor", "VIN", "VOUT")
+    assert plan.model_count == 2
+    assert plan.mapped_port_count == 4
+    assert plan.output_count == 2
+
+    root_io, child_io = plan.model_ios
+    assert root_io.model_path == (0,)
+    assert child_io.model_path == (0, 0)
+    assert root_io.mapped_port_node_ids == (
+        plan.node_index.id_of("VIN"),
+        plan.node_index.id_of("VOUT"),
+    )
+    assert child_io.mapped_port_node_ids == (
+        plan.node_index.id_of("VIN"),
+        plan.node_index.id_of("VOUT"),
+    )
+    assert child_io.output_node_ids == (plan.node_index.id_of("VOUT"),)
 
 
 def test_indexed_run_plan_collects_sources_records_and_model_nodes():

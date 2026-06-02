@@ -790,6 +790,9 @@ class TestIndexedMigrationHarness:
         assert "evas_indexed_arrays = true" in log
         assert "indexed_array_err_ratio_reads" in log
         assert "Indexed array profile:" in log
+        assert "Indexed model IO plan:" in log
+        assert "mapped_port_count = 2" in log
+        assert "output_count = 1" in log
         assert "max_abs_diff = 0.0" in log
 
 

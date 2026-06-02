@@ -320,6 +320,40 @@ class IndexedRunPlan:
         return len(self.node_index)
 
 
+@dataclass(frozen=True)
+class IndexedModelIO:
+    """Node-id boundary for one compiled model instance."""
+
+    model_path: Tuple[int, ...]
+    model_class: str
+    mapped_port_node_ids: Tuple[int, ...]
+    output_node_ids: Tuple[int, ...]
+
+
+@dataclass
+class IndexedModelIOPlan:
+    """Per-model node-id IO boundary for future indexed/native evaluation."""
+
+    node_index: NodeIndex
+    model_ios: Tuple[IndexedModelIO, ...]
+
+    @property
+    def node_count(self) -> int:
+        return len(self.node_index)
+
+    @property
+    def model_count(self) -> int:
+        return len(self.model_ios)
+
+    @property
+    def mapped_port_count(self) -> int:
+        return sum(len(model_io.mapped_port_node_ids) for model_io in self.model_ios)
+
+    @property
+    def output_count(self) -> int:
+        return sum(len(model_io.output_node_ids) for model_io in self.model_ios)
+
+
 @dataclass
 class IndexedTrace:
     """Array-style waveform trace used by the indexed parity harness."""
@@ -400,8 +434,70 @@ def _iter_model_tree(model: Any):
         yield from _iter_model_tree(child)
 
 
+def _iter_model_tree_with_path(model: Any, path: Tuple[int, ...] = ()):
+    yield path, model
+    for idx, child in enumerate(getattr(model, "_child_models", []) or []):
+        yield from _iter_model_tree_with_path(child, path + (idx,))
+
+
 def _id_tuple(index: NodeIndex, names: Iterable[str]) -> Tuple[int, ...]:
     return tuple(index.id_of(name) for name in names)
+
+
+def _resolve_model_node(model: Any, node: str) -> str:
+    """Resolve a model-local node through node_map and one or more parents."""
+    ext = getattr(model, "node_map", {}).get(node, node)
+    current = model
+    visited = 0
+    while (
+        isinstance(ext, str)
+        and ext
+        and ext[0] == "@"
+        and ext.startswith("@parent:")
+        and getattr(current, "_parent_model", None) is not None
+        and visited < 16
+    ):
+        parent = current._parent_model
+        pnode = ext[len("@parent:"):]
+        ext = getattr(parent, "node_map", {}).get(pnode, pnode)
+        current = parent
+        visited += 1
+    return ext if isinstance(ext, str) and ext else node
+
+
+def build_indexed_model_io_plan(
+    simulator: Any,
+    extra_nodes: Iterable[str] = (),
+) -> IndexedModelIOPlan:
+    """Build a sidecar model IO plan without changing dict-backed execution."""
+
+    model_entries: List[Tuple[Tuple[int, ...], Any, List[str], List[str]]] = []
+    io_names: List[str] = []
+    for root_index, model in enumerate(getattr(simulator, "models", []) or []):
+        for path, tree_model in _iter_model_tree_with_path(model, (root_index,)):
+            mapped_ports = [
+                _resolve_model_node(tree_model, local_name)
+                for local_name in getattr(tree_model, "node_map", {}).keys()
+            ]
+            output_nodes = [
+                _resolve_model_node(tree_model, local_name)
+                for local_name in getattr(tree_model, "output_nodes", {}).keys()
+            ]
+            model_entries.append((path, tree_model, mapped_ports, output_nodes))
+            io_names.extend(mapped_ports)
+            io_names.extend(output_nodes)
+
+    index = build_node_index(extra_nodes, io_names)
+    model_ios = tuple(
+        IndexedModelIO(
+            model_path=path,
+            model_class=getattr(getattr(model, "__class__", type(model)), "__name__", "model"),
+            mapped_port_node_ids=_id_tuple(index, mapped_ports),
+            output_node_ids=_id_tuple(index, output_nodes),
+        )
+        for path, model, mapped_ports, output_nodes in model_entries
+    )
+    return IndexedModelIOPlan(node_index=index, model_ios=model_ios)
 
 
 def build_indexed_run_plan(simulator: Any, extra_nodes: Iterable[str] = ()) -> IndexedRunPlan:

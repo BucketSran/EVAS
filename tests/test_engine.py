@@ -629,6 +629,39 @@ class TestSimulator:
         assert "indexed_array_prev_snapshot_s" in indexed._profile_times
         assert "indexed_array_sync_s" in indexed._profile_times
 
+    def test_indexed_arrays_build_model_io_plan_without_changing_mapped_output(self):
+        class MirrorModel(CompiledModel):
+            def __init__(self):
+                super().__init__()
+                self.node_map = {"inp": "vin", "out": "vout"}
+
+            def evaluate(self, node_voltages, time):
+                self._set_output("out", self._get_voltage("inp", node_voltages), node_voltages)
+
+        default = Simulator()
+        default.add_source("vin", ramp(0.0, 1.0, 0.0, 1e-9))
+        default.add_model(MirrorModel())
+        default.record("vout")
+        default_result = default.run(tstop=2e-9, tstep=1e-9)
+
+        indexed = Simulator()
+        indexed.add_source("vin", ramp(0.0, 1.0, 0.0, 1e-9))
+        indexed.add_model(MirrorModel())
+        indexed.record("vout")
+        indexed_result = indexed.run(tstop=2e-9, tstep=1e-9, indexed_arrays=True)
+
+        assert indexed_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert indexed_result.step_sizes.tolist() == pytest.approx(default_result.step_sizes.tolist())
+        assert indexed_result.signals["vout"].tolist() == pytest.approx(
+            default_result.signals["vout"].tolist()
+        )
+        assert indexed._perf_stats["indexed_model_io_models"] == 1
+        assert indexed._perf_stats["indexed_model_io_mapped_ports"] == 2
+        assert indexed._perf_stats["indexed_model_io_outputs"] == 1
+        assert indexed._perf_stats["indexed_model_io_refreshes"] >= 1
+        assert indexed._indexed_model_io_stats["output_count"] == 1
+        assert indexed._indexed_array_stats["max_abs_diff"] == pytest.approx(0.0)
+
 
 # ===========================================================================
 # CompiledModel base-class helpers

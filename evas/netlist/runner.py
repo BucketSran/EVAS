@@ -1031,6 +1031,10 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write("Indexed array profile:")
         for key, value in sorted(sim._indexed_array_stats.items()):
             log.write(f"    {key} = {value}")
+    if getattr(sim, "_indexed_model_io_stats", None):
+        log.write("Indexed model IO plan:")
+        for key, value in sorted(sim._indexed_model_io_stats.items()):
+            log.write(f"    {key} = {value}")
 
     # Signal range summary
     log.write("")

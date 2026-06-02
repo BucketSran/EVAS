@@ -16,7 +16,11 @@ from typing import Callable, Dict, List, Optional
 
 import numpy as np
 
-from evas.simulator.indexed import IndexedVoltageArray, IndexedVoltageSnapshotter
+from evas.simulator.indexed import (
+    IndexedVoltageArray,
+    IndexedVoltageSnapshotter,
+    build_indexed_model_io_plan,
+)
 
 
 class _LazyFutureNodeVoltages:
@@ -446,11 +450,16 @@ class Simulator:
             "indexed_array_source_updates": 0,
             "indexed_array_syncs": 0,
             "indexed_array_values_checked": 0,
+            "indexed_model_io_mapped_ports": 0,
+            "indexed_model_io_models": 0,
+            "indexed_model_io_outputs": 0,
+            "indexed_model_io_refreshes": 0,
             "steps_total": 0,
         }
         self._profile_times: Dict[str, float] = {}
         self._indexed_snapshot_stats: Dict[str, object] = {}
         self._indexed_array_stats: Dict[str, object] = {}
+        self._indexed_model_io_stats: Dict[str, object] = {}
         profile_clock = (
             _wall_time.perf_counter
             if (profile_sections or indexed_snapshot_profile or indexed_arrays)
@@ -562,6 +571,8 @@ class Simulator:
             }
 
         indexed_array = None
+        indexed_model_io_versions = None
+        indexed_model_io_plan = None
         if indexed_arrays:
             indexed_array = IndexedVoltageArray.from_names(
                 sorted(set(self.node_voltages) | set(self.recorded_signals) | source_nodes | model_output_nodes)
@@ -578,6 +589,45 @@ class Simulator:
                 "max_abs_diff": 0.0,
                 "max_abs_diff_node": "",
                 "dynamic_nodes": 0,
+            }
+
+        def _model_tree_output_versions() -> tuple[int, ...]:
+            versions: List[int] = []
+
+            def _visit(model):
+                versions.append(int(getattr(model, "_output_nodes_version", len(model.output_nodes))))
+                for child in getattr(model, "_child_models", []) or []:
+                    _visit(child)
+
+            for model in self.models:
+                _visit(model)
+            return tuple(versions)
+
+        def _refresh_indexed_model_io_plan(force: bool = False):
+            nonlocal indexed_model_io_versions, indexed_model_io_plan
+            if indexed_array is None:
+                return
+            versions = _model_tree_output_versions()
+            if not force and versions == indexed_model_io_versions:
+                return
+            indexed_model_io_plan = build_indexed_model_io_plan(
+                self,
+                extra_nodes=indexed_array.node_index.names,
+            )
+            indexed_array.ensure_nodes(indexed_model_io_plan.node_index.names)
+            indexed_model_io_versions = versions
+            self._perf_stats["indexed_model_io_refreshes"] += 1
+            self._perf_stats["indexed_model_io_models"] = indexed_model_io_plan.model_count
+            self._perf_stats["indexed_model_io_mapped_ports"] = (
+                indexed_model_io_plan.mapped_port_count
+            )
+            self._perf_stats["indexed_model_io_outputs"] = indexed_model_io_plan.output_count
+            self._indexed_model_io_stats = {
+                "node_count": indexed_model_io_plan.node_count,
+                "model_count": indexed_model_io_plan.model_count,
+                "mapped_port_count": indexed_model_io_plan.mapped_port_count,
+                "output_count": indexed_model_io_plan.output_count,
+                "refreshes": self._perf_stats["indexed_model_io_refreshes"],
             }
 
         def _refresh_indexed_array_stats():
@@ -611,6 +661,7 @@ class Simulator:
             _refresh_indexed_array_stats()
 
         if indexed_array is not None:
+            _refresh_indexed_model_io_plan(force=True)
             max_diff, max_node, checked = indexed_array.max_abs_diff_mapping(self.node_voltages)
             _record_indexed_array_diff(max_diff, max_node, checked)
 
@@ -766,6 +817,7 @@ class Simulator:
 
             if indexed_array is not None:
                 _section_start = profile_clock() if profile_clock is not None else 0.0
+                _refresh_indexed_model_io_plan()
                 indexed_array.update_from_mapping(self.node_voltages)
                 self._perf_stats["indexed_array_syncs"] += 1
                 max_diff, max_node, checked = indexed_array.max_abs_diff_mapping(self.node_voltages)
