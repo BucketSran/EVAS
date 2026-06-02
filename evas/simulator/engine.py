@@ -408,6 +408,7 @@ class Simulator:
             skip_source_error_control: bool = False,
             profile_sections: bool = False,
             profile_model_eval: bool = False,
+            profile_model_io: bool = False,
             indexed_snapshot_profile: bool = False,
             indexed_arrays: bool = False) -> SimResult:
         """Run transient simulation with adaptive step control near cross events."""
@@ -485,6 +486,7 @@ class Simulator:
         self._indexed_model_io_stats: Dict[str, object] = {}
         self._indexed_voltage_probe_stats: Dict[str, object] = {}
         self._indexed_voltage_read_stats: Dict[str, object] = {}
+        self._model_io_profile_stats: Dict[str, object] = {}
         self._model_profile_stats: Dict[str, Dict[str, float]] = {}
         profile_clock = (
             _wall_time.perf_counter
@@ -521,6 +523,54 @@ class Simulator:
             )
             stats[name] = stats.get(name, 0.0) + elapsed
 
+        model_io_profile_enabled = bool(profile_model_io)
+        model_io_stats: Dict[str, int] = {
+            "voltage_reads": 0,
+            "voltage_read_event_contexts": 0,
+            "voltage_read_missing_nodes": 0,
+            "output_writes": 0,
+        }
+        model_io_read_local_nodes_seen: set[str] = set()
+        model_io_read_external_nodes_seen: set[str] = set()
+        model_io_output_nodes_seen: set[str] = set()
+
+        def _refresh_model_io_profile_stats():
+            if not model_io_profile_enabled:
+                return
+            self._model_io_profile_stats = {
+                **model_io_stats,
+                "voltage_read_local_nodes": len(model_io_read_local_nodes_seen),
+                "voltage_read_external_nodes": len(model_io_read_external_nodes_seen),
+                "output_write_nodes": len(model_io_output_nodes_seen),
+            }
+
+        def _record_model_io_voltage_read(
+            local_node: str,
+            external_node: str,
+            _value: float,
+            event_context: bool,
+        ):
+            if not model_io_profile_enabled:
+                return
+            model_io_stats["voltage_reads"] += 1
+            if event_context:
+                model_io_stats["voltage_read_event_contexts"] += 1
+            if isinstance(local_node, str):
+                model_io_read_local_nodes_seen.add(local_node)
+            if isinstance(external_node, str):
+                model_io_read_external_nodes_seen.add(external_node)
+                if not event_context and external_node not in self.node_voltages:
+                    model_io_stats["voltage_read_missing_nodes"] += 1
+            _refresh_model_io_profile_stats()
+
+        def _record_model_io_output_write(node: str, _value: float):
+            if not model_io_profile_enabled:
+                return
+            model_io_stats["output_writes"] += 1
+            if isinstance(node, str):
+                model_io_output_nodes_seen.add(node)
+            _refresh_model_io_profile_stats()
+
         def _set_model_indexed_output_writer(writer):
             for model in self.models:
                 setter = getattr(model, "_set_indexed_output_writer", None)
@@ -550,6 +600,9 @@ class Simulator:
         _set_model_indexed_voltage_reader(None)
         _set_model_node_resolution_cache_enabled(False)
         _set_model_node_resolution_cache_enabled(True)
+        if model_io_profile_enabled:
+            _set_model_indexed_output_writer(_record_model_io_output_write)
+            _set_model_indexed_voltage_probe(_record_model_io_voltage_read)
 
         source_nodes = {src.node for src in self.sources}
         source_future_waveforms = {src.node: src.waveform for src in self.sources}
@@ -776,6 +829,7 @@ class Simulator:
             _refresh_indexed_model_io_plan(force=True)
 
             def _indexed_output_write_through(node: str, value: float):
+                _record_model_io_output_write(node, value)
                 indexed_array.set(node, value)
                 indexed_output_nodes_seen.add(node)
                 self._perf_stats["indexed_output_write_throughs"] += 1
@@ -790,6 +844,12 @@ class Simulator:
                 event_context: bool,
             ):
                 nonlocal indexed_voltage_probe_max_node
+                _record_model_io_voltage_read(
+                    local_node,
+                    external_node,
+                    dict_value,
+                    event_context,
+                )
                 if event_context:
                     self._perf_stats["indexed_voltage_probe_event_skips"] += 1
                     _refresh_indexed_array_stats()
@@ -817,7 +877,9 @@ class Simulator:
                 self._perf_stats["indexed_voltage_read_nodes"] = len(
                     indexed_voltage_read_nodes_seen
                 )
-                return indexed_array.get(external_node, 0.0)
+                value = indexed_array.get(external_node, 0.0)
+                _record_model_io_voltage_read(local_node, external_node, value, False)
+                return value
 
             _set_model_indexed_output_writer(_indexed_output_write_through)
             _set_model_indexed_voltage_probe(_indexed_voltage_probe)
@@ -1157,6 +1219,7 @@ class Simulator:
             self._perf_stats["node_resolution_cache_models"] = models_with_entries
 
         _aggregate_node_resolution_cache_stats()
+        _refresh_model_io_profile_stats()
 
         _set_model_indexed_output_writer(None)
         _set_model_indexed_voltage_probe(None)

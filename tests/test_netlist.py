@@ -845,6 +845,49 @@ class TestIndexedMigrationHarness:
         assert "post_update_s =" in log
         assert "prepare_step_s =" in log
 
+    def test_evas_simulate_logs_model_io_profile_when_opted_in(self, tmp_path, monkeypatch):
+        va = tmp_path / "pass_through.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module pass_through(vin, vout);
+                input vin;
+                output vout;
+                electrical vin, vout;
+
+                analog begin
+                    V(vout) <+ V(vin);
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_pass_through.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (vin 0) vsource type=dc dc=0.75
+            I0 (vin vout) pass_through
+            tran tran stop=2n step=1n
+            save vin:3f vout:3f
+            ahdl_include "pass_through.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+        default_log = log_path.read_text(encoding="utf-8")
+        assert "Model IO counters:" not in default_log
+
+        monkeypatch.setenv("EVAS_PROFILE_MODEL_IO", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_profile_model_io = true" in log
+        assert "Model IO counters:" in log
+        assert "voltage_reads =" in log
+        assert "voltage_read_local_nodes =" in log
+        assert "voltage_read_external_nodes =" in log
+        assert "output_writes =" in log
+        assert "output_write_nodes =" in log
+
 
 class TestEvasProfileMapping:
 

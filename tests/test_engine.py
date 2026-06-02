@@ -631,6 +631,40 @@ class TestSimulator:
         assert stats["evaluate_s"] >= 0.0
         assert stats["post_update_s"] >= 0.0
 
+    def test_model_io_profile_counts_voltage_reads_and_output_writes(self):
+        class MirrorModel(CompiledModel):
+            def __init__(self):
+                super().__init__()
+                self.node_map = {"inp": "vin", "out": "vout"}
+
+            def evaluate(self, node_voltages, time):
+                self._set_output("out", self._get_voltage("inp", node_voltages), node_voltages)
+
+        default = Simulator()
+        default.add_source("vin", ramp(0.0, 1.0, 0.0, 1e-9))
+        default.add_model(MirrorModel())
+        default.record("vout")
+        default_result = default.run(tstop=2e-9, tstep=1e-9)
+
+        profiled = Simulator()
+        profiled.add_source("vin", ramp(0.0, 1.0, 0.0, 1e-9))
+        profiled.add_model(MirrorModel())
+        profiled.record("vout")
+        profiled_result = profiled.run(tstop=2e-9, tstep=1e-9, profile_model_io=True)
+
+        assert default_result.signals["vout"].tolist() == pytest.approx(
+            profiled_result.signals["vout"].tolist()
+        )
+        assert default._model_io_profile_stats == {}
+        stats = profiled._model_io_profile_stats
+        assert stats["voltage_reads"] >= profiled._perf_stats["steps_total"]
+        assert stats["output_writes"] == stats["voltage_reads"]
+        assert stats["voltage_read_local_nodes"] == 1
+        assert stats["voltage_read_external_nodes"] == 1
+        assert stats["output_write_nodes"] == 1
+        assert stats["voltage_read_event_contexts"] == 0
+        assert stats["voltage_read_missing_nodes"] == 0
+
     def test_indexed_arrays_preserve_source_record_and_error_scan_results(self):
         default = Simulator()
         default.add_source("vin", ramp(0.0, 1.0, 0.0, 1e-9))
