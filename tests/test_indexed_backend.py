@@ -223,9 +223,66 @@ endmodule
     assert ModelCls._dynamic_branch_accesses == (
         ("output_write", "dout", 1, "ordinary"),
     )
-    assert "_set_output(f'dout[" in FastModelCls._generated_code
+    assert "self._format_dynamic_node('dout'" in FastModelCls._generated_code
     assert "_set_static_branch_output('dout'" not in FastModelCls._generated_code
     assert "_set_static_branch_output_by_slot" not in FastModelCls._generated_code
+
+
+def test_compiled_model_records_rust_static_affine_ops_for_literal_linear_model():
+    src = """\
+`include "disciplines.vams"
+module gain(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    analog begin
+        V(vout) <+ 2.0 * V(vin) + 0.125;
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+
+    assert ModelCls._rust_static_affine_ops == (
+        ("vin", "vout", 2.0, 0.125),
+    )
+
+
+def test_compiled_model_rejects_rust_static_affine_ops_for_stateful_model():
+    src = """\
+`include "disciplines.vams"
+module stateful(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    real sample;
+    analog begin
+        sample = V(vin);
+        V(vout) <+ sample;
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+
+    assert ModelCls._rust_static_affine_ops == ()
+
+
+def test_dynamic_branch_codegen_handles_state_index_expression_without_nested_fstring():
+    src = """\
+`include "disciplines.vams"
+module bus_drive(vout);
+    output electrical vout;
+    electrical [0:3] dout;
+    integer ch = 1;
+    analog begin
+        V(dout[ch]) <+ V(vout);
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+    model = ModelCls()
+
+    model.evaluate({"vout": 0.75}, 0.0)
+
+    assert model.output_nodes["dout[1]"] == pytest.approx(0.75)
+    assert "self._format_dynamic_node('dout'" in ModelCls._generated_code
 
 
 def test_compiled_model_records_dynamic_branch_access_ir_for_2d_reads():

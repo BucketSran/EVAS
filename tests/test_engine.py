@@ -10,6 +10,10 @@ Covers:
 """
 import math
 import re
+import shutil
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from evas.simulator.engine import (
@@ -27,6 +31,15 @@ from evas.simulator.backend import CompiledModel
 from evas.simulator.backend import CompilationError
 from evas.simulator.backend import compile_module
 from evas.compiler.parser import parse
+
+
+RUST_CORE = Path(__file__).resolve().parents[1] / "evas" / "rust_core"
+
+
+def _build_rust_core_or_skip():
+    if shutil.which("cargo") is None:
+        pytest.skip("cargo is not available")
+    subprocess.run(["cargo", "build", "--release"], cwd=RUST_CORE, check=True)
 
 
 # ===========================================================================
@@ -831,6 +844,57 @@ endmodule
         assert fast._perf_stats["indexed_voltage_reads"] == 0
         assert fast._perf_stats["indexed_output_write_throughs"] == 0
         assert fast._perf_stats["indexed_post_model_sync_repairs"] == 0
+
+    def test_rust_static_eval_matches_default_for_static_affine_model(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module gain(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    analog begin
+        V(vout) <+ 2.0 * V(vin) + 0.125;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        default_model = ModelCls()
+        default_model.node_map = {"vin": "VIN", "vout": "VOUT"}
+        default = Simulator()
+        default.add_source("VIN", ramp(0.0, 1.0, 0.0, 1e-9))
+        default.add_model(default_model)
+        default.record("VOUT")
+        default_result = default.run(tstop=2e-9, tstep=1e-9)
+
+        rust_model = ModelCls()
+        rust_model.node_map = {"vin": "VIN", "vout": "VOUT"}
+        rust = Simulator()
+        rust.add_source("VIN", ramp(0.0, 1.0, 0.0, 1e-9))
+        rust.add_model(rust_model)
+        rust.record("VOUT")
+        rust_result = rust.run(
+            tstop=2e-9,
+            tstep=1e-9,
+            rust_static_eval=True,
+        )
+
+        assert rust_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert rust_result.step_sizes.tolist() == pytest.approx(
+            default_result.step_sizes.tolist()
+        )
+        assert rust_result.signals["VOUT"].tolist() == pytest.approx(
+            default_result.signals["VOUT"].tolist()
+        )
+        assert rust._perf_stats["rust_static_eval_requested"] == 1
+        assert rust._perf_stats["rust_static_eval_available"] == 1
+        assert rust._perf_stats["rust_static_eval_candidate_models"] == 1
+        assert rust._perf_stats["rust_static_eval_models"] == 1
+        assert rust._perf_stats["rust_static_eval_ops"] == 1
+        assert rust._perf_stats["rust_static_eval_calls"] == rust._perf_stats["steps_total"]
+        assert rust._perf_stats["rust_static_eval_errors"] == 0
+        assert rust._perf_stats["indexed_post_model_sync_repairs"] == 0
+        assert rust._indexed_array_stats["max_abs_diff"] == pytest.approx(0.0)
 
 
 # ===========================================================================

@@ -10,6 +10,8 @@ Covers:
       degenerate sine (no freq, ampl=0)
 """
 import csv
+import shutil
+import subprocess
 import textwrap
 from pathlib import Path
 
@@ -30,6 +32,15 @@ from evas.netlist.runner import (
     SpectreSource,
 )
 from evas.simulator.engine import SimResult, Simulator
+
+
+RUST_CORE = Path(__file__).resolve().parents[1] / "evas" / "rust_core"
+
+
+def _build_rust_core_or_skip():
+    if shutil.which("cargo") is None:
+        pytest.skip("cargo is not available")
+    subprocess.run(["cargo", "build", "--release"], cwd=RUST_CORE, check=True)
 
 
 # ===========================================================================
@@ -899,6 +910,47 @@ class TestIndexedMigrationHarness:
         assert "evaluate_s =" in log
         assert "post_update_s =" in log
         assert "prepare_step_s =" in log
+
+    def test_evas_simulate_logs_rust_static_eval_when_opted_in(self, tmp_path, monkeypatch):
+        _build_rust_core_or_skip()
+        va = tmp_path / "gain.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module gain(vin, vout);
+                input vin;
+                output vout;
+                electrical vin, vout;
+
+                analog begin
+                    V(vout) <+ 2.0 * V(vin) + 0.125;
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_gain.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (vin 0) vsource type=dc dc=0.75
+            I0 (vin vout) gain
+            tran tran stop=2n step=1n
+            save vin:3f vout:3f
+            ahdl_include "gain.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_RUST_STATIC_EVAL", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_rust_static_eval = true" in log
+        assert "evas_indexed_arrays = true" in log
+        assert "rust_static_eval_available = 1" in log
+        assert "rust_static_eval_candidate_models = 1" in log
+        assert "rust_static_eval_models = 1" in log
+        assert "rust_static_eval_ops = 1" in log
+        assert "rust_static_eval_errors = 0" in log
+        assert (out_dir / "tran.csv").exists()
 
     def test_evas_simulate_logs_model_io_profile_when_opted_in(self, tmp_path, monkeypatch):
         va = tmp_path / "pass_through.va"

@@ -980,6 +980,15 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     ) or os.environ.get("EVAS_INDEXED_ARRAYS", "").strip().lower() in {
         "1", "true", "yes", "on", "enabled"
     }
+    rust_static_eval = _simopt_bool(
+        simopt,
+        'evas_rust_static_eval',
+        False,
+    ) or os.environ.get("EVAS_RUST_STATIC_EVAL", "").strip().lower() in {
+        "1", "true", "yes", "on", "enabled"
+    }
+    if rust_static_eval:
+        indexed_arrays = True
     indexed_plan = None
     if indexed_parity:
         indexed_plan = build_indexed_run_plan(
@@ -1020,6 +1029,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write("    evas_indexed_arrays = true")
     if static_branch_fastpath:
         log.write("    evas_static_branch_fastpath = true")
+    if rust_static_eval:
+        log.write("    evas_rust_static_eval = true")
     log.write("")
 
     t_sim_start = time.time()
@@ -1035,7 +1046,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
                      profile_model_io=profile_model_io,
                      indexed_snapshot_profile=indexed_snapshot_profile,
                      indexed_arrays=indexed_arrays,
-                     static_branch_fastpath=static_branch_fastpath)
+                     static_branch_fastpath=static_branch_fastpath,
+                     rust_static_eval=rust_static_eval)
 
     for pct in range(10, 101, 10):
         t_at = tstop * pct / 100.0

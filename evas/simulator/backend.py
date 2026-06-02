@@ -8,7 +8,7 @@ and state variable management.
 import math
 import random
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from evas.compiler.ast_nodes import *
 from evas.simulator.engine import (
@@ -37,6 +37,7 @@ class CompiledModel:
     _state_scalar_names = ()
     _integer_state_names = ()
     _state_array_ranges = ()
+    _rust_static_affine_ops = ()
     _static_branch_fastpath_codegen = False
     _cmp_eps: float = 0.0
     _needs_future_node_voltages: bool = False
@@ -234,6 +235,13 @@ class CompiledModel:
             ext = self._resolve_external_node_uncached(node)
             self._node_resolution_cache[node] = ext
         return ext
+
+    @staticmethod
+    def _format_dynamic_node(base: str, index: Any, index2: Any = None) -> str:
+        """Format dynamic bus node names without generated nested f-strings."""
+        if index2 is None:
+            return f"{base}[{int(index)}]"
+        return f"{base}[{int(index)}][{int(index2)}]"
 
     def _should_update_discrete_state(self, key: str, time: float) -> bool:
         """Gate self-referential continuous real updates to the nominal tran grid.
@@ -1043,6 +1051,11 @@ class _ModuleCompiler:
             if mod.analog_block
             else self._empty_static_branch_io()
         )
+        rust_static_affine_ops = (
+            self._collect_rust_static_affine_ops(mod.analog_block.body)
+            if mod.analog_block
+            else ()
+        )
         self._static_branch_read_slot_by_node = {
             node: idx
             for idx, node in enumerate(sorted(branch_io["static_voltage_read_nodes"]))
@@ -1284,6 +1297,7 @@ class _ModuleCompiler:
         cls._state_scalar_names = tuple(state_scalar_names)
         cls._integer_state_names = tuple(integer_state_names)
         cls._state_array_ranges = tuple(state_array_ranges)
+        cls._rust_static_affine_ops = tuple(rust_static_affine_ops)
         if mod.analog_block:
             cls._has_dynamic_breakpoints = self._statement_has_dynamic_breakpoints(mod.analog_block.body)
             cls._has_post_update_events = self._has_post_update_event(mod.analog_block.body)
@@ -1757,6 +1771,132 @@ class _ModuleCompiler:
         acc = self._empty_static_branch_io()
         self._collect_static_branch_io_from_stmt(stmt, acc, in_event_body=False)
         return acc
+
+    def _collect_rust_static_affine_ops(
+        self,
+        stmt,
+    ) -> Tuple[Tuple[str, str, float, float], ...]:
+        """Collect a conservative Rust-lowerable static affine model body.
+
+        The current Rust prototype only handles unconditional voltage-domain
+        contributions shaped as ``V(out) <+ gain * V(in) + bias`` with literal
+        numeric coefficients.  Anything involving events, state variables,
+        parameters, dynamic bus indexes, function calls, or differential
+        branches falls back to the normal Python evaluator.
+        """
+        ops: List[Tuple[str, str, float, float]] = []
+        if not self._collect_rust_static_affine_ops_from_stmt(stmt, ops):
+            return ()
+        return tuple(ops)
+
+    def _collect_rust_static_affine_ops_from_stmt(
+        self,
+        stmt,
+        ops: List[Tuple[str, str, float, float]],
+    ) -> bool:
+        if stmt is None:
+            return True
+
+        if isinstance(stmt, Block):
+            for child in stmt.statements:
+                if not self._collect_rust_static_affine_ops_from_stmt(child, ops):
+                    return False
+            return True
+
+        if not isinstance(stmt, Contribution):
+            return False
+
+        branch = stmt.branch
+        if (
+            branch.access_type != "V"
+            or branch.node2 is not None
+            or branch.node1_index is not None
+            or branch.node1_index2 is not None
+        ):
+            return False
+
+        affine = self._rust_affine_expr(stmt.expr)
+        if affine is None:
+            return False
+        read_node, gain, bias = affine
+        ops.append((read_node or branch.node1, branch.node1, float(gain), float(bias)))
+        return True
+
+    def _rust_affine_expr(self, expr: Expr) -> Optional[Tuple[Optional[str], float, float]]:
+        if isinstance(expr, NumberLiteral):
+            return None, 0.0, float(expr.value)
+
+        if isinstance(expr, BranchAccess):
+            if (
+                expr.access_type == "V"
+                and expr.node2 is None
+                and expr.node1_index is None
+                and expr.node1_index2 is None
+            ):
+                return expr.node1, 1.0, 0.0
+            return None
+
+        if isinstance(expr, UnaryExpr):
+            affine = self._rust_affine_expr(expr.operand)
+            if affine is None:
+                return None
+            node, gain, bias = affine
+            if expr.op == "-":
+                return node, -gain, -bias
+            if expr.op == "+":
+                return node, gain, bias
+            return None
+
+        if isinstance(expr, BinaryExpr):
+            left = self._rust_affine_expr(expr.left)
+            right = self._rust_affine_expr(expr.right)
+            if expr.op in {"+", "-"}:
+                if left is None or right is None:
+                    return None
+                if expr.op == "-":
+                    right = (right[0], -right[1], -right[2])
+                return self._combine_rust_affine(left, right)
+
+            if expr.op == "*":
+                left_const = self._rust_constant_expr(expr.left)
+                right_const = self._rust_constant_expr(expr.right)
+                if left_const is not None and right is not None:
+                    return right[0], right[1] * left_const, right[2] * left_const
+                if right_const is not None and left is not None:
+                    return left[0], left[1] * right_const, left[2] * right_const
+                return None
+
+            if expr.op == "/":
+                right_const = self._rust_constant_expr(expr.right)
+                if right_const is None or right_const == 0.0 or left is None:
+                    return None
+                return left[0], left[1] / right_const, left[2] / right_const
+
+        return None
+
+    def _combine_rust_affine(
+        self,
+        left: Tuple[Optional[str], float, float],
+        right: Tuple[Optional[str], float, float],
+    ) -> Optional[Tuple[Optional[str], float, float]]:
+        left_node, left_gain, left_bias = left
+        right_node, right_gain, right_bias = right
+        if left_node is not None and right_node is not None and left_node != right_node:
+            return None
+        return (
+            left_node if left_node is not None else right_node,
+            left_gain + right_gain,
+            left_bias + right_bias,
+        )
+
+    def _rust_constant_expr(self, expr: Expr) -> Optional[float]:
+        affine = self._rust_affine_expr(expr)
+        if affine is None:
+            return None
+        node, gain, bias = affine
+        if node is not None or gain != 0.0:
+            return None
+        return float(bias)
 
     def _dynamic_branch_context(self, in_event_body: bool) -> str:
         return "event_body" if in_event_body else "ordinary"
@@ -3076,8 +3216,10 @@ class _ModuleCompiler:
             idx_expr = self._compile_expr(branch.node1_index)
             if branch.node1_index2 is not None:
                 idx_expr2 = self._compile_expr(branch.node1_index2)
-                return [f"{prefix}self._set_output(f'{node}[{{int({idx_expr})}}][{{int({idx_expr2})}}]', {expr}, nv)"]
-            return [f"{prefix}self._set_output(f'{node}[{{int({idx_expr})}}]', {expr}, nv)"]
+                node_expr = f"self._format_dynamic_node({node!r}, {idx_expr}, {idx_expr2})"
+                return [f"{prefix}self._set_output({node_expr}, {expr}, nv)"]
+            node_expr = f"self._format_dynamic_node({node!r}, {idx_expr})"
+            return [f"{prefix}self._set_output({node_expr}, {expr}, nv)"]
         if self.static_branch_fastpath_codegen:
             slot = self._static_branch_write_slot_by_node.get(node)
             if slot is not None:
@@ -3408,8 +3550,10 @@ class _ModuleCompiler:
             idx = self._compile_expr(index_expr)
             if index_expr2 is not None:
                 idx2 = self._compile_expr(index_expr2)
-                return f"self._get_voltage(f'{node}[{{int({idx})}}][{{int({idx2})}}]', nv)"
-            return f"self._get_voltage(f'{node}[{{int({idx})}}]', nv)"
+                node_expr = f"self._format_dynamic_node({node!r}, {idx}, {idx2})"
+                return f"self._get_voltage({node_expr}, nv)"
+            node_expr = f"self._format_dynamic_node({node!r}, {idx})"
+            return f"self._get_voltage({node_expr}, nv)"
         if self.static_branch_fastpath_codegen:
             slot = self._static_branch_read_slot_by_node.get(node)
             if slot is not None:

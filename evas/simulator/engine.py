@@ -11,8 +11,9 @@ This is a behavioral simulator that:
 """
 import math
 import time as _wall_time
+from array import array
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -20,6 +21,11 @@ from evas.simulator.indexed import (
     IndexedVoltageArray,
     IndexedVoltageSnapshotter,
     build_indexed_model_io_plan,
+)
+from evas.simulator.rust_backend import (
+    RustBackendError,
+    StaticAffineOp,
+    load_optional_rust_backend,
 )
 
 
@@ -411,7 +417,8 @@ class Simulator:
             profile_model_io: bool = False,
             indexed_snapshot_profile: bool = False,
             indexed_arrays: bool = False,
-            static_branch_fastpath: bool = False) -> SimResult:
+            static_branch_fastpath: bool = False,
+            rust_static_eval: bool = False) -> SimResult:
         """Run transient simulation with adaptive step control near cross events."""
         if tstep is None:
             tstep = tstop / 10000
@@ -419,6 +426,8 @@ class Simulator:
             max_step = tstep
         if min_step is None:
             min_step = tstep / 4096.0
+        if rust_static_eval:
+            indexed_arrays = True
 
         time = 0.0
         self.time_points = []
@@ -475,6 +484,15 @@ class Simulator:
             "static_branch_fastpath_fallbacks_total": 0,
             "static_branch_fastpath_static_read_nodes": 0,
             "static_branch_fastpath_static_write_nodes": 0,
+            "rust_static_eval_requested": int(bool(rust_static_eval)),
+            "rust_static_eval_available": 0,
+            "rust_static_eval_candidate_models": 0,
+            "rust_static_eval_models": 0,
+            "rust_static_eval_ops": 0,
+            "rust_static_eval_calls": 0,
+            "rust_static_eval_output_syncs": 0,
+            "rust_static_eval_fallback_models": 0,
+            "rust_static_eval_errors": 0,
             "model_post_update_calls": 0,
             "model_post_update_skips": 0,
             "node_resolution_cache_entries": 0,
@@ -742,11 +760,17 @@ class Simulator:
         indexed_output_nodes_seen: set[str] = set()
         indexed_voltage_probe_max_node = ""
         indexed_voltage_read_nodes_seen: set[str] = set()
+        rust_backend = load_optional_rust_backend() if rust_static_eval else None
+        rust_static_eval_plans: Dict[int, Tuple[object, Tuple[tuple, ...]]] = {}
+        if rust_backend is not None:
+            self._perf_stats["rust_static_eval_available"] = 1
         if indexed_arrays:
             indexed_array = IndexedVoltageArray.from_names(
                 sorted(set(self.node_voltages) | set(self.recorded_signals) | source_nodes | model_output_nodes)
             )
             indexed_array.update_from_mapping(self.node_voltages)
+            if rust_static_eval:
+                indexed_array.values = array("d", indexed_array.values)
             self._indexed_array_stats = {
                 "node_count": indexed_array.node_count,
                 "snapshots": 0,
@@ -903,6 +927,77 @@ class Simulator:
                 "fallbacks": self._perf_stats["indexed_voltage_read_fallbacks"],
             }
 
+        def _build_rust_static_eval_plans():
+            nonlocal rust_static_eval_plans
+            rust_static_eval_plans = {}
+            if not rust_static_eval or indexed_array is None:
+                return
+
+            candidates = 0
+            planned_models = 0
+            planned_ops = 0
+            fallback_models = 0
+
+            for model_index, model in enumerate(self.models):
+                metadata = tuple(
+                    getattr(model.__class__, "_rust_static_affine_ops", ()) or ()
+                )
+                if not metadata:
+                    continue
+                candidates += 1
+                if (
+                    rust_backend is None
+                    or model_has_post_update_events[model_index]
+                    or model_needs_future_node_voltages[model_index]
+                    or getattr(model, "_child_models", [])
+                ):
+                    fallback_models += 1
+                    continue
+
+                ops: List[StaticAffineOp] = []
+                sync_entries = []
+                for read_local, write_local, gain, bias in metadata:
+                    read_external = model._resolve_external_node(read_local)
+                    write_external = model._resolve_external_node(write_local)
+                    indexed_array.ensure_nodes((read_external, write_external))
+                    read_id = indexed_array.node_index.id_of(read_external)
+                    write_id = indexed_array.node_index.id_of(write_external)
+                    ops.append(
+                        StaticAffineOp(
+                            read_node_id=read_id,
+                            write_node_id=write_id,
+                            gain=float(gain),
+                            bias=float(bias),
+                        )
+                    )
+                    sync_entries.append((model, write_local, write_external, write_id))
+
+                if not ops:
+                    fallback_models += 1
+                    continue
+                rust_static_eval_plans[model_index] = (
+                    rust_backend.make_static_affine_batch(ops),
+                    tuple(sync_entries),
+                )
+                planned_models += 1
+                planned_ops += len(ops)
+
+            self._perf_stats["rust_static_eval_candidate_models"] = candidates
+            self._perf_stats["rust_static_eval_models"] = planned_models
+            self._perf_stats["rust_static_eval_ops"] = planned_ops
+            self._perf_stats["rust_static_eval_fallback_models"] = fallback_models
+
+        def _sync_rust_static_outputs(sync_entries: Tuple[tuple, ...]) -> None:
+            if indexed_array is None:
+                return
+            for model, local_node, external_node, write_node_id in sync_entries:
+                value = float(indexed_array.values[write_node_id])
+                if local_node not in model.output_nodes:
+                    model._output_nodes_version += 1
+                model.output_nodes[local_node] = value
+                self.node_voltages[external_node] = value
+                self._perf_stats["rust_static_eval_output_syncs"] += 1
+
         def _record_indexed_array_diff(max_diff: float, max_node: str, checked: int):
             if indexed_array is None:
                 return
@@ -916,6 +1011,7 @@ class Simulator:
 
         if indexed_array is not None:
             _refresh_indexed_model_io_plan(force=True)
+            _build_rust_static_eval_plans()
 
             def _indexed_output_write_through(node: str, value: float):
                 _record_model_io_output_write(node, value)
@@ -1120,9 +1216,24 @@ class Simulator:
                     elapsed = _add_profile_time("model_prepare_step_s", _section_start)
                     _add_model_profile_time(model_index, model, "prepare_step_s", elapsed)
                 _section_start = profile_clock() if profile_clock is not None else 0.0
-                model.evaluate(self.node_voltages, time)
+                rust_plan = rust_static_eval_plans.get(model_index)
+                profile_eval_key = "model_evaluate_s"
+                if rust_plan is not None and indexed_array is not None and rust_backend is not None:
+                    batch, sync_entries = rust_plan
+                    model._event_time = time
+                    model._bound_step = 0.0
+                    try:
+                        rust_backend.evaluate_static_affine(batch, indexed_array.values)
+                        _sync_rust_static_outputs(sync_entries)
+                        self._perf_stats["rust_static_eval_calls"] += 1
+                        profile_eval_key = "rust_static_eval_s"
+                    except RustBackendError:
+                        self._perf_stats["rust_static_eval_errors"] += 1
+                        model.evaluate(self.node_voltages, time)
+                else:
+                    model.evaluate(self.node_voltages, time)
                 if profile_clock is not None:
-                    elapsed = _add_profile_time("model_evaluate_s", _section_start)
+                    elapsed = _add_profile_time(profile_eval_key, _section_start)
                     _add_model_profile_time(model_index, model, "evaluate_s", elapsed)
                     _add_model_profile_time(model_index, model, "evaluate_calls", 1.0)
                 _section_start = profile_clock() if profile_clock is not None else 0.0
