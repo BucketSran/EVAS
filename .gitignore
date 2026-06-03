@@ -38,6 +38,7 @@ htmlcov/
 # Distribution / Packaging
 *.tar.gz
 *.zip
+target/
 
 # Linter cache
 .ruff_cache/

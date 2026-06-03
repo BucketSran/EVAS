@@ -419,6 +419,7 @@ class Simulator:
             indexed_arrays: bool = False,
             indexed_state_storage: bool = False,
             static_branch_fastpath: bool = False,
+            static_lifecycle_fastpath: bool = True,
             rust_static_eval: bool = False) -> SimResult:
         """Run transient simulation with adaptive step control near cross events."""
         if tstep is None:
@@ -513,6 +514,11 @@ class Simulator:
             "rust_static_eval_coeff_eval_fallbacks": 0,
             "rust_static_eval_fallback_models": 0,
             "rust_static_eval_errors": 0,
+            "static_lifecycle_fastpath_enabled": int(bool(static_lifecycle_fastpath)),
+            "model_prepare_step_calls": 0,
+            "model_prepare_step_skips": 0,
+            "model_timer_expire_calls": 0,
+            "model_timer_expire_skips": 0,
             "model_post_update_calls": 0,
             "model_post_update_skips": 0,
             "node_resolution_cache_entries": 0,
@@ -758,13 +764,26 @@ class Simulator:
         for model in self.models:
             if hasattr(model, "_set_nominal_step"):
                 model._set_nominal_step(tstep)
+        model_has_dynamic_breakpoints = tuple(
+            bool(getattr(model, "_has_dynamic_breakpoints_tree", lambda: True)())
+            for model in self.models
+        )
         breakpoint_models = [
-            model for model in self.models
-            if bool(getattr(model, "_has_dynamic_breakpoints_tree", lambda: True)())
+            model
+            for model, has_dynamic_breakpoints in zip(
+                self.models,
+                model_has_dynamic_breakpoints,
+            )
+            if has_dynamic_breakpoints
         ]
+        model_uses_bound_step = tuple(
+            bool(getattr(model, "_uses_bound_step_tree", lambda: True)())
+            for model in self.models
+        )
         bound_step_models = [
-            model for model in self.models
-            if bool(getattr(model, "_uses_bound_step_tree", lambda: True)())
+            model
+            for model, uses_bound_step in zip(self.models, model_uses_bound_step)
+            if uses_bound_step
         ]
         model_has_post_update_events = tuple(
             bool(getattr(model, "_has_post_update_events", True))
@@ -775,6 +794,30 @@ class Simulator:
             for model in self.models
         )
         models_need_future_node_voltages = any(model_needs_future_node_voltages)
+        model_needs_step_context = tuple(
+            (
+                not static_lifecycle_fastpath
+                or needs_future
+                or has_dynamic_breakpoints
+                or has_post_update_events
+            )
+            for needs_future, has_dynamic_breakpoints, has_post_update_events in zip(
+                model_needs_future_node_voltages,
+                model_has_dynamic_breakpoints,
+                model_has_post_update_events,
+            )
+        )
+        model_needs_timer_expire = tuple(
+            (
+                not static_lifecycle_fastpath
+                or has_dynamic_breakpoints
+                or has_post_update_events
+            )
+            for has_dynamic_breakpoints, has_post_update_events in zip(
+                model_has_dynamic_breakpoints,
+                model_has_post_update_events,
+            )
+        )
 
         def _set_initial_condition_mode(model, enabled: bool):
             if hasattr(model, "_set_initial_condition_mode"):
@@ -1486,24 +1529,28 @@ class Simulator:
                                 and segment_model_needs_future
                                 else None
                             )
-                            segment_model._prepare_step(
-                                prev_nv,
-                                self.node_voltages,
-                                prev_time,
-                                time,
-                                segment_model_future_nv,
-                            )
-                            if profile_clock is not None:
-                                elapsed = _add_profile_time(
-                                    "model_prepare_step_s",
-                                    _section_start,
+                            if model_needs_step_context[segment_model_index]:
+                                segment_model._prepare_step(
+                                    prev_nv,
+                                    self.node_voltages,
+                                    prev_time,
+                                    time,
+                                    segment_model_future_nv,
                                 )
-                                _add_model_profile_time(
-                                    segment_model_index,
-                                    segment_model,
-                                    "prepare_step_s",
-                                    elapsed,
-                                )
+                                self._perf_stats["model_prepare_step_calls"] += 1
+                                if profile_clock is not None:
+                                    elapsed = _add_profile_time(
+                                        "model_prepare_step_s",
+                                        _section_start,
+                                    )
+                                    _add_model_profile_time(
+                                        segment_model_index,
+                                        segment_model,
+                                        "prepare_step_s",
+                                        elapsed,
+                                    )
+                            else:
+                                self._perf_stats["model_prepare_step_skips"] += 1
                             segment_model._event_time = time
                             segment_model._bound_step = 0.0
                             _section_start = profile_clock() if profile_clock is not None else 0.0
@@ -1537,7 +1584,11 @@ class Simulator:
                             segment_has_post_update_events = model_has_post_update_events[
                                 segment_model_index
                             ]
-                            segment_model._expire_absolute_timers(time)
+                            if model_needs_timer_expire[segment_model_index]:
+                                segment_model._expire_absolute_timers(time)
+                                self._perf_stats["model_timer_expire_calls"] += 1
+                            else:
+                                self._perf_stats["model_timer_expire_skips"] += 1
                             if segment_has_post_update_events:
                                 self._perf_stats["model_post_update_calls"] += 1
                                 if segment_model.post_update_events(self.node_voltages, time):
@@ -1566,10 +1617,14 @@ class Simulator:
                     and model_needs_future
                     else None
                 )
-                model._prepare_step(prev_nv, self.node_voltages, prev_time, time, model_future_nv)
-                if profile_clock is not None:
-                    elapsed = _add_profile_time("model_prepare_step_s", _section_start)
-                    _add_model_profile_time(model_index, model, "prepare_step_s", elapsed)
+                if model_needs_step_context[model_index]:
+                    model._prepare_step(prev_nv, self.node_voltages, prev_time, time, model_future_nv)
+                    self._perf_stats["model_prepare_step_calls"] += 1
+                    if profile_clock is not None:
+                        elapsed = _add_profile_time("model_prepare_step_s", _section_start)
+                        _add_model_profile_time(model_index, model, "prepare_step_s", elapsed)
+                else:
+                    self._perf_stats["model_prepare_step_skips"] += 1
                 _section_start = profile_clock() if profile_clock is not None else 0.0
                 model.evaluate(self.node_voltages, time)
                 if profile_clock is not None:
@@ -1577,7 +1632,11 @@ class Simulator:
                     _add_model_profile_time(model_index, model, "evaluate_s", elapsed)
                     _add_model_profile_time(model_index, model, "evaluate_calls", 1.0)
                 _section_start = profile_clock() if profile_clock is not None else 0.0
-                model._expire_absolute_timers(time)
+                if model_needs_timer_expire[model_index]:
+                    model._expire_absolute_timers(time)
+                    self._perf_stats["model_timer_expire_calls"] += 1
+                else:
+                    self._perf_stats["model_timer_expire_skips"] += 1
                 if has_post_update_events:
                     self._perf_stats["model_post_update_calls"] += 1
                     if model.post_update_events(self.node_voltages, time):

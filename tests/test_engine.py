@@ -2744,6 +2744,34 @@ endmodule
         assert sim._perf_stats["timer_breakpoint_scans_total"] == 0
         assert sim._perf_stats["model_post_update_calls"] == 0
         assert sim._perf_stats["model_post_update_skips"] == sim._perf_stats["steps_total"]
+        assert sim._perf_stats["static_lifecycle_fastpath_enabled"] == 1
+        assert sim._perf_stats["model_prepare_step_calls"] == 0
+        assert sim._perf_stats["model_prepare_step_skips"] == sim._perf_stats["steps_total"]
+        assert sim._perf_stats["model_timer_expire_calls"] == 0
+        assert sim._perf_stats["model_timer_expire_skips"] == sim._perf_stats["steps_total"]
+
+        legacy_sim = Simulator()
+        legacy_model = ModelCls()
+        legacy_sim.add_model(legacy_model)
+        legacy_sim.record("out")
+        legacy_result = legacy_sim.run(
+            tstop=2e-9,
+            tstep=1e-9,
+            static_lifecycle_fastpath=False,
+        )
+
+        assert legacy_result.signals["out"][-1] == pytest.approx(result.signals["out"][-1])
+        assert legacy_sim._perf_stats["static_lifecycle_fastpath_enabled"] == 0
+        assert (
+            legacy_sim._perf_stats["model_prepare_step_calls"]
+            == legacy_sim._perf_stats["steps_total"]
+        )
+        assert legacy_sim._perf_stats["model_prepare_step_skips"] == 0
+        assert (
+            legacy_sim._perf_stats["model_timer_expire_calls"]
+            == legacy_sim._perf_stats["steps_total"]
+        )
+        assert legacy_sim._perf_stats["model_timer_expire_skips"] == 0
 
     def test_cross_event_model_keeps_dynamic_breakpoint_scan(self):
         from evas.compiler.parser import parse
@@ -2766,6 +2794,29 @@ endmodule
 
         assert ModelCls._has_dynamic_breakpoints is True
         assert model._has_dynamic_breakpoints_tree() is True
+
+        sim = Simulator()
+        sim.add_source(
+            "in",
+            pulse(
+                v_lo=0.0,
+                v_hi=1.0,
+                delay=0.5e-9,
+                period=4e-9,
+                rise=0.1e-9,
+                fall=0.1e-9,
+            ),
+        )
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=2e-9, tstep=0.25e-9)
+
+        assert result.signals["out"][-1] == pytest.approx(1.0)
+        assert sim._perf_stats["model_breakpoint_scan_calls"] > 0
+        assert sim._perf_stats["model_prepare_step_calls"] == sim._perf_stats["steps_total"]
+        assert sim._perf_stats["model_prepare_step_skips"] == 0
+        assert sim._perf_stats["model_timer_expire_calls"] == sim._perf_stats["steps_total"]
+        assert sim._perf_stats["model_timer_expire_skips"] == 0
 
     def test_output_dependent_cross_keeps_post_update_path(self):
         from evas.compiler.parser import parse
