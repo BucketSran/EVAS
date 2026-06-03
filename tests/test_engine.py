@@ -920,6 +920,52 @@ endmodule
             rust_result.signals["VOUT"][-1]
         )
 
+    def test_rust_static_eval_applies_runtime_parameter_overrides(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module gain_param(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    parameter real gain = 2.0;
+    parameter real offset = 0.125;
+    analog begin
+        V(vout) <+ gain * V(vin) + offset;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            model.node_map = {"vin": "VIN", "vout": "VOUT"}
+            model.params["gain"] = 3.0
+            model.params["offset"] = -0.25
+            sim = Simulator()
+            sim.add_source("VIN", ramp(0.0, 1.0, 0.0, 1e-9))
+            sim.add_model(model)
+            sim.record("VOUT")
+            return sim
+
+        default = build_sim()
+        default_result = default.run(tstop=2e-9, tstep=1e-9)
+
+        rust = build_sim()
+        rust_result = rust.run(tstop=2e-9, tstep=1e-9, rust_static_eval=True)
+
+        assert rust_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert rust_result.step_sizes.tolist() == pytest.approx(
+            default_result.step_sizes.tolist()
+        )
+        assert rust_result.signals["VOUT"].tolist() == pytest.approx(
+            default_result.signals["VOUT"].tolist()
+        )
+        assert rust_result.signals["VOUT"][-1] == pytest.approx(2.75)
+        assert rust._perf_stats["rust_static_eval_models"] == 1
+        assert rust._perf_stats["rust_static_eval_runtime_param_ops"] == 1
+        assert rust._perf_stats["rust_static_eval_coeff_eval_fallbacks"] == 0
+        assert rust._perf_stats["rust_static_eval_errors"] == 0
+
     def test_rust_static_eval_batches_consecutive_affine_models_in_order(self):
         _build_rust_core_or_skip()
         src = """\

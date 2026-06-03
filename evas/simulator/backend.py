@@ -139,6 +139,37 @@ class CompiledModel:
     def final_step(self, node_voltages: Dict[str, float], time: float):
         pass
 
+    @staticmethod
+    def _rust_static_affine_scalar_uses_params(value: Any) -> bool:
+        return isinstance(value, tuple)
+
+    @staticmethod
+    def _evaluate_rust_static_affine_scalar(value: Any, params: Dict[str, Any]) -> float:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if not isinstance(value, tuple) or not value:
+            raise ValueError(f"unsupported Rust static affine scalar: {value!r}")
+
+        op = value[0]
+        if op == "param":
+            return float(params[value[1]])
+        if op == "neg":
+            return -CompiledModel._evaluate_rust_static_affine_scalar(value[1], params)
+
+        left = CompiledModel._evaluate_rust_static_affine_scalar(value[1], params)
+        right = CompiledModel._evaluate_rust_static_affine_scalar(value[2], params)
+        if op == "add":
+            return left + right
+        if op == "sub":
+            return left - right
+        if op == "mul":
+            return left * right
+        if op == "div":
+            if right == 0.0:
+                raise ValueError("division by zero in Rust static affine scalar")
+            return left / right
+        raise ValueError(f"unsupported Rust static affine scalar op: {op!r}")
+
     def _set_initial_condition_mode(self, enabled: bool):
         """Treat transition-like operators as operating-point values."""
         self._initial_condition_mode = bool(enabled)
@@ -1775,16 +1806,18 @@ class _ModuleCompiler:
     def _collect_rust_static_affine_ops(
         self,
         stmt,
-    ) -> Tuple[Tuple[str, str, float, float], ...]:
+    ) -> Tuple[Tuple[str, str, Any, Any], ...]:
         """Collect a conservative Rust-lowerable static affine model body.
 
         The current Rust prototype only handles unconditional voltage-domain
-        contributions shaped as ``V(out) <+ gain * V(in) + bias`` with literal
-        numeric coefficients.  Anything involving events, state variables,
-        parameters, dynamic bus indexes, function calls, or differential
-        branches falls back to the normal Python evaluator.
+        contributions shaped as ``V(out) <+ gain * V(in) + bias``.  Coefficients
+        may be literal numeric values or parameter-only scalar expressions that
+        are evaluated after instance parameter overrides have been applied.
+        Anything involving events, state variables, dynamic bus indexes,
+        function calls, string parameters, or differential branches falls back
+        to the normal Python evaluator.
         """
-        ops: List[Tuple[str, str, float, float]] = []
+        ops: List[Tuple[str, str, Any, Any]] = []
         if not self._collect_rust_static_affine_ops_from_stmt(stmt, ops):
             return ()
         return tuple(ops)
@@ -1792,7 +1825,7 @@ class _ModuleCompiler:
     def _collect_rust_static_affine_ops_from_stmt(
         self,
         stmt,
-        ops: List[Tuple[str, str, float, float]],
+        ops: List[Tuple[str, str, Any, Any]],
     ) -> bool:
         if stmt is None:
             return True
@@ -1819,12 +1852,13 @@ class _ModuleCompiler:
         if affine is None:
             return False
         read_node, gain, bias = affine
-        ops.append((read_node or branch.node1, branch.node1, float(gain), float(bias)))
+        ops.append((read_node or branch.node1, branch.node1, gain, bias))
         return True
 
-    def _rust_affine_expr(self, expr: Expr) -> Optional[Tuple[Optional[str], float, float]]:
-        if isinstance(expr, NumberLiteral):
-            return None, 0.0, float(expr.value)
+    def _rust_affine_expr(self, expr: Expr) -> Optional[Tuple[Optional[str], Any, Any]]:
+        scalar = self._rust_scalar_expr(expr)
+        if scalar is not None:
+            return None, 0.0, scalar
 
         if isinstance(expr, BranchAccess):
             if (
@@ -1842,7 +1876,7 @@ class _ModuleCompiler:
                 return None
             node, gain, bias = affine
             if expr.op == "-":
-                return node, -gain, -bias
+                return node, self._rust_scalar_neg(gain), self._rust_scalar_neg(bias)
             if expr.op == "+":
                 return node, gain, bias
             return None
@@ -1858,45 +1892,136 @@ class _ModuleCompiler:
                 return self._combine_rust_affine(left, right)
 
             if expr.op == "*":
-                left_const = self._rust_constant_expr(expr.left)
-                right_const = self._rust_constant_expr(expr.right)
-                if left_const is not None and right is not None:
-                    return right[0], right[1] * left_const, right[2] * left_const
-                if right_const is not None and left is not None:
-                    return left[0], left[1] * right_const, left[2] * right_const
+                left_scalar = self._rust_scalar_expr(expr.left)
+                right_scalar = self._rust_scalar_expr(expr.right)
+                if left_scalar is not None and right is not None:
+                    return (
+                        right[0],
+                        self._rust_scalar_mul(right[1], left_scalar),
+                        self._rust_scalar_mul(right[2], left_scalar),
+                    )
+                if right_scalar is not None and left is not None:
+                    return (
+                        left[0],
+                        self._rust_scalar_mul(left[1], right_scalar),
+                        self._rust_scalar_mul(left[2], right_scalar),
+                    )
                 return None
 
             if expr.op == "/":
-                right_const = self._rust_constant_expr(expr.right)
-                if right_const is None or right_const == 0.0 or left is None:
+                right_scalar = self._rust_scalar_expr(expr.right)
+                if right_scalar is None or left is None:
                     return None
-                return left[0], left[1] / right_const, left[2] / right_const
+                gain = self._rust_scalar_div(left[1], right_scalar)
+                bias = self._rust_scalar_div(left[2], right_scalar)
+                if gain is None or bias is None:
+                    return None
+                return left[0], gain, bias
 
         return None
 
     def _combine_rust_affine(
         self,
-        left: Tuple[Optional[str], float, float],
-        right: Tuple[Optional[str], float, float],
-    ) -> Optional[Tuple[Optional[str], float, float]]:
+        left: Tuple[Optional[str], Any, Any],
+        right: Tuple[Optional[str], Any, Any],
+    ) -> Optional[Tuple[Optional[str], Any, Any]]:
         left_node, left_gain, left_bias = left
         right_node, right_gain, right_bias = right
         if left_node is not None and right_node is not None and left_node != right_node:
             return None
         return (
             left_node if left_node is not None else right_node,
-            left_gain + right_gain,
-            left_bias + right_bias,
+            self._rust_scalar_add(left_gain, right_gain),
+            self._rust_scalar_add(left_bias, right_bias),
         )
 
-    def _rust_constant_expr(self, expr: Expr) -> Optional[float]:
-        affine = self._rust_affine_expr(expr)
-        if affine is None:
+    def _rust_scalar_expr(self, expr: Expr) -> Optional[Any]:
+        if isinstance(expr, NumberLiteral):
+            return float(expr.value)
+
+        if isinstance(expr, Identifier):
+            param_type = self._param_types.get(expr.name)
+            if param_type in {ParamType.REAL, ParamType.INTEGER}:
+                return ("param", expr.name)
             return None
-        node, gain, bias = affine
-        if node is not None or gain != 0.0:
+
+        if isinstance(expr, UnaryExpr):
+            scalar = self._rust_scalar_expr(expr.operand)
+            if scalar is None:
+                return None
+            if expr.op == "-":
+                return self._rust_scalar_neg(scalar)
+            if expr.op == "+":
+                return scalar
             return None
-        return float(bias)
+
+        if isinstance(expr, BinaryExpr):
+            left = self._rust_scalar_expr(expr.left)
+            right = self._rust_scalar_expr(expr.right)
+            if left is None or right is None:
+                return None
+            if expr.op == "+":
+                return self._rust_scalar_add(left, right)
+            if expr.op == "-":
+                return self._rust_scalar_sub(left, right)
+            if expr.op == "*":
+                return self._rust_scalar_mul(left, right)
+            if expr.op == "/":
+                return self._rust_scalar_div(left, right)
+
+        return None
+
+    def _rust_scalar_is_number(self, value: Any) -> bool:
+        return isinstance(value, (int, float))
+
+    def _rust_scalar_neg(self, value: Any) -> Any:
+        if self._rust_scalar_is_number(value):
+            return -float(value)
+        return ("neg", value)
+
+    def _rust_scalar_add(self, left: Any, right: Any) -> Any:
+        if self._rust_scalar_is_number(left) and self._rust_scalar_is_number(right):
+            return float(left) + float(right)
+        if self._rust_scalar_is_number(left) and float(left) == 0.0:
+            return right
+        if self._rust_scalar_is_number(right) and float(right) == 0.0:
+            return left
+        return ("add", left, right)
+
+    def _rust_scalar_sub(self, left: Any, right: Any) -> Any:
+        if self._rust_scalar_is_number(left) and self._rust_scalar_is_number(right):
+            return float(left) - float(right)
+        if self._rust_scalar_is_number(right) and float(right) == 0.0:
+            return left
+        return ("sub", left, right)
+
+    def _rust_scalar_mul(self, left: Any, right: Any) -> Any:
+        if self._rust_scalar_is_number(left) and self._rust_scalar_is_number(right):
+            return float(left) * float(right)
+        if self._rust_scalar_is_number(left):
+            left_f = float(left)
+            if left_f == 0.0:
+                return 0.0
+            if left_f == 1.0:
+                return right
+        if self._rust_scalar_is_number(right):
+            right_f = float(right)
+            if right_f == 0.0:
+                return 0.0
+            if right_f == 1.0:
+                return left
+        return ("mul", left, right)
+
+    def _rust_scalar_div(self, left: Any, right: Any) -> Optional[Any]:
+        if self._rust_scalar_is_number(right) and float(right) == 0.0:
+            return None
+        if self._rust_scalar_is_number(left) and self._rust_scalar_is_number(right):
+            return float(left) / float(right)
+        if self._rust_scalar_is_number(left) and float(left) == 0.0:
+            return 0.0
+        if self._rust_scalar_is_number(right) and float(right) == 1.0:
+            return left
+        return ("div", left, right)
 
     def _dynamic_branch_context(self, in_event_body: bool) -> str:
         return "event_body" if in_event_body else "ordinary"

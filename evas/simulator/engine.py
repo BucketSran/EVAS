@@ -500,6 +500,8 @@ class Simulator:
             "rust_static_eval_node_voltage_syncs": 0,
             "rust_static_eval_deferred_output_syncs": 0,
             "rust_static_eval_lifecycle_model_skips": 0,
+            "rust_static_eval_runtime_param_ops": 0,
+            "rust_static_eval_coeff_eval_fallbacks": 0,
             "rust_static_eval_fallback_models": 0,
             "rust_static_eval_errors": 0,
             "model_post_update_calls": 0,
@@ -981,6 +983,25 @@ class Simulator:
                 ops: List[StaticAffineOp] = []
                 sync_entries = []
                 for read_local, write_local, gain, bias in metadata:
+                    try:
+                        gain_value = model._evaluate_rust_static_affine_scalar(
+                            gain,
+                            model.params,
+                        )
+                        bias_value = model._evaluate_rust_static_affine_scalar(
+                            bias,
+                            model.params,
+                        )
+                    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                        self._perf_stats["rust_static_eval_coeff_eval_fallbacks"] += 1
+                        ops = []
+                        sync_entries = []
+                        break
+                    if (
+                        model._rust_static_affine_scalar_uses_params(gain)
+                        or model._rust_static_affine_scalar_uses_params(bias)
+                    ):
+                        self._perf_stats["rust_static_eval_runtime_param_ops"] += 1
                     read_external = model._resolve_external_node(read_local)
                     write_external = model._resolve_external_node(write_local)
                     indexed_array.ensure_nodes((read_external, write_external))
@@ -990,8 +1011,8 @@ class Simulator:
                         StaticAffineOp(
                             read_node_id=read_id,
                             write_node_id=write_id,
-                            gain=float(gain),
-                            bias=float(bias),
+                            gain=gain_value,
+                            bias=bias_value,
                         )
                     )
                     sync_entries.append((model, write_local, write_external, write_id))

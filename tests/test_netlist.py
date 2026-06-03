@@ -954,10 +954,56 @@ class TestIndexedMigrationHarness:
         assert "rust_static_eval_node_voltage_syncs =" in log
         assert "rust_static_eval_deferred_output_syncs =" in log
         assert "rust_static_eval_lifecycle_model_skips =" in log
+        assert "rust_static_eval_runtime_param_ops = 0" in log
+        assert "rust_static_eval_coeff_eval_fallbacks = 0" in log
         assert "indexed_array_dirty_validation_enabled = 1" in log
         assert "indexed_array_dirty_syncs =" in log
         assert "rust_static_eval_errors = 0" in log
         assert (out_dir / "tran.csv").exists()
+
+    def test_evas_simulate_rust_static_eval_uses_instance_parameter_overrides(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _build_rust_core_or_skip()
+        va = tmp_path / "gain_param.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module gain_param(vin, vout);
+                input vin;
+                output vout;
+                electrical vin, vout;
+                parameter real gain = 2.0;
+                parameter real offset = 0.125;
+
+                analog begin
+                    V(vout) <+ gain * V(vin) + offset;
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_gain_param.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (vin 0) vsource type=dc dc=0.75
+            I0 (vin vout) gain_param gain=3 offset=250m
+            tran tran stop=2n step=1n
+            save vin:3f vout:3f
+            ahdl_include "gain_param.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_RUST_STATIC_EVAL", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "rust_static_eval_runtime_param_ops = 1" in log
+        assert "rust_static_eval_coeff_eval_fallbacks = 0" in log
+        assert "rust_static_eval_models = 1" in log
+        rows = list(csv.DictReader((out_dir / "tran.csv").open()))
+        assert float(rows[-1]["vout"]) == pytest.approx(2.5)
 
     def test_evas_simulate_logs_model_io_profile_when_opted_in(self, tmp_path, monkeypatch):
         va = tmp_path / "pass_through.va"

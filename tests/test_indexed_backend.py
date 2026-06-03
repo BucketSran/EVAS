@@ -269,6 +269,50 @@ endmodule
     )
 
 
+def test_compiled_model_records_rust_static_affine_ops_for_parameterized_linear_model():
+    src = """\
+`include "disciplines.vams"
+module gain_param(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    parameter real gain = 2.0;
+    parameter real offset = 0.125;
+    analog begin
+        V(vout) <+ gain * V(vin) + offset;
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+
+    assert ModelCls._rust_static_affine_ops == (
+        ("vin", "vout", ("param", "gain"), ("param", "offset")),
+    )
+
+
+def test_compiled_model_records_rust_static_affine_ops_for_parameter_expression_model():
+    src = """\
+`include "disciplines.vams"
+module gain_param_expr(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    parameter real gain_num = 6.0;
+    parameter real gain_den = 2.0;
+    parameter real offset_hi = 0.375;
+    parameter real offset_lo = 0.125;
+    analog begin
+        V(vout) <+ (gain_num / gain_den) * V(vin) + (offset_hi - offset_lo);
+    end
+endmodule
+"""
+    ModelCls = compile_module(parse(src))
+    model = ModelCls()
+    _, _, gain, bias = ModelCls._rust_static_affine_ops[0]
+
+    assert ModelCls._rust_static_affine_ops[0][0:2] == ("vin", "vout")
+    assert model._evaluate_rust_static_affine_scalar(gain, model.params) == pytest.approx(3.0)
+    assert model._evaluate_rust_static_affine_scalar(bias, model.params) == pytest.approx(0.25)
+
+
 def test_compiled_model_rejects_rust_static_affine_ops_for_stateful_model():
     src = """\
 `include "disciplines.vams"
