@@ -89,6 +89,7 @@ def _compile_va(
     va_path: str,
     source_dir: str = None,
     static_branch_fastpath_codegen: bool = False,
+    indexed_state_fastpath_codegen: bool = False,
 ):
     """Compile a .va file. Returns (ModelClass, Module) tuple."""
     if source_dir is None:
@@ -104,6 +105,7 @@ def _compile_va(
         module,
         default_trans,
         static_branch_fastpath_codegen=static_branch_fastpath_codegen,
+        indexed_state_fastpath_codegen=indexed_state_fastpath_codegen,
     )
     return cls, module
 
@@ -773,6 +775,32 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     ) or os.environ.get("EVAS_STATIC_BRANCH_FASTPATH", "").strip().lower() in {
         "1", "true", "yes", "on", "enabled"
     }
+    indexed_state_storage_requested = _simopt_bool(
+        simopt,
+        'evas_indexed_state_storage',
+        False,
+    ) or os.environ.get("EVAS_INDEXED_STATE_STORAGE", "").strip().lower() in {
+        "1", "true", "yes", "on", "enabled"
+    }
+    state_local_fastpath = _simopt_bool(
+        simopt,
+        'evas_state_local_fastpath',
+        False,
+    ) or _simopt_bool(
+        simopt,
+        'evas_indexed_state_fastpath',
+        False,
+    ) or os.environ.get("EVAS_STATE_LOCAL_FASTPATH", "").strip().lower() in {
+        "1", "true", "yes", "on", "enabled"
+    }
+    indexed_state_fastpath_env = os.environ.get(
+        "EVAS_INDEXED_STATE_FASTPATH",
+        "",
+    ).strip().lower()
+    if indexed_state_fastpath_env:
+        state_local_fastpath = indexed_state_fastpath_env in {
+            "1", "true", "yes", "on", "enabled"
+        }
 
     # 2. Compile VA models
     models_by_name = {}
@@ -808,6 +836,7 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
             cls, module = _compile_va(
                 str(va_path),
                 static_branch_fastpath_codegen=static_branch_fastpath,
+                indexed_state_fastpath_codegen=state_local_fastpath,
             )
         except Exception as e:
             log.write(f"ERROR: Failed to compile Verilog-A file {va_path.name}: {e}")
@@ -980,13 +1009,7 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     ) or os.environ.get("EVAS_INDEXED_ARRAYS", "").strip().lower() in {
         "1", "true", "yes", "on", "enabled"
     }
-    indexed_state_storage = _simopt_bool(
-        simopt,
-        'evas_indexed_state_storage',
-        False,
-    ) or os.environ.get("EVAS_INDEXED_STATE_STORAGE", "").strip().lower() in {
-        "1", "true", "yes", "on", "enabled"
-    }
+    indexed_state_storage = indexed_state_storage_requested
     static_lifecycle_fastpath_env = (
         os.environ.get("EVAS_STATIC_LIFECYCLE_FASTPATH", "").strip().lower()
     )
@@ -1048,6 +1071,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write("    evas_indexed_arrays = true")
     if indexed_state_storage:
         log.write("    evas_indexed_state_storage = true")
+    if state_local_fastpath:
+        log.write("    evas_state_local_fastpath = true")
     if static_branch_fastpath:
         log.write("    evas_static_branch_fastpath = true")
     if not static_lifecycle_fastpath:

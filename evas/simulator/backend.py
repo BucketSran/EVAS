@@ -37,6 +37,7 @@ class CompiledModel:
     _state_scalar_names = ()
     _integer_state_names = ()
     _state_array_ranges = ()
+    _indexed_state_fastpath_codegen = False
     _rust_static_affine_ops = ()
     _static_branch_fastpath_codegen = False
     _dynamic_node_cache_limit = 4096
@@ -108,7 +109,9 @@ class CompiledModel:
             "dynamic_node_cache_misses": 0,
             "dynamic_node_cache_bypasses": 0,
             "indexed_state_scalar_writes": 0,
+            "indexed_state_scalar_reads": 0,
             "indexed_state_array_writes": 0,
+            "indexed_state_array_reads": 0,
             "indexed_state_array_oob_writes": 0,
         }
         # Lazy-allocated integrator states (only used when idt/idtmod appears)
@@ -234,6 +237,7 @@ class CompiledModel:
     ):
         """Install an opt-in indexed mirror for model-local state."""
         if scalar_ids is None:
+            self._commit_indexed_state_storage()
             self._indexed_state_ids = {}
             self._indexed_integer_state_names = set()
             self._indexed_state_values = None
@@ -270,6 +274,20 @@ class CompiledModel:
         self._indexed_state_array_layouts = layouts
         self._indexed_state_array_values = array_values
 
+    def _commit_indexed_state_storage(self):
+        """Copy indexed scalar state back to ``self.state`` before teardown."""
+        values = self._indexed_state_values
+        if values is None:
+            return
+        for name, slot in self._indexed_state_ids.items():
+            if slot < 0 or slot >= len(values):
+                continue
+            value = values[slot]
+            if name in self._indexed_integer_state_names:
+                self.state[name] = self._to_integer(value)
+            else:
+                self.state[name] = value
+
     def _state_set(self, name: str, val: Any):
         """Set scalar state and mirror it to indexed storage when installed."""
         self.state[name] = val
@@ -278,6 +296,31 @@ class CompiledModel:
             return
         slot = self._indexed_state_ids.get(name)
         if slot is None or slot >= len(values):
+            return
+        stored = self._to_integer(val) if name in self._indexed_integer_state_names else val
+        values[slot] = float(stored)
+        self._perf_stats["indexed_state_scalar_writes"] += 1
+
+    def _state_get_by_slot(self, slot: int, name: str) -> Any:
+        """Read scalar state from indexed storage when installed.
+
+        The generated code still carries ``name`` as a fallback key so the same
+        compiled model remains valid when the indexed state sidecar is disabled.
+        """
+        values = self._indexed_state_values
+        if values is not None and 0 <= slot < len(values):
+            value = values[slot]
+            self._perf_stats["indexed_state_scalar_reads"] += 1
+            if name in self._indexed_integer_state_names:
+                return self._to_integer(value)
+            return value
+        return self.state[name]
+
+    def _state_set_by_slot(self, slot: int, name: str, val: Any):
+        """Set scalar state and update indexed storage by precomputed slot."""
+        self.state[name] = val
+        values = self._indexed_state_values
+        if values is None or slot < 0 or slot >= len(values):
             return
         stored = self._to_integer(val) if name in self._indexed_integer_state_names else val
         values[slot] = float(stored)
@@ -632,9 +675,11 @@ class CompiledModel:
     def _get_voltage(self, node: str, node_voltages: Dict[str, float]) -> float:
         """Get voltage of a node, resolving through node_map."""
         if not self.node_map and not self._event_context_active:
-            indexed_value = self._read_indexed_voltage(node, node)
-            if indexed_value is not None:
-                return indexed_value
+            reader = self._indexed_voltage_reader
+            if reader is not None:
+                indexed_value = reader(node, node)
+                if indexed_value is not None:
+                    return indexed_value
             if node in node_voltages:
                 value = node_voltages[node]
                 if self._indexed_voltage_probe is not None:
@@ -680,9 +725,10 @@ class CompiledModel:
                     if self._indexed_voltage_probe is not None:
                         self._indexed_voltage_probe(node, ext, value, True)
                     return value
-        indexed_value = self._read_indexed_voltage(node, ext)
-        if indexed_value is not None:
-            return indexed_value
+        if self._indexed_voltage_reader is not None:
+            indexed_value = self._read_indexed_voltage(node, ext)
+            if indexed_value is not None:
+                return indexed_value
         if ext in node_voltages:
             value = node_voltages[ext]
             if self._indexed_voltage_probe is not None:
@@ -727,9 +773,10 @@ class CompiledModel:
             return self._get_voltage(node, node_voltages)
 
         ext = self._resolve_external_node(node)
-        indexed_value = self._read_indexed_voltage(node, ext)
-        if indexed_value is not None:
-            return indexed_value
+        if self._indexed_voltage_reader is not None:
+            indexed_value = self._read_indexed_voltage(node, ext)
+            if indexed_value is not None:
+                return indexed_value
 
         if ext in node_voltages:
             value = node_voltages[ext]
@@ -1035,6 +1082,14 @@ class CompiledModel:
         return st["y"]
 
     def _array_get(self, name: str, idx: int) -> Any:
+        layout = self._indexed_state_array_layouts.get(name)
+        if layout is not None:
+            lo, hi, integer = layout
+            idx_i = int(idx)
+            if lo <= idx_i <= hi:
+                value = self._indexed_state_array_values[name][idx_i - lo]
+                self._perf_stats["indexed_state_array_reads"] += 1
+                return self._to_integer(value) if integer else value
         if name in self.arrays and idx in self.arrays[name]:
             return self.arrays[name][idx]
         return 0
@@ -1127,6 +1182,7 @@ def compile_module(
     module: Module,
     default_transition: float = None,
     static_branch_fastpath_codegen: bool = False,
+    indexed_state_fastpath_codegen: bool = False,
 ) -> type:
     """
     Compile a Module AST into a Python class.
@@ -1138,6 +1194,7 @@ def compile_module(
         module,
         default_transition,
         static_branch_fastpath_codegen=static_branch_fastpath_codegen,
+        indexed_state_fastpath_codegen=indexed_state_fastpath_codegen,
     )
     return compiler.compile()
 
@@ -1148,10 +1205,12 @@ class _ModuleCompiler:
         module: Module,
         default_transition: float = None,
         static_branch_fastpath_codegen: bool = False,
+        indexed_state_fastpath_codegen: bool = False,
     ):
         self.module = module
         self.default_transition = default_transition or 1e-12
         self.static_branch_fastpath_codegen = bool(static_branch_fastpath_codegen)
+        self.indexed_state_fastpath_codegen = bool(indexed_state_fastpath_codegen)
         self._trans_counter = 0
         self._cross_counter = 0
         self._above_counter = 0
@@ -1169,6 +1228,10 @@ class _ModuleCompiler:
         self._discrete_assignment_counter = 0
         self._static_branch_read_slot_by_node: Dict[str, int] = {}
         self._static_branch_write_slot_by_node: Dict[str, int] = {}
+        self._state_scalar_slot_by_name: Dict[str, int] = {}
+        self._state_local_name_by_state: Dict[str, str] = {}
+        self._state_local_fastpath_active = False
+        self._state_local_fastpath_names: set[str] = set()
         self._param_types = {p.name: p.param_type for p in module.parameters}
         self._var_types = {v.name: v.var_type for v in module.variables}
 
@@ -1212,6 +1275,12 @@ class _ModuleCompiler:
                 state_scalar_names.append(v.name)
                 if is_integer:
                     integer_state_names.append(v.name)
+        self._state_scalar_slot_by_name = {
+            name: idx for idx, name in enumerate(state_scalar_names)
+        }
+        self._state_local_name_by_state = {
+            name: f"_st_{name}" for name in state_scalar_names
+        }
 
         # Build arrays info
         array_vars = {}
@@ -1340,6 +1409,38 @@ class _ModuleCompiler:
         lines.append("        self._bound_step = 0.0")
         lines.append("        for _ch in self._child_models:")
         lines.append("            _ch.evaluate(nv, time)")
+        loop_state_targets: set[str] = set()
+        evaluate_state_accesses: set[str] = set()
+        if mod.analog_block:
+            self._collect_for_loop_state_targets(mod.analog_block.body, loop_state_targets)
+            self._collect_evaluate_state_scalar_accesses(mod.analog_block.body, evaluate_state_accesses)
+        state_local_names = [
+            name for name in state_scalar_names
+            if name in evaluate_state_accesses and name not in loop_state_targets
+        ]
+        state_local_fastpath = (
+            self.indexed_state_fastpath_codegen
+            and bool(state_local_names)
+        )
+        previous_state_local_fastpath = self._state_local_fastpath_active
+        previous_state_local_names = self._state_local_fastpath_names
+        self._state_local_fastpath_active = state_local_fastpath
+        self._state_local_fastpath_names = set(state_local_names)
+        if state_local_fastpath:
+            lines.append("        _state_values = self._indexed_state_values")
+            for name in state_local_names:
+                slot = self._state_scalar_slot_by_name[name]
+                local = self._state_local_name_by_state[name]
+                if name in integer_state_names:
+                    lines.append(
+                        f"        {local} = self._to_integer(_state_values[{slot}]) "
+                        f"if _state_values is not None else self.state[{name!r}]"
+                    )
+                else:
+                    lines.append(
+                        f"        {local} = _state_values[{slot}] "
+                        f"if _state_values is not None else self.state[{name!r}]"
+                    )
 
         if mod.analog_block:
             for stmt in mod.analog_block.body.statements:
@@ -1350,8 +1451,27 @@ class _ModuleCompiler:
         lines.append("            _bs = _ch._bound_step")
         lines.append("            if _bs > 0.0 and (self._bound_step <= 0.0 or _bs < self._bound_step):")
         lines.append("                self._bound_step = _bs")
+        if state_local_fastpath:
+            for name in state_local_names:
+                slot = self._state_scalar_slot_by_name[name]
+                local = self._state_local_name_by_state[name]
+                if name in integer_state_names:
+                    lines.append(f"        {local} = self._to_integer({local})")
+                lines.append("        if _state_values is not None:")
+                lines.append(f"            _state_values[{slot}] = float({local})")
+                lines.append("        else:")
+                lines.append(f"            self.state[{name!r}] = {local}")
+            lines.append("        if _state_values is not None:")
+            lines.append(
+                f"            self._perf_stats['indexed_state_scalar_reads'] += {len(state_local_names)}"
+            )
+            lines.append(
+                f"            self._perf_stats['indexed_state_scalar_writes'] += {len(state_local_names)}"
+            )
 
         lines.append("        pass")
+        self._state_local_fastpath_active = previous_state_local_fastpath
+        self._state_local_fastpath_names = previous_state_local_names
 
         lines.append("")
         lines.append("    def post_update_events(self, nv, time):")
@@ -1410,6 +1530,7 @@ class _ModuleCompiler:
         cls._uses_idtmod = self._uses_idtmod
         cls._needs_future_node_voltages = self._needs_future_node_voltages
         cls._static_branch_fastpath_codegen = self.static_branch_fastpath_codegen
+        cls._indexed_state_fastpath_codegen = self.indexed_state_fastpath_codegen
         cls._static_voltage_read_nodes = tuple(
             sorted(branch_io["static_voltage_read_nodes"])
         )
@@ -3430,6 +3551,162 @@ class _ModuleCompiler:
         self._in_loop_var = prev_loop_var
         return lines
 
+    def _collect_for_loop_state_targets(self, stmt, acc: set[str]) -> None:
+        """Collect scalar state names used as generated for-loop variables."""
+        if stmt is None:
+            return
+        if isinstance(stmt, Block):
+            for child in stmt.statements:
+                self._collect_for_loop_state_targets(child, acc)
+            return
+        if isinstance(stmt, ForStatement):
+            target = getattr(stmt.init, "target", None)
+            if isinstance(target, Identifier):
+                acc.add(target.name)
+            elif isinstance(target, ArrayAccess):
+                acc.add(target.name)
+            self._collect_for_loop_state_targets(stmt.body, acc)
+            return
+        if isinstance(stmt, EventStatement):
+            self._collect_for_loop_state_targets(stmt.body, acc)
+            return
+        if isinstance(stmt, IfStatement):
+            self._collect_for_loop_state_targets(stmt.then_body, acc)
+            self._collect_for_loop_state_targets(stmt.else_body, acc)
+            return
+        if isinstance(stmt, WhileStatement):
+            self._collect_for_loop_state_targets(stmt.body, acc)
+            return
+        if isinstance(stmt, CaseStatement):
+            for item in stmt.items:
+                self._collect_for_loop_state_targets(item.body, acc)
+
+    def _collect_evaluate_state_scalar_accesses(self, stmt, acc: set[str]) -> None:
+        """Collect scalar state touched by generated evaluate-path code."""
+        if stmt is None:
+            return
+        if isinstance(stmt, Block):
+            for child in stmt.statements:
+                self._collect_evaluate_state_scalar_accesses(child, acc)
+            return
+        if isinstance(stmt, EventStatement):
+            if self._event_compiles_in_evaluate(stmt.event):
+                self._collect_state_scalar_accesses_from_event(stmt.event, acc)
+                self._collect_evaluate_state_scalar_accesses(stmt.body, acc)
+            return
+        if isinstance(stmt, Contribution):
+            self._collect_state_scalar_accesses_from_expr(stmt.expr, acc)
+            branch = stmt.branch
+            for expr in (
+                branch.node1_index,
+                branch.node2_index,
+                branch.node1_index2,
+                branch.node2_index2,
+            ):
+                self._collect_state_scalar_accesses_from_expr(expr, acc)
+            return
+        if isinstance(stmt, Assignment):
+            if isinstance(stmt.target, Identifier) and stmt.target.name in self._state_scalar_slot_by_name:
+                acc.add(stmt.target.name)
+            elif isinstance(stmt.target, ArrayAccess):
+                self._collect_state_scalar_accesses_from_expr(stmt.target.index, acc)
+            self._collect_state_scalar_accesses_from_expr(stmt.value, acc)
+            return
+        if isinstance(stmt, IfStatement):
+            self._collect_state_scalar_accesses_from_expr(stmt.cond, acc)
+            self._collect_evaluate_state_scalar_accesses(stmt.then_body, acc)
+            self._collect_evaluate_state_scalar_accesses(stmt.else_body, acc)
+            return
+        if isinstance(stmt, WhileStatement):
+            self._collect_state_scalar_accesses_from_expr(stmt.cond, acc)
+            self._collect_evaluate_state_scalar_accesses(stmt.body, acc)
+            return
+        if isinstance(stmt, ForStatement):
+            self._collect_evaluate_assignment_accesses(stmt.init, acc)
+            self._collect_state_scalar_accesses_from_expr(stmt.cond, acc)
+            self._collect_evaluate_assignment_accesses(stmt.update, acc)
+            self._collect_evaluate_state_scalar_accesses(stmt.body, acc)
+            return
+        if isinstance(stmt, CaseStatement):
+            self._collect_state_scalar_accesses_from_expr(stmt.expr, acc)
+            for item in stmt.items:
+                for value in item.values:
+                    self._collect_state_scalar_accesses_from_expr(value, acc)
+                self._collect_evaluate_state_scalar_accesses(item.body, acc)
+            return
+        if isinstance(stmt, SystemTask):
+            for arg in stmt.args:
+                self._collect_state_scalar_accesses_from_expr(arg, acc)
+
+    def _collect_evaluate_assignment_accesses(self, stmt: Assignment, acc: set[str]) -> None:
+        if isinstance(stmt.target, Identifier) and stmt.target.name in self._state_scalar_slot_by_name:
+            acc.add(stmt.target.name)
+        elif isinstance(stmt.target, ArrayAccess):
+            self._collect_state_scalar_accesses_from_expr(stmt.target.index, acc)
+        self._collect_state_scalar_accesses_from_expr(stmt.value, acc)
+
+    def _event_compiles_in_evaluate(self, event) -> bool:
+        if isinstance(event, EventExpr):
+            return event.event_type not in (EventType.INITIAL_STEP, EventType.FINAL_STEP)
+        if isinstance(event, CombinedEvent):
+            return any(
+                e.event_type not in (EventType.INITIAL_STEP, EventType.FINAL_STEP)
+                for e in event.events
+            )
+        return False
+
+    def _collect_state_scalar_accesses_from_event(self, event, acc: set[str]) -> None:
+        if isinstance(event, EventExpr):
+            if event.event_type in (EventType.INITIAL_STEP, EventType.FINAL_STEP):
+                return
+            for expr in event.args:
+                self._collect_state_scalar_accesses_from_expr(expr, acc)
+            self._collect_state_scalar_accesses_from_expr(event.time_tol_expr, acc)
+            self._collect_state_scalar_accesses_from_expr(event.expr_tol_expr, acc)
+            return
+        if isinstance(event, CombinedEvent):
+            for child in event.events:
+                self._collect_state_scalar_accesses_from_event(child, acc)
+
+    def _collect_state_scalar_accesses_from_expr(self, expr: Optional[Expr], acc: set[str]) -> None:
+        if expr is None:
+            return
+        if isinstance(expr, Identifier):
+            if expr.name in self._state_scalar_slot_by_name:
+                acc.add(expr.name)
+            return
+        if isinstance(expr, ArrayAccess):
+            self._collect_state_scalar_accesses_from_expr(expr.index, acc)
+            return
+        if isinstance(expr, BinaryExpr):
+            self._collect_state_scalar_accesses_from_expr(expr.left, acc)
+            self._collect_state_scalar_accesses_from_expr(expr.right, acc)
+            return
+        if isinstance(expr, UnaryExpr):
+            self._collect_state_scalar_accesses_from_expr(expr.operand, acc)
+            return
+        if isinstance(expr, TernaryExpr):
+            self._collect_state_scalar_accesses_from_expr(expr.cond, acc)
+            self._collect_state_scalar_accesses_from_expr(expr.true_expr, acc)
+            self._collect_state_scalar_accesses_from_expr(expr.false_expr, acc)
+            return
+        if isinstance(expr, FunctionCall):
+            for arg in expr.args:
+                self._collect_state_scalar_accesses_from_expr(arg, acc)
+            return
+        if isinstance(expr, BranchAccess):
+            for sub_expr in (
+                expr.node1_index,
+                expr.node2_index,
+                expr.node1_index2,
+                expr.node2_index2,
+            ):
+                self._collect_state_scalar_accesses_from_expr(sub_expr, acc)
+            return
+        if isinstance(expr, MethodCall):
+            for arg in expr.args:
+                self._collect_state_scalar_accesses_from_expr(arg, acc)
+
     def _compile_contribution(self, stmt: Contribution, indent) -> List[str]:
         prefix = '    ' * indent
         branch = stmt.branch
@@ -3466,6 +3743,11 @@ class _ModuleCompiler:
                 val = f"self._to_integer({val})"
             if name == self._in_loop_var:
                 line = f"self.state[{name!r}] = {val}"
+            elif self._state_local_fastpath_active and name in self._state_local_fastpath_names:
+                line = f"{self._state_local_name_by_state[name]} = {val}"
+            elif self.indexed_state_fastpath_codegen and name in self._state_scalar_slot_by_name:
+                slot = self._state_scalar_slot_by_name[name]
+                line = f"self._state_set_by_slot({slot}, {name!r}, {val})"
             else:
                 line = f"self._state_set({name!r}, {val})"
             if self._should_gate_self_referential_assignment(stmt, name):
@@ -3644,6 +3926,19 @@ class _ModuleCompiler:
             # Check if it's a variable
             for v in self.module.variables:
                 if v.name == name:
+                    if (
+                        self._state_local_fastpath_active
+                        and name != self._in_loop_var
+                        and name in self._state_local_fastpath_names
+                    ):
+                        return self._state_local_name_by_state[name]
+                    if (
+                        self.indexed_state_fastpath_codegen
+                        and name != self._in_loop_var
+                        and name in self._state_scalar_slot_by_name
+                    ):
+                        slot = self._state_scalar_slot_by_name[name]
+                        return f"self._state_get_by_slot({slot}, {name!r})"
                     return f"self.state[{name!r}]"
             # Check if it's a special constant
             if name == 'inf':
@@ -4039,6 +4334,7 @@ def compile_va_file(
     va_path: str,
     source_dir: str = None,
     static_branch_fastpath_codegen: bool = False,
+    indexed_state_fastpath_codegen: bool = False,
 ) -> type:
     """
     Compile a .va file into a Python model class.
@@ -4066,4 +4362,5 @@ def compile_va_file(
         module,
         default_trans,
         static_branch_fastpath_codegen=static_branch_fastpath_codegen,
+        indexed_state_fastpath_codegen=indexed_state_fastpath_codegen,
     )

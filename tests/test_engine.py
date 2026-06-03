@@ -802,6 +802,65 @@ endmodule
         assert indexed_sim._perf_stats["indexed_state_array_writes_total"] > 0
         assert indexed_sim._perf_stats["indexed_state_array_oob_writes_total"] == 0
 
+    def test_indexed_state_fastpath_reads_state_slots_without_changing_waveform(self):
+        src = """\
+`include "disciplines.vams"
+module stateful(out);
+    output voltage out;
+    real x = 0.0;
+    real cold = 7.0;
+    integer code = 0;
+    real accum[0:1];
+    analog begin
+        @(initial_step) cold = 11.0;
+        x = x + 0.25;
+        code = code + 1;
+        accum[1] = x + code;
+        V(out) <+ accum[1] + x;
+    end
+endmodule
+"""
+        DefaultModel = compile_module(parse(src))
+        FastModel = compile_module(parse(src), indexed_state_fastpath_codegen=True)
+
+        def run_model(model_cls, indexed_state_storage=False):
+            model = model_cls()
+            sim = Simulator()
+            sim.add_model(model)
+            sim.record("out")
+            result = sim.run(
+                tstop=2e-9,
+                tstep=1e-9,
+                indexed_state_storage=indexed_state_storage,
+            )
+            return result, sim, model
+
+        default_result, _, _ = run_model(DefaultModel, False)
+        fallback_result, fallback_sim, fallback_model = run_model(FastModel, False)
+        indexed_result, indexed_sim, indexed_model = run_model(FastModel, True)
+
+        assert "_st_x" in FastModel._generated_code
+        assert "_st_cold" not in FastModel._generated_code
+        assert "_state_values[0]" in FastModel._generated_code
+        assert fallback_result.signals["out"].tolist() == pytest.approx(
+            default_result.signals["out"].tolist()
+        )
+        assert indexed_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert indexed_result.step_sizes.tolist() == pytest.approx(
+            default_result.step_sizes.tolist()
+        )
+        assert indexed_result.signals["out"].tolist() == pytest.approx(
+            default_result.signals["out"].tolist()
+        )
+        assert fallback_sim._perf_stats["indexed_state_scalar_reads_total"] == 0
+        assert indexed_sim._perf_stats["indexed_state_scalar_reads_total"] > 0
+        assert indexed_sim._perf_stats["indexed_state_array_reads_total"] > 0
+        assert indexed_sim._perf_stats["indexed_state_scalar_writes_total"] > 0
+        assert indexed_sim._perf_stats["indexed_state_array_writes_total"] > 0
+        assert indexed_model.state["x"] == pytest.approx(fallback_model.state["x"])
+        assert indexed_model.state["code"] == fallback_model.state["code"]
+        assert indexed_model.state["cold"] == pytest.approx(fallback_model.state["cold"])
+
     def test_static_branch_fastpath_matches_default_and_counts_hits(self):
         src = """\
 `include "disciplines.vams"

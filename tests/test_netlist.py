@@ -862,16 +862,20 @@ class TestIndexedMigrationHarness:
         log_path = tmp_path / "evas.log"
 
         monkeypatch.setenv("EVAS_INDEXED_STATE_STORAGE", "1")
+        monkeypatch.setenv("EVAS_STATE_LOCAL_FASTPATH", "1")
         assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
 
         log = log_path.read_text(encoding="utf-8")
         assert "evas_indexed_state_storage = true" in log
+        assert "evas_state_local_fastpath = true" in log
         assert "indexed_state_storage_enabled = 1" in log
         assert "indexed_state_storage_models = 1" in log
         assert "indexed_state_storage_scalar_slots = 2" in log
         assert "indexed_state_storage_integer_slots = 1" in log
         assert "indexed_state_storage_array_slots = 2" in log
+        assert "indexed_state_scalar_reads_total =" in log
         assert "indexed_state_scalar_writes_total =" in log
+        assert "indexed_state_array_reads_total =" in log
         assert "indexed_state_array_writes_total =" in log
         assert "indexed_state_array_oob_writes_total = 0" in log
 
