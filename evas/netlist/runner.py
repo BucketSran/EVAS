@@ -1022,6 +1022,18 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         static_lifecycle_fastpath = static_lifecycle_fastpath_env in {
             "1", "true", "yes", "on", "enabled"
         }
+    transition_unchanged_fastpath_env = (
+        os.environ.get("EVAS_TRANSITION_UNCHANGED_FASTPATH", "").strip().lower()
+    )
+    transition_unchanged_fastpath = _simopt_bool(
+        simopt,
+        'evas_transition_unchanged_fastpath',
+        False,
+    )
+    if transition_unchanged_fastpath_env:
+        transition_unchanged_fastpath = transition_unchanged_fastpath_env in {
+            "1", "true", "yes", "on", "enabled"
+        }
     rust_static_eval = _simopt_bool(
         simopt,
         'evas_rust_static_eval',
@@ -1077,6 +1089,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write("    evas_static_branch_fastpath = true")
     if not static_lifecycle_fastpath:
         log.write("    evas_static_lifecycle_fastpath = false")
+    if transition_unchanged_fastpath:
+        log.write("    evas_transition_unchanged_fastpath = true")
     if rust_static_eval:
         log.write("    evas_rust_static_eval = true")
     log.write("")
@@ -1097,6 +1111,7 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
                      indexed_state_storage=indexed_state_storage,
                      static_branch_fastpath=static_branch_fastpath,
                      static_lifecycle_fastpath=static_lifecycle_fastpath,
+                     transition_unchanged_fastpath=transition_unchanged_fastpath,
                      rust_static_eval=rust_static_eval)
 
     for pct in range(10, 101, 10):

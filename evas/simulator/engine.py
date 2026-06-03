@@ -420,6 +420,7 @@ class Simulator:
             indexed_state_storage: bool = False,
             static_branch_fastpath: bool = False,
             static_lifecycle_fastpath: bool = True,
+            transition_unchanged_fastpath: bool = False,
             rust_static_eval: bool = False) -> SimResult:
         """Run transient simulation with adaptive step control near cross events."""
         if tstep is None:
@@ -517,6 +518,7 @@ class Simulator:
             "rust_static_eval_fallback_models": 0,
             "rust_static_eval_errors": 0,
             "static_lifecycle_fastpath_enabled": int(bool(static_lifecycle_fastpath)),
+            "transition_unchanged_fastpath_enabled": int(bool(transition_unchanged_fastpath)),
             "model_prepare_step_calls": 0,
             "model_prepare_step_skips": 0,
             "model_timer_expire_calls": 0,
@@ -537,6 +539,7 @@ class Simulator:
             "timer_breakpoint_hits_total": 0,
             "timer_breakpoint_scans_total": 0,
             "timer_state_updates_total": 0,
+            "transition_unchanged_target_fastpath_total": 0,
             "steps_total": 0,
         }
         self._profile_times: Dict[str, float] = {}
@@ -660,6 +663,12 @@ class Simulator:
                 if setter is not None:
                     setter(enabled)
 
+        def _set_model_transition_unchanged_fastpath_enabled(enabled: bool):
+            for model in self.models:
+                setter = getattr(model, "_set_transition_unchanged_fastpath_enabled", None)
+                if setter is not None:
+                    setter(enabled)
+
         def _set_model_indexed_state_storage_empty():
             def _visit(model):
                 setter = getattr(model, "_set_indexed_state_storage", None)
@@ -739,6 +748,7 @@ class Simulator:
         _set_model_indexed_state_storage_empty()
         _set_model_node_resolution_cache_enabled(False)
         _set_model_static_branch_fastpath_enabled(False)
+        _set_model_transition_unchanged_fastpath_enabled(transition_unchanged_fastpath)
         _set_model_static_branch_indexed_io_empty()
         _set_model_node_resolution_cache_enabled(True)
         if indexed_state_storage:
@@ -1792,6 +1802,7 @@ class Simulator:
                 "timer_breakpoint_hits": "timer_breakpoint_hits_total",
                 "timer_breakpoint_scans": "timer_breakpoint_scans_total",
                 "timer_state_updates": "timer_state_updates_total",
+                "transition_unchanged_target_fastpath": "transition_unchanged_target_fastpath_total",
                 "static_branch_fastpath_fallbacks": "static_branch_fastpath_fallbacks_total",
                 "dynamic_node_cache_hits": "dynamic_node_cache_hits_total",
                 "dynamic_node_cache_misses": "dynamic_node_cache_misses_total",
@@ -1897,6 +1908,7 @@ class Simulator:
         _set_model_indexed_state_storage_empty()
         _set_model_node_resolution_cache_enabled(False)
         _set_model_static_branch_fastpath_enabled(False)
+        _set_model_transition_unchanged_fastpath_enabled(False)
         _set_model_static_branch_indexed_io_empty()
 
         return SimResult(time=time_arr, signals=signals,

@@ -1606,6 +1606,89 @@ endmodule
         val_mid = self.model._transition("t1", time=5e-9, target=1.0, rise=10e-9)
         assert 0.0 < val_mid < 1.0
 
+    def test_transition_unchanged_target_fastpath_preserves_interruption(self):
+        self.model._set_transition_unchanged_fastpath_enabled(True)
+        self.model._transition("tf", time=0.0, target=0.0, rise=10e-9, fall=10e-9)
+        self.model._transition("tf", time=0.0, target=1.0, rise=10e-9, fall=10e-9)
+
+        fastpath_before = self.model._perf_stats["transition_unchanged_target_fastpath"]
+        val_mid = self.model._transition("tf", time=5e-9, target=1.0, rise=10e-9, fall=10e-9)
+
+        assert val_mid == pytest.approx(0.5)
+        assert self.model._perf_stats["transition_unchanged_target_fastpath"] == fastpath_before + 1
+        assert self.model.transitions["tf"].active is True
+
+        val_interrupted = self.model._transition("tf", time=6e-9, target=0.0, rise=10e-9, fall=10e-9)
+
+        assert val_interrupted == pytest.approx(0.6)
+        assert self.model.transitions["tf"].target_val == pytest.approx(0.0)
+        assert self.model.transitions["tf"].active is True
+        assert self.model._perf_stats["transition_unchanged_target_fastpath"] == fastpath_before + 1
+
+    def test_transition_unchanged_target_fastpath_is_default_disabled(self):
+        model = CompiledModel()
+        model._transition("tf_off", time=0.0, target=0.0, rise=10e-9, fall=10e-9)
+        model._transition("tf_off", time=0.0, target=1.0, rise=10e-9, fall=10e-9)
+
+        val_mid = model._transition("tf_off", time=5e-9, target=1.0, rise=10e-9, fall=10e-9)
+
+        assert val_mid == pytest.approx(0.5)
+        assert model._perf_stats["transition_unchanged_target_fastpath"] == 0
+
+    def test_transition_initial_state_records_target_and_parameters_for_fastpath(self):
+        self.model._set_transition_unchanged_fastpath_enabled(True)
+        val_initial = self.model._transition(
+            "tf_initial",
+            time=0.0,
+            target=1.0,
+            rise=10e-9,
+            fall=10e-9,
+        )
+
+        assert val_initial == pytest.approx(1.0)
+        fastpath_before = self.model._perf_stats["transition_unchanged_target_fastpath"]
+
+        val_same = self.model._transition(
+            "tf_initial",
+            time=1e-9,
+            target=1.0,
+            rise=10e-9,
+            fall=10e-9,
+        )
+
+        assert val_same == pytest.approx(1.0)
+        assert self.model.transitions["tf_initial"].target_val == pytest.approx(1.0)
+        assert self.model.transitions["tf_initial"].rise_time == pytest.approx(10e-9)
+        assert self.model._perf_stats["transition_unchanged_target_fastpath"] == fastpath_before + 1
+
+    def test_transition_unchanged_target_fastpath_checks_transition_parameters(self):
+        self.model._set_transition_unchanged_fastpath_enabled(True)
+        self.model._transition("tf_params", time=0.0, target=0.0, rise=10e-9, fall=10e-9)
+        self.model._transition("tf_params", time=0.0, target=1.0, rise=10e-9, fall=10e-9)
+
+        fastpath_before = self.model._perf_stats["transition_unchanged_target_fastpath"]
+        val_mid = self.model._transition(
+            "tf_params",
+            time=5e-9,
+            target=1.0,
+            rise=5e-9,
+            fall=10e-9,
+        )
+
+        assert val_mid == pytest.approx(0.5)
+        assert self.model._perf_stats["transition_unchanged_target_fastpath"] == fastpath_before
+
+        val_same_params = self.model._transition(
+            "tf_params",
+            time=6e-9,
+            target=1.0,
+            rise=10e-9,
+            fall=10e-9,
+        )
+
+        assert val_same_params == pytest.approx(0.6)
+        assert self.model._perf_stats["transition_unchanged_target_fastpath"] == fastpath_before + 1
+
     def test_check_cross_first_call_false(self):
         assert self.model._check_cross("c0", 0.0, -0.5) is False
 

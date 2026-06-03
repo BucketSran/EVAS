@@ -108,6 +108,7 @@ class CompiledModel:
             "dynamic_node_cache_hits": 0,
             "dynamic_node_cache_misses": 0,
             "dynamic_node_cache_bypasses": 0,
+            "transition_unchanged_target_fastpath": 0,
             "indexed_state_scalar_writes": 0,
             "indexed_state_scalar_reads": 0,
             "indexed_state_array_writes": 0,
@@ -124,6 +125,7 @@ class CompiledModel:
         self._indexed_voltage_probe: Optional[Callable[[str, str, float, bool], None]] = None
         self._indexed_voltage_reader: Optional[Callable[[str, str], Optional[float]]] = None
         self._static_branch_fastpath_enabled: bool = False
+        self._transition_unchanged_fastpath_enabled: bool = False
         self._static_branch_indexed_values: Optional[List[float]] = None
         self._static_branch_read_node_ids: tuple[int, ...] = ()
         self._static_branch_write_node_ids: tuple[int, ...] = ()
@@ -333,6 +335,12 @@ class CompiledModel:
             self._perf_stats["static_branch_fastpath_fallbacks"] = 0
         for child in self._child_models:
             child._set_static_branch_fastpath_enabled(enabled)
+
+    def _set_transition_unchanged_fastpath_enabled(self, enabled: bool):
+        """Enable the no-op transition target fast path."""
+        self._transition_unchanged_fastpath_enabled = bool(enabled)
+        for child in self._child_models:
+            child._set_transition_unchanged_fastpath_enabled(enabled)
 
     def _set_static_branch_indexed_io(
         self,
@@ -865,25 +873,65 @@ class CompiledModel:
                     delay: float = 0.0, rise: float = 0.0, fall: float = 0.0) -> float:
         """Evaluate a transition operator."""
         if self._initial_condition_mode:
+            effective_rise = rise if rise > 0 else self.default_transition
+            effective_fall = fall if fall > 0 else self.default_transition
             ts = self.transitions.get(key)
             if ts is None:
-                ts = TransitionState(current_val=target)
+                ts = TransitionState(
+                    current_val=target,
+                    target_val=target,
+                    start_val=target,
+                    start_time=time,
+                    delay=delay,
+                    rise_time=effective_rise,
+                    fall_time=effective_fall,
+                    active=False,
+                )
                 self.transitions[key] = ts
             ts.current_val = target
             ts.target_val = target
             ts.start_val = target
             ts.start_time = time
-            ts.delay = 0.0
+            ts.delay = delay
+            ts.rise_time = effective_rise
+            ts.fall_time = effective_fall
             ts.active = False
             return target
         if key not in self.transitions:
-            self.transitions[key] = TransitionState(current_val=target)
+            effective_rise = rise if rise > 0 else self.default_transition
+            effective_fall = fall if fall > 0 else self.default_transition
+            self.transitions[key] = TransitionState(
+                current_val=target,
+                target_val=target,
+                start_val=target,
+                start_time=time,
+                delay=delay,
+                rise_time=effective_rise,
+                fall_time=effective_fall,
+                active=False,
+            )
             return target
         ts = self.transitions[key]
         # Advance current_val to the actual value at this time before updating target.
         # Without this, a new target set at t overwrites the in-progress transition
         # before evaluate() can commit its endpoint into current_val.
-        ts.evaluate(time)
+        current = ts.evaluate(time)
+        if (
+            self._transition_unchanged_fastpath_enabled
+            and target == ts.target_val
+        ):
+            effective_rise = rise if rise > 0 else self.default_transition
+            effective_fall = fall if fall > 0 else self.default_transition
+            if (
+                delay == ts.delay
+                and effective_rise == ts.rise_time
+                and effective_fall == ts.fall_time
+                and (
+                    ts.active or target == ts.current_val
+                )
+            ):
+                self._perf_stats["transition_unchanged_target_fastpath"] += 1
+                return current
         ts.set_target(time, target, delay, rise, fall, self.default_transition)
         return ts.evaluate(time)
 
