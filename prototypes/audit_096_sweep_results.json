@@ -1,0 +1,571 @@
+{
+  "summary": {
+    "candidate_count": 80,
+    "measured": 75,
+    "skipped": 5,
+    "speedup_min": 0.23882143469458098,
+    "speedup_max": 0.9909886791775607,
+    "speedup_median": 0.5800967754327844,
+    "speedup_geomean": 0.5623824138561424,
+    "wins_gt_1.05x": 0,
+    "neutral_0.95_to_1.05x": 1,
+    "losses_lt_0.95x": 74,
+    "big_losses_lt_0.5x": 14,
+    "py_wall_total_s": 81.80963050399971,
+    "rust_wall_total_s": 152.31419666900007
+  },
+  "rows": [
+    {
+      "py_wall_med": 0.023032249999999976,
+      "rust_wall_med": 0.03173745800000005,
+      "speedup": 0.7257118701819137,
+      "entry_id": "vbr1_l1_binary_weighted_voltage_dac",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT01_data_converter_models/vbr1_l1_binary_weighted_voltage_dac/forms/tb/gold/tb_simple_binary_voltage_dac_4b_ref.scs"
+    },
+    {
+      "py_wall_med": 6.718710292000001,
+      "rust_wall_med": 14.912118125,
+      "speedup": 0.4505537198458855,
+      "entry_id": "vbr1_l1_capacitive_weighted_sar_feedback_dac",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT01_data_converter_models/vbr1_l1_capacitive_weighted_sar_feedback_dac/forms/tb/gold/tb_cdac_cal_ref.scs"
+    },
+    {
+      "py_wall_med": 1.0725944579999975,
+      "rust_wall_med": 1.797168666999994,
+      "speedup": 0.5968245928694467,
+      "entry_id": "vbr1_l1_clocked_adc_quantizer",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT01_data_converter_models/vbr1_l1_clocked_adc_quantizer/forms/tb/gold/tb_flash_adc_3b_ref.scs"
+    },
+    {
+      "py_wall_med": 0.010216916999993941,
+      "rust_wall_med": 0.01417020799999591,
+      "speedup": 0.7210139046651178,
+      "entry_id": "vbr1_l1_dac_mismatch_unit_weighting_model",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT01_data_converter_models/vbr1_l1_dac_mismatch_unit_weighting_model/forms/tb/gold/tb_dac_mismatch_unit_weighting_model.scs"
+    },
+    {
+      "py_wall_med": 0.9444645829999985,
+      "rust_wall_med": 1.5478089999999867,
+      "speedup": 0.6101945285238726,
+      "entry_id": "vbr1_l1_pipeline_adc_stage",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT01_data_converter_models/vbr1_l1_pipeline_adc_stage/forms/tb/gold/tb_pipeline_stage_ref.scs"
+    },
+    {
+      "py_wall_med": 0.881239750000006,
+      "rust_wall_med": 1.372888875000001,
+      "speedup": 0.6418871665778524,
+      "entry_id": "vbr1_l1_sar_logic",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT01_data_converter_models/vbr1_l1_sar_logic/forms/tb/gold/tb_sar_logic_4b_ref.scs"
+    },
+    {
+      "py_wall_med": 0.015604541999991284,
+      "rust_wall_med": 0.02246837500000254,
+      "speedup": 0.6945113743201065,
+      "entry_id": "vbr1_l1_segmented_dac",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT01_data_converter_models/vbr1_l1_segmented_dac/forms/tb/gold/tb_segmented_dac_ref.scs"
+    },
+    {
+      "py_wall_med": 0.03014920799999743,
+      "rust_wall_med": 0.04922812499999907,
+      "speedup": 0.6124386821557393,
+      "entry_id": "vbr1_l1_thermometer_code_decoder",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT01_data_converter_models/vbr1_l1_thermometer_code_decoder/forms/tb/gold/tb_thermometer_decoder_guarded_ref.scs"
+    },
+    {
+      "py_wall_med": 0.03234804100000588,
+      "rust_wall_med": 0.04010637500000769,
+      "speedup": 0.8065560898984183,
+      "entry_id": "vbr1_l1_unit_element_thermometer_dac",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT01_data_converter_models/vbr1_l1_unit_element_thermometer_dac/forms/tb/gold/tb_thermometer_dac_15seg_ref.scs"
+    },
+    {
+      "py_wall_med": 2.2555997909999945,
+      "rust_wall_med": 3.8883163750000023,
+      "speedup": 0.5800967754327844,
+      "entry_id": "vbr1_l2_converter_static_linearity_measurement_flow",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT01_data_converter_models/vbr1_l2_converter_static_linearity_measurement_flow/forms/tb/gold/tb_converter_static_linearity_measurement_flow.scs"
+    },
+    {
+      "py_wall_med": 1.5158292090000032,
+      "rust_wall_med": 2.393588582999996,
+      "speedup": 0.6332872824368772,
+      "entry_id": "vbr1_l2_flash_adc_mini_array",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT01_data_converter_models/vbr1_l2_flash_adc_mini_array/forms/tb/gold/tb_flash_adc_3b_ref.scs"
+    },
+    {
+      "py_wall_med": 2.3183982910000083,
+      "rust_wall_med": 3.2744968330000006,
+      "speedup": 0.7080166539284626,
+      "entry_id": "vbr1_l2_pipeline_adc_chain",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT01_data_converter_models/vbr1_l2_pipeline_adc_chain/forms/tb/gold/tb_pipeline_adc_chain_4b_ref.scs"
+    },
+    {
+      "py_error": "timeout 76.5s",
+      "entry_id": "vbr1_l2_weighted_sar_adc_dac_loop",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT01_data_converter_models/vbr1_l2_weighted_sar_adc_dac_loop/forms/tb/gold/tb_sar_adc_dac_weighted_8b_ref.scs"
+    },
+    {
+      "py_error": "timeout 75.1s",
+      "entry_id": "vbr1_l2_weighted_sar_adc_dac_loop",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT01_data_converter_models/vbr1_l2_weighted_sar_adc_dac_loop/forms/tb/gold/tb_sar_adc_dac_weighted_8b_ref.scs"
+    },
+    {
+      "py_error": "timeout 75.9s",
+      "entry_id": "vbr1_l2_weighted_sar_adc_dac_loop",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT01_data_converter_models/vbr1_l2_weighted_sar_adc_dac_loop/forms/tb/gold/tb_sar_adc_dac_weighted_8b_ref.scs"
+    },
+    {
+      "py_wall_med": 0.13321383400000286,
+      "rust_wall_med": 0.2197378330000106,
+      "speedup": 0.6062398640292245,
+      "entry_id": "vbr1_l1_debounce_latch",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT02_comparator_and_decision_circuits/vbr1_l1_debounce_latch/forms/tb/gold/tb_debounce_latch_ref.scs"
+    },
+    {
+      "py_wall_med": 0.11379616700003226,
+      "rust_wall_med": 0.18363516699997717,
+      "speedup": 0.619686135608472,
+      "entry_id": "vbr1_l1_hysteresis_comparator",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT02_comparator_and_decision_circuits/vbr1_l1_hysteresis_comparator/forms/tb/gold/tb_cmp_hysteresis_ref.scs"
+    },
+    {
+      "py_wall_med": 0.28909225000001015,
+      "rust_wall_med": 0.5248550839999666,
+      "speedup": 0.5508039434367535,
+      "entry_id": "vbr1_l1_offset_comparator",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT02_comparator_and_decision_circuits/vbr1_l1_offset_comparator/forms/tb/gold/tb_comparator_offset_ref.scs"
+    },
+    {
+      "py_wall_med": 10.242934834000039,
+      "rust_wall_med": 19.306616958000006,
+      "speedup": 0.530540117736977,
+      "entry_id": "vbr1_l1_propagation_delay_comparator",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT02_comparator_and_decision_circuits/vbr1_l1_propagation_delay_comparator/forms/tb/gold/tb_cmp_delay_ref.scs"
+    },
+    {
+      "py_wall_med": 0.16949129199997515,
+      "rust_wall_med": 0.29040729100000817,
+      "speedup": 0.5836330465958253,
+      "entry_id": "vbr1_l1_threshold_comparator",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT02_comparator_and_decision_circuits/vbr1_l1_threshold_comparator/forms/tb/gold/tb_comparator_ref.scs"
+    },
+    {
+      "py_wall_med": 4.556916875000013,
+      "rust_wall_med": 7.4244265410000025,
+      "speedup": 0.6137735823548519,
+      "entry_id": "vbr1_l1_window_comparator_detector",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT02_comparator_and_decision_circuits/vbr1_l1_window_comparator_detector/forms/tb/gold/tb_window_comparator_ref.scs"
+    },
+    {
+      "py_wall_med": 0.08927283399998487,
+      "rust_wall_med": 0.13501920799996014,
+      "speedup": 0.6611861773030933,
+      "entry_id": "vbr1_l2_comparator_measurement_flow",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT02_comparator_and_decision_circuits/vbr1_l2_comparator_measurement_flow/forms/tb/gold/tb_comparator_offset_search_ref.scs"
+    },
+    {
+      "py_wall_med": 0.5130458749999889,
+      "rust_wall_med": 0.8594903750000071,
+      "speedup": 0.5969186973152371,
+      "entry_id": "vbr1_l1_acquisition_limited_sample_and_hold",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT03_sampling_and_analog_memory/vbr1_l1_acquisition_limited_sample_and_hold/forms/tb/gold/tb_acquisition_limited_sample_hold.scs"
+    },
+    {
+      "py_wall_med": 0.3087429580000389,
+      "rust_wall_med": 0.5632517089999851,
+      "speedup": 0.5481438459338027,
+      "entry_id": "vbr1_l1_aperture_delay_track_and_hold",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT03_sampling_and_analog_memory/vbr1_l1_aperture_delay_track_and_hold/forms/tb/gold/tb_sample_hold_aperture_ref.scs"
+    },
+    {
+      "py_wall_med": 0.7489598340000043,
+      "rust_wall_med": 1.4460234590000027,
+      "speedup": 0.5179444561141127,
+      "entry_id": "vbr1_l1_clocked_sample_and_hold",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT03_sampling_and_analog_memory/vbr1_l1_clocked_sample_and_hold/forms/tb/gold/tb_sample_hold_ref.scs"
+    },
+    {
+      "py_wall_med": 0.12491604199999529,
+      "rust_wall_med": 0.2125622089999979,
+      "speedup": 0.5876681588306063,
+      "entry_id": "vbr1_l1_sample_and_hold_with_droop_leakage",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT03_sampling_and_analog_memory/vbr1_l1_sample_and_hold_with_droop_leakage/forms/tb/gold/tb_leaky_hold_ref.scs"
+    },
+    {
+      "py_wall_med": 0.5556050420000247,
+      "rust_wall_med": 0.9128270830000247,
+      "speedup": 0.6086640639254671,
+      "entry_id": "vbr1_l2_converter_front_end",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT03_sampling_and_analog_memory/vbr1_l2_converter_front_end/forms/tb/gold/tb_sample_hold_droop_ref.scs"
+    },
+    {
+      "py_wall_med": 0.039596250000045075,
+      "rust_wall_med": 0.07721716699995795,
+      "speedup": 0.5127907632258334,
+      "entry_id": "vbr1_l1_first_order_lowpass",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT04_baseband_signal_conditioning/vbr1_l1_first_order_lowpass/forms/tb/gold/tb_first_order_lowpass_ref.scs"
+    },
+    {
+      "py_wall_med": 0.5921451250000018,
+      "rust_wall_med": 1.0839236250000113,
+      "speedup": 0.5462978307166205,
+      "entry_id": "vbr1_l1_higher_order_filter",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT04_baseband_signal_conditioning/vbr1_l1_higher_order_filter/forms/tb/gold/tb_higher_order_filter.scs"
+    },
+    {
+      "py_wall_med": 3.4985430419999375,
+      "rust_wall_med": 5.578066125000078,
+      "speedup": 0.6271964088629173,
+      "entry_id": "vbr1_l1_precision_rectifier_envelope_detector",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT04_baseband_signal_conditioning/vbr1_l1_precision_rectifier_envelope_detector/forms/tb/gold/tb_precision_rectifier_envelope_detector.scs"
+    },
+    {
+      "py_wall_med": 1.6150041669999382,
+      "rust_wall_med": 2.644692541999916,
+      "speedup": 0.6106585704585049,
+      "entry_id": "vbr1_l1_programmable_gain_amplifier",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT04_baseband_signal_conditioning/vbr1_l1_programmable_gain_amplifier/forms/tb/gold/tb_programmable_gain_amplifier.scs"
+    },
+    {
+      "py_wall_med": 0.12739924999993946,
+      "rust_wall_med": 0.2723205830000097,
+      "speedup": 0.46782820672771147,
+      "entry_id": "vbr1_l1_resettable_integrator",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT04_baseband_signal_conditioning/vbr1_l1_resettable_integrator/forms/tb/gold/tb_resettable_integrator_ref.scs"
+    },
+    {
+      "py_wall_med": 0.042061999999987165,
+      "rust_wall_med": 0.09151012500001343,
+      "speedup": 0.45964312692154,
+      "entry_id": "vbr1_l1_slew_rate_limiter",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT04_baseband_signal_conditioning/vbr1_l1_slew_rate_limiter/forms/tb/gold/tb_slew_rate_limiter_ref.scs"
+    },
+    {
+      "py_wall_med": 0.5840845000000172,
+      "rust_wall_med": 1.07194837499992,
+      "speedup": 0.5448811842268625,
+      "entry_id": "vbr1_l1_soft_hysteretic_limiter",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT04_baseband_signal_conditioning/vbr1_l1_soft_hysteretic_limiter/forms/tb/gold/tb_soft_hysteretic_limiter.scs"
+    },
+    {
+      "py_wall_med": 0.9222414170000093,
+      "rust_wall_med": 1.551753000000076,
+      "speedup": 0.594322303227359,
+      "entry_id": "vbr1_l2_amplifier_filter_chain",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT04_baseband_signal_conditioning/vbr1_l2_amplifier_filter_chain/forms/tb/gold/tb_amplifier_filter_chain.scs"
+    },
+    {
+      "py_wall_med": 0.3920322919999535,
+      "rust_wall_med": 0.6074519169999348,
+      "speedup": 0.6453717257756149,
+      "entry_id": "vbr1_l1_bang_bang_phase_detector",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT05_pll_clock_and_timing_systems/vbr1_l1_bang_bang_phase_detector/forms/tb/gold/tb_bbpd_data_edge_alignment_ref.scs"
+    },
+    {
+      "py_wall_med": 0.12898283300000912,
+      "rust_wall_med": 0.2120404579999331,
+      "speedup": 0.6082935031202857,
+      "entry_id": "vbr1_l1_charge_pump_abstraction",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT05_pll_clock_and_timing_systems/vbr1_l1_charge_pump_abstraction/forms/tb/gold/tb_charge_pump_abstraction.scs"
+    },
+    {
+      "py_wall_med": 3.342191584000034,
+      "rust_wall_med": 5.520527875000084,
+      "speedup": 0.6054115946294325,
+      "entry_id": "vbr1_l1_clock_divider",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT05_pll_clock_and_timing_systems/vbr1_l1_clock_divider/forms/tb/gold/tb_clk_divider_ref.scs"
+    },
+    {
+      "py_wall_med": 3.304859792000002,
+      "rust_wall_med": 5.681059542000071,
+      "speedup": 0.5817329967354109,
+      "entry_id": "vbr1_l1_clock_divider",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT05_pll_clock_and_timing_systems/vbr1_l1_clock_divider/forms/tb/gold/tb_clk_divider_ref.scs"
+    },
+    {
+      "py_wall_med": 0.07914154200000212,
+      "rust_wall_med": 0.15414433400007965,
+      "speedup": 0.5134249177135581,
+      "entry_id": "vbr1_l1_digital_phase_accumulator_with_modulo_wrap",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT05_pll_clock_and_timing_systems/vbr1_l1_digital_phase_accumulator_with_modulo_wrap/forms/tb/gold/tb_phase_accumulator_timer_wrap_ref.scs"
+    },
+    {
+      "py_wall_med": 0.13166529099999025,
+      "rust_wall_med": 0.22965404200010653,
+      "speedup": 0.5733201551920831,
+      "entry_id": "vbr1_l1_lock_detector",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT05_pll_clock_and_timing_systems/vbr1_l1_lock_detector/forms/tb/gold/tb_lock_detector_ref.scs"
+    },
+    {
+      "py_wall_med": 0.9913858329999812,
+      "rust_wall_med": 1.8352737919999527,
+      "speedup": 0.5401841607075086,
+      "entry_id": "vbr1_l1_loop_filter_abstraction",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT05_pll_clock_and_timing_systems/vbr1_l1_loop_filter_abstraction/forms/tb/gold/tb_loop_filter_abstraction.scs"
+    },
+    {
+      "py_wall_med": 6.4146853330000795,
+      "rust_wall_med": 11.221733916999938,
+      "speedup": 0.5716304967169464,
+      "entry_id": "vbr1_l1_pfd_up_dn_logic",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT05_pll_clock_and_timing_systems/vbr1_l1_pfd_up_dn_logic/forms/tb/gold/tb_pfd_reset_race_ref.scs"
+    },
+    {
+      "py_wall_med": 0.0763773339999716,
+      "rust_wall_med": 0.15723316699995848,
+      "speedup": 0.48575841508039946,
+      "entry_id": "vbr1_l1_vco_phase_integrator",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT05_pll_clock_and_timing_systems/vbr1_l1_vco_phase_integrator/forms/tb/gold/tb_vco_phase_integrator_ref.scs"
+    },
+    {
+      "py_wall_med": 0.6315927089999605,
+      "rust_wall_med": 2.644623208999974,
+      "speedup": 0.23882143469458098,
+      "entry_id": "vbr1_l2_adpll_lock_ratio_hop_timer_flow",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT05_pll_clock_and_timing_systems/vbr1_l2_adpll_lock_ratio_hop_timer_flow/forms/tb/gold/tb_adpll_ratio_hop_ref.scs"
+    },
+    {
+      "py_wall_med": 3.4098595829999567,
+      "rust_wall_med": 5.942545291999977,
+      "speedup": 0.573804559401576,
+      "entry_id": "vbr1_l2_cppll_tracking_and_frequency_step_reacquire_flow",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT05_pll_clock_and_timing_systems/vbr1_l2_cppll_tracking_and_frequency_step_reacquire_flow/forms/tb/gold/tb_cppll_freq_step_reacquire_ref.scs"
+    },
+    {
+      "py_wall_med": 2.3954740829999537,
+      "rust_wall_med": 4.274632290999989,
+      "speedup": 0.560393016270311,
+      "entry_id": "vbr1_l2_cppll_tracking_and_frequency_step_reacquire_flow",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT05_pll_clock_and_timing_systems/vbr1_l2_cppll_tracking_and_frequency_step_reacquire_flow/forms/tb/gold/tb_cppll_freq_step_reacquire_ref.scs"
+    },
+    {
+      "py_wall_med": 0.9823185410000406,
+      "rust_wall_med": 1.8635448339999812,
+      "speedup": 0.5271236425750788,
+      "entry_id": "vbr1_l1_calibration_deadband_controller",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT06_calibration_dem_and_control/vbr1_l1_calibration_deadband_controller/forms/tb/gold/tb_calibration_deadband_controller.scs"
+    },
+    {
+      "py_wall_med": 0.1881316249999827,
+      "rust_wall_med": 0.29924462500002846,
+      "speedup": 0.6286884016712575,
+      "entry_id": "vbr1_l1_element_shuffler",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT06_calibration_dem_and_control/vbr1_l1_element_shuffler/forms/tb/gold/tb_element_shuffler_ref.scs"
+    },
+    {
+      "py_wall_med": 0.6514253750000307,
+      "rust_wall_med": 1.7986807500000168,
+      "speedup": 0.3621684253862308,
+      "entry_id": "vbr1_l1_gain_trim_controller",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT06_calibration_dem_and_control/vbr1_l1_gain_trim_controller/forms/tb/gold/tb_gain_trim_controller_ref.scs"
+    },
+    {
+      "py_wall_med": 1.0366020419999131,
+      "rust_wall_med": 3.1492649580000034,
+      "speedup": 0.32915682098029175,
+      "entry_id": "vbr1_l1_successive_approximation_calibration_search_fsm",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT06_calibration_dem_and_control/vbr1_l1_successive_approximation_calibration_search_fsm/forms/tb/gold/tb_successive_approximation_calibration_search_fsm.scs"
+    },
+    {
+      "py_wall_med": 0.5959265000000187,
+      "rust_wall_med": 1.1076653750000105,
+      "speedup": 0.5380022825034257,
+      "entry_id": "vbr1_l1_trim_calibration_controller",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT06_calibration_dem_and_control/vbr1_l1_trim_calibration_controller/forms/tb/gold/tb_cdac_calibration_ref.scs"
+    },
+    {
+      "py_wall_med": 2.3075479579999865,
+      "rust_wall_med": 3.235863542000061,
+      "speedup": 0.7131165848154739,
+      "entry_id": "vbr1_l2_complete_calibration_loop",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT06_calibration_dem_and_control/vbr1_l2_complete_calibration_loop/forms/tb/gold/tb_complete_calibration_loop.scs"
+    },
+    {
+      "py_wall_med": 0.07611587499991401,
+      "rust_wall_med": 0.13967616599995836,
+      "speedup": 0.544945334481308,
+      "entry_id": "vbr1_l1_bandgap_reference_macro_model",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT07_bias_reference_power_management/vbr1_l1_bandgap_reference_macro_model/forms/tb/gold/tb_bandgap_reference_macro_model.scs"
+    },
+    {
+      "py_wall_med": 0.07587066700000378,
+      "rust_wall_med": 0.2944752089999838,
+      "speedup": 0.25764704355811474,
+      "entry_id": "vbr1_l1_bias_voltage_generator_with_enable_trim",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT07_bias_reference_power_management/vbr1_l1_bias_voltage_generator_with_enable_trim/forms/tb/gold/tb_bias_voltage_generator_with_enable_trim.scs"
+    },
+    {
+      "py_wall_med": 0.1833132919999798,
+      "rust_wall_med": 0.18498020800006998,
+      "speedup": 0.9909886791775607,
+      "entry_id": "vbr1_l1_ldo_regulator_macro_model",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT07_bias_reference_power_management/vbr1_l1_ldo_regulator_macro_model/forms/tb/gold/tb_ldo_regulator_macro_model.scs"
+    },
+    {
+      "py_wall_med": 0.0851214169999821,
+      "rust_wall_med": 0.25288787499994214,
+      "speedup": 0.3365974624129432,
+      "entry_id": "vbr1_l1_power_on_reset_detector",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT07_bias_reference_power_management/vbr1_l1_power_on_reset_detector/forms/tb/gold/tb_power_on_reset_detector.scs"
+    },
+    {
+      "py_wall_med": 0.14908775000003516,
+      "rust_wall_med": 0.27566895899997235,
+      "speedup": 0.5408216817042869,
+      "entry_id": "vbr1_l1_ptat_ctat_reference_generator",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT07_bias_reference_power_management/vbr1_l1_ptat_ctat_reference_generator/forms/tb/gold/tb_ptat_ctat_reference_generator.scs"
+    },
+    {
+      "py_wall_med": 0.12916558400002032,
+      "rust_wall_med": 0.24105279200000496,
+      "speedup": 0.5358394023497461,
+      "entry_id": "vbr1_l1_uvlo_brownout_detector",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT07_bias_reference_power_management/vbr1_l1_uvlo_brownout_detector/forms/tb/gold/tb_uvlo_brownout_detector.scs"
+    },
+    {
+      "py_wall_med": 0.1765463340000224,
+      "rust_wall_med": 0.2490299999999479,
+      "speedup": 0.7089360077101527,
+      "entry_id": "vbr1_l2_ldo_load_step_recovery_flow",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT07_bias_reference_power_management/vbr1_l2_ldo_load_step_recovery_flow/forms/tb/gold/tb_ldo_load_step_recovery_flow.scs"
+    },
+    {
+      "py_wall_med": 0.18188495800006876,
+      "rust_wall_med": 0.19612974999995458,
+      "speedup": 0.9273705697382008,
+      "entry_id": "vbr1_l2_reference_startup_enable_flow",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT07_bias_reference_power_management/vbr1_l2_reference_startup_enable_flow/forms/tb/gold/tb_reference_startup_enable_flow.scs"
+    },
+    {
+      "py_wall_med": 0.07651250000003529,
+      "rust_wall_med": 0.12890254199999163,
+      "speedup": 0.5935685892062568,
+      "entry_id": "vbr1_l1_limiting_amplifier_frontend",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT08_rf_afe_behavioral_macromodels/vbr1_l1_limiting_amplifier_frontend/forms/tb/gold/tb_limiting_amplifier_frontend.scs"
+    },
+    {
+      "py_wall_med": 0.07446583399996598,
+      "rust_wall_med": 0.12920479100000648,
+      "speedup": 0.5763395724231484,
+      "entry_id": "vbr1_l1_lna_gain_compression_macro",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT08_rf_afe_behavioral_macromodels/vbr1_l1_lna_gain_compression_macro/forms/tb/gold/tb_lna_gain_compression_macro.scs"
+    },
+    {
+      "py_wall_med": 0.07437049999998635,
+      "rust_wall_med": 0.12835758300002453,
+      "speedup": 0.5794009069177638,
+      "entry_id": "vbr1_l1_log_rssi_power_detector",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT08_rf_afe_behavioral_macromodels/vbr1_l1_log_rssi_power_detector/forms/tb/gold/tb_log_rssi_power_detector.scs"
+    },
+    {
+      "py_wall_med": 0.07658129199990071,
+      "rust_wall_med": 0.20793466700001773,
+      "speedup": 0.3682949702653199,
+      "entry_id": "vbr1_l1_pa_compression_macro",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT08_rf_afe_behavioral_macromodels/vbr1_l1_pa_compression_macro/forms/tb/gold/tb_pa_compression_macro.scs"
+    },
+    {
+      "py_wall_med": 0.1119042499999523,
+      "rust_wall_med": 0.17440012500003377,
+      "speedup": 0.6416523497327231,
+      "entry_id": "vbr1_l1_rf_mixer_downconverter_macro",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT08_rf_afe_behavioral_macromodels/vbr1_l1_rf_mixer_downconverter_macro/forms/tb/gold/tb_rf_mixer_downconverter_macro.scs"
+    },
+    {
+      "py_wall_med": 0.250140416000022,
+      "rust_wall_med": 0.3843405000000075,
+      "speedup": 0.6508302299654007,
+      "entry_id": "vbr1_l2_agc_receiver_leveling_loop",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT08_rf_afe_behavioral_macromodels/vbr1_l2_agc_receiver_leveling_loop/forms/tb/gold/tb_agc_receiver_leveling_loop.scs"
+    },
+    {
+      "py_wall_med": 0.2851247080000121,
+      "rust_wall_med": 0.4166811250000819,
+      "speedup": 0.6842755548381416,
+      "entry_id": "vbr1_l2_iq_downconversion_chain",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/CT08_rf_afe_behavioral_macromodels/vbr1_l2_iq_downconversion_chain/forms/tb/gold/tb_iq_downconversion_chain.scs"
+    },
+    {
+      "py_wall_med": 0.050660207999953855,
+      "rust_wall_med": 0.10249433299998145,
+      "speedup": 0.4942732589904558,
+      "entry_id": "vbr1_l1_crossing_metric_writer",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/SUP01_measurement_instrumentation_flows/vbr1_l1_crossing_metric_writer/forms/tb/gold/tb_file_metric_writer_ref.scs"
+    },
+    {
+      "py_wall_med": 5.930006832999993,
+      "rust_wall_med": 14.59659995900006,
+      "speedup": 0.40625946108385563,
+      "entry_id": "vbr1_l1_edge_interval_timer",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/SUP01_measurement_instrumentation_flows/vbr1_l1_edge_interval_timer/forms/tb/gold/tb_cross_interval_163p333_ref.scs"
+    },
+    {
+      "py_wall_med": 2.0940281669999194,
+      "rust_wall_med": 4.426843125000005,
+      "speedup": 0.4730296755207284,
+      "entry_id": "vbr1_l1_gain_estimator",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/SUP01_measurement_instrumentation_flows/vbr1_l1_gain_estimator/forms/tb/gold/tb_gain_estimator_ref.scs"
+    },
+    {
+      "py_wall_med": 0.20297583299998223,
+      "rust_wall_med": 0.4128008330000057,
+      "speedup": 0.49170402957975484,
+      "entry_id": "vbr1_l1_peak_detector",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/SUP01_measurement_instrumentation_flows/vbr1_l1_peak_detector/forms/tb/gold/tb_peak_detector_ref.scs"
+    },
+    {
+      "py_wall_med": 0.03293366699995204,
+      "rust_wall_med": 0.061552792000043155,
+      "speedup": 0.5350474922393277,
+      "entry_id": "vbr1_l1_settling_time_detector",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/SUP01_measurement_instrumentation_flows/vbr1_l1_settling_time_detector/forms/tb/gold/tb_settling_time_measurement_tb_ref.scs"
+    },
+    {
+      "py_wall_med": 20.34740583300004,
+      "rust_error": "timeout 30.0s",
+      "entry_id": "vbr1_l2_gain_extraction_convergence_measurement_flow",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/SUP01_measurement_instrumentation_flows/vbr1_l2_gain_extraction_convergence_measurement_flow/forms/tb/gold/tb_gain_extraction_ref.scs"
+    },
+    {
+      "py_wall_med": 16.168275999999878,
+      "rust_error": "timeout 31.0s",
+      "entry_id": "vbr1_l2_gain_extraction_convergence_measurement_flow",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/SUP01_measurement_instrumentation_flows/vbr1_l2_gain_extraction_convergence_measurement_flow/forms/tb/gold/tb_gain_extraction_ref.scs"
+    },
+    {
+      "py_wall_med": 0.012479375000111759,
+      "rust_wall_med": 0.021260833000042112,
+      "speedup": 0.5869654777913471,
+      "entry_id": "vbr1_l1_dither_or_noise_like_deterministic_source",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/SUP02_stimulus_and_source_generators/vbr1_l1_dither_or_noise_like_deterministic_source/forms/tb/gold/tb_noise_gen_ref.scs"
+    },
+    {
+      "py_wall_med": 0.011548540999910983,
+      "rust_wall_med": 0.02102162500000304,
+      "speedup": 0.5493648088532315,
+      "entry_id": "vbr1_l1_dither_or_noise_like_deterministic_source",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/SUP02_stimulus_and_source_generators/vbr1_l1_dither_or_noise_like_deterministic_source/forms/tb/gold/tb_noise_gen_ref.scs"
+    },
+    {
+      "py_wall_med": 1.6410803750000014,
+      "rust_wall_med": 2.8790794579999783,
+      "speedup": 0.5700017658213633,
+      "entry_id": "vbr1_l1_lfsr_prbs_generator",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/SUP02_stimulus_and_source_generators/vbr1_l1_lfsr_prbs_generator/forms/tb/gold/tb_lfsr_ref.scs"
+    },
+    {
+      "py_wall_med": 0.008320333000028768,
+      "rust_wall_med": 0.010344540999994933,
+      "speedup": 0.8043211390464635,
+      "entry_id": "vbr1_l1_ramp_or_step_source",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/SUP02_stimulus_and_source_generators/vbr1_l1_ramp_or_step_source/forms/tb/gold/tb_bound_step_period_guard_ref.scs"
+    },
+    {
+      "py_wall_med": 1.6739406250001139,
+      "rust_wall_med": 2.64891149999994,
+      "speedup": 0.6319352779434692,
+      "entry_id": "vbr1_l2_programmable_stimulus_sequencer",
+      "scs": "behavioral-veriloga-eval/benchmark-vabench-release-v1/tasks/SUP02_stimulus_and_source_generators/vbr1_l2_programmable_stimulus_sequencer/forms/tb/gold/tb_programmable_stimulus_sequencer.scs"
+    }
+  ]
+}
