@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import shutil
 import subprocess
 import sys
@@ -11,6 +12,17 @@ from pathlib import Path
 import pytest
 
 from evas.simulator.rust_backend import (
+    BODY_EXPR_ADD,
+    BODY_EXPR_CONST,
+    BODY_EXPR_MUL,
+    BODY_EXPR_READ_NODE,
+    BODY_EXPR_READ_PARAM,
+    BODY_EXPR_READ_STATE,
+    BODY_EXPR_SUB,
+    BODY_TARGET_NODE,
+    BODY_TARGET_STATE,
+    BodyExprOp,
+    BodyStmtOp,
     LinearCondition,
     LinearOp,
     LinearTerm,
@@ -1168,6 +1180,140 @@ def test_rust_backend_static_linear_batch_coerces_integer_target_before_read():
 
     assert state_values.tolist() == pytest.approx([2.0])
     assert node_values.tolist() == pytest.approx([2.0])
+
+
+def _veriloga_integer(value: float) -> float:
+    if value != value or value in (float("inf"), float("-inf")):
+        return 0.0
+    if value >= 0:
+        return float(int(value + 0.5))
+    return float(int(value - 0.5))
+
+
+def test_rust_backend_evaluates_body_ir_batch():
+    _build_rust_core()
+    backend = load_rust_backend(default_rust_core_library_path())
+    node_values = array("d", [0.25, 0.0])
+    state_values = array("d", [2.0])
+    param_values = array("d", [3.0])
+    expr_ops = [
+        BodyExprOp(BODY_EXPR_READ_NODE, index=0),
+        BodyExprOp(BODY_EXPR_READ_PARAM, index=0),
+        BodyExprOp(BODY_EXPR_MUL),
+        BodyExprOp(BODY_EXPR_READ_STATE, index=0),
+        BodyExprOp(BODY_EXPR_ADD),
+    ]
+    batch = backend.make_body_ir_batch(
+        stmt_ops=[
+            BodyStmtOp(
+                target_kind=BODY_TARGET_NODE,
+                target_id=1,
+                expr_start=0,
+                expr_count=len(expr_ops),
+            )
+        ],
+        expr_ops=expr_ops,
+    )
+
+    backend.evaluate_body_ir(batch, node_values, state_values, param_values)
+
+    assert node_values.tolist() == pytest.approx([0.25, 2.75])
+    assert state_values.tolist() == pytest.approx([2.0])
+
+
+def test_rust_backend_evaluates_body_expr_without_writes():
+    _build_rust_core()
+    backend = load_rust_backend(default_rust_core_library_path())
+    node_values = array("d", [0.25])
+    state_values = array("d", [2.0])
+    param_values = array("d", [3.0])
+    expr_ops = [
+        BodyExprOp(BODY_EXPR_READ_NODE, index=0),
+        BodyExprOp(BODY_EXPR_READ_PARAM, index=0),
+        BodyExprOp(BODY_EXPR_MUL),
+        BodyExprOp(BODY_EXPR_READ_STATE, index=0),
+        BodyExprOp(BODY_EXPR_ADD),
+    ]
+
+    value = backend.evaluate_body_expr(expr_ops, node_values, state_values, param_values)
+
+    assert value == pytest.approx(2.75)
+    assert node_values.tolist() == pytest.approx([0.25])
+    assert state_values.tolist() == pytest.approx([2.0])
+
+
+def test_rust_backend_evaluates_body_expr_batch_segments():
+    _build_rust_core()
+    backend = load_rust_backend(default_rust_core_library_path())
+    node_values = array("d", [0.7, 0.2])
+    state_values = array("d", [2.0])
+    param_values = array("d", [0.5])
+    batch = backend.make_body_expr_batch(
+        [
+            [
+                BodyExprOp(BODY_EXPR_READ_NODE, index=0),
+                BodyExprOp(BODY_EXPR_READ_PARAM, index=0),
+                BodyExprOp(BODY_EXPR_SUB),
+            ],
+            [
+                BodyExprOp(BODY_EXPR_READ_NODE, index=1),
+                BodyExprOp(BODY_EXPR_READ_STATE, index=0),
+                BodyExprOp(BODY_EXPR_MUL),
+            ],
+        ]
+    )
+
+    values = backend.evaluate_body_expr_batch(
+        batch, node_values, state_values, param_values
+    )
+
+    assert values == pytest.approx((0.2, 0.4))
+    assert node_values.tolist() == pytest.approx([0.7, 0.2])
+    assert state_values.tolist() == pytest.approx([2.0])
+
+
+def test_rust_backend_body_ir_random_state_writes_match_python_oracle():
+    _build_rust_core()
+    backend = load_rust_backend(default_rust_core_library_path())
+    rng = random.Random(94)
+
+    for case_idx in range(100):
+        node0 = rng.uniform(-3.0, 3.0)
+        state0 = rng.uniform(-3.0, 3.0)
+        param0 = rng.uniform(-3.0, 3.0)
+        bias = rng.uniform(-1.0, 1.0)
+        integer_target = case_idx % 2 == 0
+        node_values = array("d", [node0])
+        state_values = array("d", [state0, 0.0])
+        param_values = array("d", [param0])
+        expr_ops = [
+            BodyExprOp(BODY_EXPR_READ_STATE, index=0),
+            BodyExprOp(BODY_EXPR_READ_PARAM, index=0),
+            BodyExprOp(BODY_EXPR_MUL),
+            BodyExprOp(BODY_EXPR_READ_NODE, index=0),
+            BodyExprOp(BODY_EXPR_ADD),
+            BodyExprOp(BODY_EXPR_CONST, value=bias),
+            BodyExprOp(BODY_EXPR_SUB),
+        ]
+        batch = backend.make_body_ir_batch(
+            stmt_ops=[
+                BodyStmtOp(
+                    target_kind=BODY_TARGET_STATE,
+                    target_id=1,
+                    expr_start=0,
+                    expr_count=len(expr_ops),
+                    target_integer=integer_target,
+                )
+            ],
+            expr_ops=expr_ops,
+        )
+        expected = state0 * param0 + node0 - bias
+        if integer_target:
+            expected = _veriloga_integer(expected)
+
+        backend.evaluate_body_ir(batch, node_values, state_values, param_values)
+
+        assert state_values[1] == pytest.approx(expected)
 
 
 def test_rust_backend_evaluates_transition_target_batch():

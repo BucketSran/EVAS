@@ -70,6 +70,60 @@ pub struct EvasRustTransitionTargetOp {
     pub fall: f64,
 }
 
+const BODY_EXPR_CONST: u8 = 0;
+const BODY_EXPR_READ_NODE: u8 = 1;
+const BODY_EXPR_READ_STATE: u8 = 2;
+const BODY_EXPR_READ_PARAM: u8 = 3;
+const BODY_EXPR_NEG: u8 = 10;
+const BODY_EXPR_NOT: u8 = 11;
+const BODY_EXPR_ADD: u8 = 20;
+const BODY_EXPR_SUB: u8 = 21;
+const BODY_EXPR_MUL: u8 = 22;
+const BODY_EXPR_DIV: u8 = 23;
+const BODY_EXPR_MOD: u8 = 24;
+const BODY_EXPR_GT: u8 = 30;
+const BODY_EXPR_LT: u8 = 31;
+const BODY_EXPR_GE: u8 = 32;
+const BODY_EXPR_LE: u8 = 33;
+const BODY_EXPR_EQ: u8 = 34;
+const BODY_EXPR_NE: u8 = 35;
+const BODY_EXPR_LAND: u8 = 36;
+const BODY_EXPR_LOR: u8 = 37;
+const BODY_EXPR_BITAND: u8 = 38;
+const BODY_EXPR_BITOR: u8 = 39;
+const BODY_EXPR_BITXOR: u8 = 40;
+const BODY_EXPR_SELECT: u8 = 50;
+const BODY_EXPR_ABS: u8 = 60;
+const BODY_EXPR_SQRT: u8 = 61;
+const BODY_EXPR_EXP: u8 = 62;
+const BODY_EXPR_LN: u8 = 63;
+const BODY_EXPR_LOG10: u8 = 64;
+const BODY_EXPR_SIN: u8 = 65;
+const BODY_EXPR_COS: u8 = 66;
+const BODY_EXPR_FLOOR: u8 = 67;
+const BODY_EXPR_CEIL: u8 = 68;
+const BODY_EXPR_MIN: u8 = 69;
+const BODY_EXPR_MAX: u8 = 70;
+const BODY_EXPR_POW: u8 = 71;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EvasRustBodyExprOp {
+    pub op_kind: u8,
+    pub index: usize,
+    pub value: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EvasRustBodyStmtOp {
+    pub target_kind: u8,
+    pub target_integer: u8,
+    pub target_id: usize,
+    pub expr_start: usize,
+    pub expr_count: usize,
+}
+
 pub fn evaluate_static_affine_ops(
     ops: &[EvasRustStaticAffineOp],
     values: &mut [f64],
@@ -142,6 +196,111 @@ pub fn evaluate_static_linear_ops(
                 };
             }
             _ => return Err(-13),
+        }
+    }
+    Ok(())
+}
+
+pub fn evaluate_body_ir_ops(
+    stmt_ops: &[EvasRustBodyStmtOp],
+    expr_ops: &[EvasRustBodyExprOp],
+    node_values: &mut [f64],
+    state_values: &mut [f64],
+    param_values: &[f64],
+) -> Result<(), i32> {
+    let mut stack: Vec<f64> = Vec::with_capacity(32);
+    for stmt in stmt_ops {
+        let expr_end = stmt.expr_start.checked_add(stmt.expr_count).ok_or(-2206)?;
+        if expr_end > expr_ops.len() {
+            return Err(-2207);
+        }
+        stack.clear();
+        evaluate_body_expr_segment(
+            &expr_ops[stmt.expr_start..expr_end],
+            node_values,
+            state_values,
+            param_values,
+            &mut stack,
+        )?;
+        let mut value = stack.pop().ok_or(-2208)?;
+        if !stack.is_empty() {
+            return Err(-2209);
+        }
+        match stmt.target_kind {
+            TARGET_NODE => {
+                if stmt.target_id >= node_values.len() {
+                    return Err(-2210);
+                }
+                node_values[stmt.target_id] = value;
+            }
+            TARGET_STATE => {
+                if stmt.target_id >= state_values.len() {
+                    return Err(-2211);
+                }
+                if stmt.target_integer != 0 {
+                    value = to_veriloga_integer(value) as f64;
+                }
+                state_values[stmt.target_id] = value;
+            }
+            _ => return Err(-2212),
+        }
+    }
+    Ok(())
+}
+
+pub fn evaluate_body_expr_ops(
+    expr_ops: &[EvasRustBodyExprOp],
+    node_values: &[f64],
+    state_values: &[f64],
+    param_values: &[f64],
+) -> Result<f64, i32> {
+    let mut stack: Vec<f64> = Vec::with_capacity(32);
+    evaluate_body_expr_segment(
+        expr_ops,
+        node_values,
+        state_values,
+        param_values,
+        &mut stack,
+    )?;
+    let value = stack.pop().ok_or(-2260)?;
+    if !stack.is_empty() {
+        return Err(-2261);
+    }
+    Ok(value)
+}
+
+pub fn evaluate_body_expr_segments(
+    expr_ops: &[EvasRustBodyExprOp],
+    expr_starts: &[usize],
+    expr_counts: &[usize],
+    node_values: &[f64],
+    state_values: &[f64],
+    param_values: &[f64],
+    output_values: &mut [f64],
+) -> Result<(), i32> {
+    if expr_starts.len() != expr_counts.len() || expr_starts.len() != output_values.len() {
+        return Err(-2270);
+    }
+
+    let mut stack: Vec<f64> = Vec::with_capacity(32);
+    for idx in 0..expr_starts.len() {
+        let expr_end = expr_starts[idx]
+            .checked_add(expr_counts[idx])
+            .ok_or(-2271)?;
+        if expr_end > expr_ops.len() {
+            return Err(-2272);
+        }
+        stack.clear();
+        evaluate_body_expr_segment(
+            &expr_ops[expr_starts[idx]..expr_end],
+            node_values,
+            state_values,
+            param_values,
+            &mut stack,
+        )?;
+        output_values[idx] = stack.pop().ok_or(-2273)?;
+        if !stack.is_empty() {
+            return Err(-2274);
         }
     }
     Ok(())
@@ -2437,6 +2596,188 @@ fn to_veriloga_integer(value: f64) -> i64 {
     }
 }
 
+fn truthy(value: f64) -> bool {
+    value != 0.0
+}
+
+fn bool_value(value: bool) -> f64 {
+    if value {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+fn pop1(stack: &mut Vec<f64>) -> Result<f64, i32> {
+    stack.pop().ok_or(-2240)
+}
+
+fn pop2(stack: &mut Vec<f64>) -> Result<(f64, f64), i32> {
+    let right = stack.pop().ok_or(-2241)?;
+    let left = stack.pop().ok_or(-2242)?;
+    Ok((left, right))
+}
+
+fn evaluate_body_expr_segment(
+    ops: &[EvasRustBodyExprOp],
+    node_values: &[f64],
+    state_values: &[f64],
+    param_values: &[f64],
+    stack: &mut Vec<f64>,
+) -> Result<(), i32> {
+    for op in ops {
+        match op.op_kind {
+            BODY_EXPR_CONST => stack.push(op.value),
+            BODY_EXPR_READ_NODE => {
+                if op.index >= node_values.len() {
+                    return Err(-2250);
+                }
+                stack.push(node_values[op.index]);
+            }
+            BODY_EXPR_READ_STATE => {
+                if op.index >= state_values.len() {
+                    return Err(-2251);
+                }
+                stack.push(state_values[op.index]);
+            }
+            BODY_EXPR_READ_PARAM => {
+                if op.index >= param_values.len() {
+                    return Err(-2252);
+                }
+                stack.push(param_values[op.index]);
+            }
+            BODY_EXPR_NEG => {
+                let value = pop1(stack)?;
+                stack.push(-value);
+            }
+            BODY_EXPR_NOT => {
+                let value = pop1(stack)?;
+                stack.push(bool_value(!truthy(value)));
+            }
+            BODY_EXPR_ADD => {
+                let (left, right) = pop2(stack)?;
+                stack.push(left + right);
+            }
+            BODY_EXPR_SUB => {
+                let (left, right) = pop2(stack)?;
+                stack.push(left - right);
+            }
+            BODY_EXPR_MUL => {
+                let (left, right) = pop2(stack)?;
+                stack.push(left * right);
+            }
+            BODY_EXPR_DIV => {
+                let (left, right) = pop2(stack)?;
+                stack.push(left / right);
+            }
+            BODY_EXPR_MOD => {
+                let (left, right) = pop2(stack)?;
+                stack.push(left % right);
+            }
+            BODY_EXPR_GT => {
+                let (left, right) = pop2(stack)?;
+                stack.push(bool_value(left > right));
+            }
+            BODY_EXPR_LT => {
+                let (left, right) = pop2(stack)?;
+                stack.push(bool_value(left < right));
+            }
+            BODY_EXPR_GE => {
+                let (left, right) = pop2(stack)?;
+                stack.push(bool_value(left >= right));
+            }
+            BODY_EXPR_LE => {
+                let (left, right) = pop2(stack)?;
+                stack.push(bool_value(left <= right));
+            }
+            BODY_EXPR_EQ => {
+                let (left, right) = pop2(stack)?;
+                stack.push(bool_value(left == right));
+            }
+            BODY_EXPR_NE => {
+                let (left, right) = pop2(stack)?;
+                stack.push(bool_value(left != right));
+            }
+            BODY_EXPR_LAND => {
+                let (left, right) = pop2(stack)?;
+                stack.push(bool_value(truthy(left) && truthy(right)));
+            }
+            BODY_EXPR_LOR => {
+                let (left, right) = pop2(stack)?;
+                stack.push(bool_value(truthy(left) || truthy(right)));
+            }
+            BODY_EXPR_BITAND => {
+                let (left, right) = pop2(stack)?;
+                stack.push(((left as i64) & (right as i64)) as f64);
+            }
+            BODY_EXPR_BITOR => {
+                let (left, right) = pop2(stack)?;
+                stack.push(((left as i64) | (right as i64)) as f64);
+            }
+            BODY_EXPR_BITXOR => {
+                let (left, right) = pop2(stack)?;
+                stack.push(((left as i64) ^ (right as i64)) as f64);
+            }
+            BODY_EXPR_SELECT => {
+                let false_value = stack.pop().ok_or(-2253)?;
+                let true_value = stack.pop().ok_or(-2254)?;
+                let condition = stack.pop().ok_or(-2255)?;
+                stack.push(if truthy(condition) { true_value } else { false_value });
+            }
+            BODY_EXPR_ABS => {
+                let value = pop1(stack)?;
+                stack.push(value.abs());
+            }
+            BODY_EXPR_SQRT => {
+                let value = pop1(stack)?;
+                stack.push(value.sqrt());
+            }
+            BODY_EXPR_EXP => {
+                let value = pop1(stack)?;
+                stack.push(value.exp());
+            }
+            BODY_EXPR_LN => {
+                let value = pop1(stack)?;
+                stack.push(value.ln());
+            }
+            BODY_EXPR_LOG10 => {
+                let value = pop1(stack)?;
+                stack.push(value.log10());
+            }
+            BODY_EXPR_SIN => {
+                let value = pop1(stack)?;
+                stack.push(value.sin());
+            }
+            BODY_EXPR_COS => {
+                let value = pop1(stack)?;
+                stack.push(value.cos());
+            }
+            BODY_EXPR_FLOOR => {
+                let value = pop1(stack)?;
+                stack.push(value.floor());
+            }
+            BODY_EXPR_CEIL => {
+                let value = pop1(stack)?;
+                stack.push(value.ceil());
+            }
+            BODY_EXPR_MIN => {
+                let (left, right) = pop2(stack)?;
+                stack.push(left.min(right));
+            }
+            BODY_EXPR_MAX => {
+                let (left, right) = pop2(stack)?;
+                stack.push(left.max(right));
+            }
+            BODY_EXPR_POW => {
+                let (left, right) = pop2(stack)?;
+                stack.push(left.powf(right));
+            }
+            _ => return Err(-2256),
+        }
+    }
+    Ok(())
+}
+
 fn evaluate_linear_value(
     bias: f64,
     terms: &[EvasRustLinearTerm],
@@ -3341,6 +3682,228 @@ pub unsafe extern "C" fn evas_rust_evaluate_static_linear(
         condition_slice,
         node_value_slice,
         state_value_slice,
+    ) {
+        Ok(()) => 0,
+        Err(code) => code,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn evas_rust_evaluate_body_ir(
+    stmt_ops: *const EvasRustBodyStmtOp,
+    stmt_count: usize,
+    expr_ops: *const EvasRustBodyExprOp,
+    expr_count: usize,
+    node_values: *mut f64,
+    node_value_count: usize,
+    state_values: *mut f64,
+    state_value_count: usize,
+    param_values: *const f64,
+    param_value_count: usize,
+) -> i32 {
+    if stmt_count > 0 && stmt_ops.is_null() {
+        return -2301;
+    }
+    if expr_count > 0 && expr_ops.is_null() {
+        return -2302;
+    }
+    if node_value_count > 0 && node_values.is_null() {
+        return -2303;
+    }
+    if state_value_count > 0 && state_values.is_null() {
+        return -2304;
+    }
+    if param_value_count > 0 && param_values.is_null() {
+        return -2305;
+    }
+
+    let stmt_slice = if stmt_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(stmt_ops, stmt_count)
+    };
+    let expr_slice = if expr_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(expr_ops, expr_count)
+    };
+    let node_value_slice = if node_value_count == 0 {
+        &mut []
+    } else {
+        std::slice::from_raw_parts_mut(node_values, node_value_count)
+    };
+    let state_value_slice = if state_value_count == 0 {
+        &mut []
+    } else {
+        std::slice::from_raw_parts_mut(state_values, state_value_count)
+    };
+    let param_value_slice = if param_value_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(param_values, param_value_count)
+    };
+
+    match evaluate_body_ir_ops(
+        stmt_slice,
+        expr_slice,
+        node_value_slice,
+        state_value_slice,
+        param_value_slice,
+    ) {
+        Ok(()) => 0,
+        Err(code) => code,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn evas_rust_evaluate_body_expr(
+    expr_ops: *const EvasRustBodyExprOp,
+    expr_count: usize,
+    node_values: *const f64,
+    node_value_count: usize,
+    state_values: *const f64,
+    state_value_count: usize,
+    param_values: *const f64,
+    param_value_count: usize,
+    out_value: *mut f64,
+) -> i32 {
+    if expr_count > 0 && expr_ops.is_null() {
+        return -2321;
+    }
+    if node_value_count > 0 && node_values.is_null() {
+        return -2322;
+    }
+    if state_value_count > 0 && state_values.is_null() {
+        return -2323;
+    }
+    if param_value_count > 0 && param_values.is_null() {
+        return -2324;
+    }
+    if out_value.is_null() {
+        return -2325;
+    }
+
+    let expr_slice = if expr_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(expr_ops, expr_count)
+    };
+    let node_value_slice = if node_value_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(node_values, node_value_count)
+    };
+    let state_value_slice = if state_value_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(state_values, state_value_count)
+    };
+    let param_value_slice = if param_value_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(param_values, param_value_count)
+    };
+
+    match evaluate_body_expr_ops(
+        expr_slice,
+        node_value_slice,
+        state_value_slice,
+        param_value_slice,
+    ) {
+        Ok(value) => {
+            *out_value = value;
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn evas_rust_evaluate_body_expr_batch(
+    expr_ops: *const EvasRustBodyExprOp,
+    expr_count: usize,
+    expr_starts: *const usize,
+    expr_segment_count: usize,
+    expr_counts: *const usize,
+    expr_count_count: usize,
+    node_values: *const f64,
+    node_value_count: usize,
+    state_values: *const f64,
+    state_value_count: usize,
+    param_values: *const f64,
+    param_value_count: usize,
+    output_values: *mut f64,
+    output_value_count: usize,
+) -> i32 {
+    if expr_count > 0 && expr_ops.is_null() {
+        return -2331;
+    }
+    if expr_segment_count > 0 && expr_starts.is_null() {
+        return -2332;
+    }
+    if expr_count_count > 0 && expr_counts.is_null() {
+        return -2333;
+    }
+    if node_value_count > 0 && node_values.is_null() {
+        return -2334;
+    }
+    if state_value_count > 0 && state_values.is_null() {
+        return -2335;
+    }
+    if param_value_count > 0 && param_values.is_null() {
+        return -2336;
+    }
+    if output_value_count > 0 && output_values.is_null() {
+        return -2337;
+    }
+    if expr_segment_count != expr_count_count || expr_segment_count != output_value_count {
+        return -2338;
+    }
+
+    let expr_slice = if expr_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(expr_ops, expr_count)
+    };
+    let expr_start_slice = if expr_segment_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(expr_starts, expr_segment_count)
+    };
+    let expr_count_slice = if expr_count_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(expr_counts, expr_count_count)
+    };
+    let node_value_slice = if node_value_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(node_values, node_value_count)
+    };
+    let state_value_slice = if state_value_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(state_values, state_value_count)
+    };
+    let param_value_slice = if param_value_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(param_values, param_value_count)
+    };
+    let output_value_slice = if output_value_count == 0 {
+        &mut []
+    } else {
+        std::slice::from_raw_parts_mut(output_values, output_value_count)
+    };
+
+    match evaluate_body_expr_segments(
+        expr_slice,
+        expr_start_slice,
+        expr_count_slice,
+        node_value_slice,
+        state_value_slice,
+        param_value_slice,
+        output_value_slice,
     ) {
         Ok(()) => 0,
         Err(code) => code,
@@ -7291,5 +7854,194 @@ mod tests {
         assert_eq!(&state_values[0..4], &[0.0, 1.0, 0.0, 1.0]);
         assert_eq!(state_values[9], 0.9);
         assert_eq!(node_values[0], 0.9);
+    }
+
+    #[test]
+    fn evaluates_body_ir_expression_stack_and_writes() {
+        let mut node_values = vec![0.25, 0.0];
+        let mut state_values = vec![2.0, 0.0];
+        let param_values = vec![3.0];
+        let expr_ops = vec![
+            EvasRustBodyExprOp {
+                op_kind: BODY_EXPR_READ_NODE,
+                index: 0,
+                value: 0.0,
+            },
+            EvasRustBodyExprOp {
+                op_kind: BODY_EXPR_READ_PARAM,
+                index: 0,
+                value: 0.0,
+            },
+            EvasRustBodyExprOp {
+                op_kind: BODY_EXPR_MUL,
+                index: 0,
+                value: 0.0,
+            },
+            EvasRustBodyExprOp {
+                op_kind: BODY_EXPR_READ_STATE,
+                index: 0,
+                value: 0.0,
+            },
+            EvasRustBodyExprOp {
+                op_kind: BODY_EXPR_ADD,
+                index: 0,
+                value: 0.0,
+            },
+        ];
+        let stmt_ops = vec![EvasRustBodyStmtOp {
+            target_kind: TARGET_NODE,
+            target_integer: 0,
+            target_id: 1,
+            expr_start: 0,
+            expr_count: expr_ops.len(),
+        }];
+
+        evaluate_body_ir_ops(
+            &stmt_ops,
+            &expr_ops,
+            &mut node_values,
+            &mut state_values,
+            &param_values,
+        )
+        .unwrap();
+        assert!((node_values[1] - 2.75).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn evaluates_body_expr_stack_without_writes() {
+        let node_values = vec![0.25];
+        let state_values = vec![2.0];
+        let param_values = vec![3.0];
+        let expr_ops = vec![
+            EvasRustBodyExprOp {
+                op_kind: BODY_EXPR_READ_NODE,
+                index: 0,
+                value: 0.0,
+            },
+            EvasRustBodyExprOp {
+                op_kind: BODY_EXPR_READ_PARAM,
+                index: 0,
+                value: 0.0,
+            },
+            EvasRustBodyExprOp {
+                op_kind: BODY_EXPR_MUL,
+                index: 0,
+                value: 0.0,
+            },
+            EvasRustBodyExprOp {
+                op_kind: BODY_EXPR_READ_STATE,
+                index: 0,
+                value: 0.0,
+            },
+            EvasRustBodyExprOp {
+                op_kind: BODY_EXPR_ADD,
+                index: 0,
+                value: 0.0,
+            },
+        ];
+
+        let value =
+            evaluate_body_expr_ops(&expr_ops, &node_values, &state_values, &param_values).unwrap();
+        assert!((value - 2.75).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn evaluates_body_expr_segments_in_one_batch() {
+        let node_values = vec![0.7, 0.2];
+        let state_values = vec![2.0];
+        let param_values = vec![0.5];
+        let expr_ops = vec![
+            EvasRustBodyExprOp {
+                op_kind: BODY_EXPR_READ_NODE,
+                index: 0,
+                value: 0.0,
+            },
+            EvasRustBodyExprOp {
+                op_kind: BODY_EXPR_READ_PARAM,
+                index: 0,
+                value: 0.0,
+            },
+            EvasRustBodyExprOp {
+                op_kind: BODY_EXPR_SUB,
+                index: 0,
+                value: 0.0,
+            },
+            EvasRustBodyExprOp {
+                op_kind: BODY_EXPR_READ_NODE,
+                index: 1,
+                value: 0.0,
+            },
+            EvasRustBodyExprOp {
+                op_kind: BODY_EXPR_READ_STATE,
+                index: 0,
+                value: 0.0,
+            },
+            EvasRustBodyExprOp {
+                op_kind: BODY_EXPR_MUL,
+                index: 0,
+                value: 0.0,
+            },
+        ];
+        let mut output_values = vec![0.0, 0.0];
+
+        evaluate_body_expr_segments(
+            &expr_ops,
+            &[0, 3],
+            &[3, 3],
+            &node_values,
+            &state_values,
+            &param_values,
+            &mut output_values,
+        )
+        .unwrap();
+
+        assert!((output_values[0] - 0.2).abs() < 1.0e-12);
+        assert!((output_values[1] - 0.4).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn evaluates_body_ir_select_and_integer_state_write() {
+        let mut node_values = vec![0.0];
+        let mut state_values = vec![0.0];
+        let param_values = vec![];
+        let expr_ops = vec![
+            EvasRustBodyExprOp {
+                op_kind: BODY_EXPR_CONST,
+                index: 0,
+                value: 1.0,
+            },
+            EvasRustBodyExprOp {
+                op_kind: BODY_EXPR_CONST,
+                index: 0,
+                value: 2.6,
+            },
+            EvasRustBodyExprOp {
+                op_kind: BODY_EXPR_CONST,
+                index: 0,
+                value: -4.0,
+            },
+            EvasRustBodyExprOp {
+                op_kind: BODY_EXPR_SELECT,
+                index: 0,
+                value: 0.0,
+            },
+        ];
+        let stmt_ops = vec![EvasRustBodyStmtOp {
+            target_kind: TARGET_STATE,
+            target_integer: 1,
+            target_id: 0,
+            expr_start: 0,
+            expr_count: expr_ops.len(),
+        }];
+
+        evaluate_body_ir_ops(
+            &stmt_ops,
+            &expr_ops,
+            &mut node_values,
+            &mut state_values,
+            &param_values,
+        )
+        .unwrap();
+        assert_eq!(state_values[0], 3.0);
     }
 }

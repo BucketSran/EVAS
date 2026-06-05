@@ -79,6 +79,64 @@ class RustTransitionTargetOp(ctypes.Structure):
     ]
 
 
+class RustBodyExprOp(ctypes.Structure):
+    _fields_ = [
+        ("op_kind", ctypes.c_uint8),
+        ("index", ctypes.c_size_t),
+        ("value", ctypes.c_double),
+    ]
+
+
+class RustBodyStmtOp(ctypes.Structure):
+    _fields_ = [
+        ("target_kind", ctypes.c_uint8),
+        ("target_integer", ctypes.c_uint8),
+        ("target_id", ctypes.c_size_t),
+        ("expr_start", ctypes.c_size_t),
+        ("expr_count", ctypes.c_size_t),
+    ]
+
+
+BODY_EXPR_CONST = 0
+BODY_EXPR_READ_NODE = 1
+BODY_EXPR_READ_STATE = 2
+BODY_EXPR_READ_PARAM = 3
+BODY_EXPR_NEG = 10
+BODY_EXPR_NOT = 11
+BODY_EXPR_ADD = 20
+BODY_EXPR_SUB = 21
+BODY_EXPR_MUL = 22
+BODY_EXPR_DIV = 23
+BODY_EXPR_MOD = 24
+BODY_EXPR_GT = 30
+BODY_EXPR_LT = 31
+BODY_EXPR_GE = 32
+BODY_EXPR_LE = 33
+BODY_EXPR_EQ = 34
+BODY_EXPR_NE = 35
+BODY_EXPR_LAND = 36
+BODY_EXPR_LOR = 37
+BODY_EXPR_BITAND = 38
+BODY_EXPR_BITOR = 39
+BODY_EXPR_BITXOR = 40
+BODY_EXPR_SELECT = 50
+BODY_EXPR_ABS = 60
+BODY_EXPR_SQRT = 61
+BODY_EXPR_EXP = 62
+BODY_EXPR_LN = 63
+BODY_EXPR_LOG10 = 64
+BODY_EXPR_SIN = 65
+BODY_EXPR_COS = 66
+BODY_EXPR_FLOOR = 67
+BODY_EXPR_CEIL = 68
+BODY_EXPR_MIN = 69
+BODY_EXPR_MAX = 70
+BODY_EXPR_POW = 71
+
+BODY_TARGET_NODE = 0
+BODY_TARGET_STATE = 1
+
+
 class RustLfsrEventBatch:
     """ctypes-backed LFSR event-body write batch."""
 
@@ -206,6 +264,26 @@ class TransitionTargetOp:
     delay: float = 0.0
     rise: float = 0.0
     fall: float = 0.0
+
+
+@dataclass(frozen=True)
+class BodyExprOp:
+    """One stack-machine expression op consumed by the 094e Rust body ABI."""
+
+    op_kind: int
+    index: int = 0
+    value: float = 0.0
+
+
+@dataclass(frozen=True)
+class BodyStmtOp:
+    """One body statement write consumed by the 094e Rust body ABI."""
+
+    target_kind: int
+    target_id: int
+    expr_start: int
+    expr_count: int
+    target_integer: bool = False
 
 
 class RustStaticAffineBatch:
@@ -395,6 +473,103 @@ class RustTransitionTargetBatch:
         return self._c_conditions
 
 
+class RustBodyIrBatch:
+    """ctypes-backed 094e body IR operation batch."""
+
+    def __init__(
+        self,
+        *,
+        stmt_ops: Iterable[BodyStmtOp],
+        expr_ops: Iterable[BodyExprOp],
+    ):
+        self.stmt_ops: Tuple[BodyStmtOp, ...] = tuple(stmt_ops)
+        self.expr_ops: Tuple[BodyExprOp, ...] = tuple(expr_ops)
+        stmt_array_type = RustBodyStmtOp * len(self.stmt_ops)
+        expr_array_type = RustBodyExprOp * len(self.expr_ops)
+        self._c_stmt_ops = stmt_array_type(
+            *(
+                RustBodyStmtOp(
+                    int(op.target_kind),
+                    int(bool(op.target_integer)),
+                    int(op.target_id),
+                    int(op.expr_start),
+                    int(op.expr_count),
+                )
+                for op in self.stmt_ops
+            )
+        )
+        self._c_expr_ops = expr_array_type(
+            *(
+                RustBodyExprOp(
+                    int(op.op_kind),
+                    int(op.index),
+                    float(op.value),
+                )
+                for op in self.expr_ops
+            )
+        )
+
+    def __len__(self) -> int:
+        return len(self.stmt_ops)
+
+    @property
+    def stmt_ptr(self):
+        return self._c_stmt_ops
+
+    @property
+    def expr_ptr(self):
+        return self._c_expr_ops
+
+
+class RustBodyExprBatch:
+    """ctypes-backed stack expression segment batch for event trigger staging."""
+
+    def __init__(self, expr_segments: Iterable[Iterable[BodyExprOp]]):
+        self.expr_segments: Tuple[Tuple[BodyExprOp, ...], ...] = tuple(
+            tuple(segment) for segment in expr_segments
+        )
+        starts = []
+        counts = []
+        expr_ops = []
+        for segment in self.expr_segments:
+            starts.append(len(expr_ops))
+            counts.append(len(segment))
+            expr_ops.extend(segment)
+        self.expr_ops: Tuple[BodyExprOp, ...] = tuple(expr_ops)
+        self.expr_starts: Tuple[int, ...] = tuple(starts)
+        self.expr_counts: Tuple[int, ...] = tuple(counts)
+
+        expr_array_type = RustBodyExprOp * len(self.expr_ops)
+        size_array_type = ctypes.c_size_t * len(self.expr_segments)
+        self._c_expr_ops = expr_array_type(
+            *(
+                RustBodyExprOp(
+                    int(op.op_kind),
+                    int(op.index),
+                    float(op.value),
+                )
+                for op in self.expr_ops
+            )
+        )
+        self._c_expr_starts = size_array_type(*self.expr_starts)
+        self._c_expr_counts = size_array_type(*self.expr_counts)
+
+    def __len__(self) -> int:
+        return len(self.expr_segments)
+
+    @property
+    def expr_ptr(self):
+        return self._c_expr_ops
+
+    @property
+    def start_ptr(self):
+        return self._c_expr_starts
+
+    @property
+    def count_ptr(self):
+        return self._c_expr_counts
+
+
 class RustBackend:
     """Loaded Rust dynamic library wrapper."""
 
@@ -425,6 +600,66 @@ class RustBackend:
         ]
         linear_fn.restype = ctypes.c_int
         self._evaluate_static_linear = linear_fn
+        try:
+            body_ir_fn = self._lib.evas_rust_evaluate_body_ir
+        except AttributeError:
+            body_ir_fn = None
+        if body_ir_fn is not None:
+            body_ir_fn.argtypes = [
+                ctypes.POINTER(RustBodyStmtOp),
+                ctypes.c_size_t,
+                ctypes.POINTER(RustBodyExprOp),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+            ]
+            body_ir_fn.restype = ctypes.c_int
+        self._evaluate_body_ir = body_ir_fn
+        try:
+            body_expr_fn = self._lib.evas_rust_evaluate_body_expr
+        except AttributeError:
+            body_expr_fn = None
+        if body_expr_fn is not None:
+            body_expr_fn.argtypes = [
+                ctypes.POINTER(RustBodyExprOp),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+            ]
+            body_expr_fn.restype = ctypes.c_int
+        self._evaluate_body_expr = body_expr_fn
+        try:
+            body_expr_batch_fn = self._lib.evas_rust_evaluate_body_expr_batch
+        except AttributeError:
+            body_expr_batch_fn = None
+        if body_expr_batch_fn is not None:
+            body_expr_batch_fn.argtypes = [
+                ctypes.POINTER(RustBodyExprOp),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_size_t),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_size_t),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+            ]
+            body_expr_batch_fn.restype = ctypes.c_int
+        self._evaluate_body_expr_batch = body_expr_batch_fn
         try:
             timer_linear_trace_fn = self._lib.evas_rust_timer_static_linear_trace
         except AttributeError:
@@ -1079,6 +1314,20 @@ class RustBackend:
         ops: Iterable[LinearOp],
     ) -> RustLinearBatch:
         return RustLinearBatch(ops)
+
+    def make_body_ir_batch(
+        self,
+        *,
+        stmt_ops: Iterable[BodyStmtOp],
+        expr_ops: Iterable[BodyExprOp],
+    ) -> RustBodyIrBatch:
+        return RustBodyIrBatch(stmt_ops=stmt_ops, expr_ops=expr_ops)
+
+    def make_body_expr_batch(
+        self,
+        expr_segments: Iterable[Iterable[BodyExprOp]],
+    ) -> RustBodyExprBatch:
+        return RustBodyExprBatch(expr_segments)
 
     def make_transition_target_batch(
         self,
@@ -2026,6 +2275,134 @@ class RustBackend:
         if copied_states:
             for idx, value in enumerate(state_buffer):
                 state_values[idx] = float(value)
+
+    def evaluate_body_ir(
+        self,
+        batch: RustBodyIrBatch,
+        node_values: MutableSequence[float],
+        state_values: Optional[MutableSequence[float]] = None,
+        param_values: Optional[MutableSequence[float]] = None,
+    ) -> None:
+        if self._evaluate_body_ir is None:
+            raise RustBackendError("Rust body IR evaluation batch is unavailable")
+        if len(batch) == 0:
+            return
+        state_values = state_values if state_values is not None else []
+        param_values = param_values if param_values is not None else []
+
+        node_buffer, copied_nodes = self._double_buffer(node_values)
+        state_buffer, copied_states = self._double_buffer(state_values)
+        param_buffer, _ = self._double_buffer(param_values)
+
+        rc = self._evaluate_body_ir(
+            batch.stmt_ptr,
+            len(batch),
+            batch.expr_ptr,
+            len(batch.expr_ops),
+            node_buffer,
+            len(node_values),
+            state_buffer,
+            len(state_values),
+            param_buffer,
+            len(param_values),
+        )
+        if rc != 0:
+            raise RustBackendError(f"Rust body IR evaluation failed with code {rc}")
+
+        if copied_nodes:
+            for idx, value in enumerate(node_buffer):
+                node_values[idx] = float(value)
+        if copied_states:
+            for idx, value in enumerate(state_buffer):
+                state_values[idx] = float(value)
+
+    def evaluate_body_expr(
+        self,
+        expr_ops: Iterable[BodyExprOp],
+        node_values: MutableSequence[float],
+        state_values: Optional[MutableSequence[float]] = None,
+        param_values: Optional[MutableSequence[float]] = None,
+    ) -> float:
+        if self._evaluate_body_expr is None:
+            raise RustBackendError("Rust body expression evaluation is unavailable")
+        expr_ops = tuple(expr_ops)
+        state_values = state_values if state_values is not None else []
+        param_values = param_values if param_values is not None else []
+
+        expr_array_type = RustBodyExprOp * len(expr_ops)
+        expr_buffer = expr_array_type(
+            *(
+                RustBodyExprOp(
+                    int(op.op_kind),
+                    int(op.index),
+                    float(op.value),
+                )
+                for op in expr_ops
+            )
+        )
+        node_buffer, _ = self._double_buffer(node_values)
+        state_buffer, _ = self._double_buffer(state_values)
+        param_buffer, _ = self._double_buffer(param_values)
+        out_value = ctypes.c_double(0.0)
+
+        rc = self._evaluate_body_expr(
+            expr_buffer,
+            len(expr_ops),
+            node_buffer,
+            len(node_values),
+            state_buffer,
+            len(state_values),
+            param_buffer,
+            len(param_values),
+            ctypes.byref(out_value),
+        )
+        if rc != 0:
+            raise RustBackendError(
+                f"Rust body expression evaluation failed with code {rc}"
+            )
+        return float(out_value.value)
+
+    def evaluate_body_expr_batch(
+        self,
+        batch: RustBodyExprBatch,
+        node_values: MutableSequence[float],
+        state_values: Optional[MutableSequence[float]] = None,
+        param_values: Optional[MutableSequence[float]] = None,
+    ) -> Tuple[float, ...]:
+        if self._evaluate_body_expr_batch is None:
+            raise RustBackendError("Rust body expression batch evaluation is unavailable")
+        if len(batch) == 0:
+            return ()
+        state_values = state_values if state_values is not None else []
+        param_values = param_values if param_values is not None else []
+
+        node_buffer, _ = self._double_buffer(node_values)
+        state_buffer, _ = self._double_buffer(state_values)
+        param_buffer, _ = self._double_buffer(param_values)
+        out_array_type = ctypes.c_double * len(batch)
+        out_buffer = out_array_type()
+
+        rc = self._evaluate_body_expr_batch(
+            batch.expr_ptr,
+            len(batch.expr_ops),
+            batch.start_ptr,
+            len(batch),
+            batch.count_ptr,
+            len(batch),
+            node_buffer,
+            len(node_values),
+            state_buffer,
+            len(state_values),
+            param_buffer,
+            len(param_values),
+            out_buffer,
+            len(batch),
+        )
+        if rc != 0:
+            raise RustBackendError(
+                f"Rust body expression batch evaluation failed with code {rc}"
+            )
+        return tuple(float(value) for value in out_buffer)
 
     def event_lfsr_shift_xor_step(
         self,
