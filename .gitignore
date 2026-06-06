@@ -46,6 +46,7 @@ target/
 # Simulation output
 output/
 evas-run/
+metric.out
 
 # Test fixtures (local only)
 tests/tb/

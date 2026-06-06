@@ -33,7 +33,14 @@ from evas.simulator.evaluate_ir import (
     normalize_linear_ops,
     normalize_transition_target_ops,
 )
+from evas.simulator.analog_block_runtime import (
+    try_build_event_then_transition_shadow_runtime,
+)
 from evas.simulator.rust_backend import (
+    BODY_EXPR_CONST,
+    BODY_EXPR_READ_NODE,
+    BODY_EXPR_READ_STATE,
+    BODY_EXPR_SUB,
     LinearCondition,
     LinearOp,
     LinearTerm,
@@ -41,6 +48,7 @@ from evas.simulator.rust_backend import (
     TransitionTargetOp,
     load_optional_rust_backend,
 )
+from evas.simulator.rust_program import build_source_record_rust_program
 
 
 class _LazyFutureNodeVoltages:
@@ -596,6 +604,157 @@ class Simulator:
         )
         return SimResult(time=time_arr, signals=signals, step_sizes=step_sizes)
 
+    def _try_rust_sim_program_fastpath(
+        self,
+        *,
+        rust_backend,
+        tstop: float,
+        record_step: Optional[float],
+        tstep: float,
+        max_step: float,
+    ) -> Optional[SimResult]:
+        self._perf_stats["rust_sim_program_requested"] = 1
+        if rust_backend is None:
+            self._perf_stats["rust_sim_program_rejections"] += 1
+            self._rust_sim_program_last_rejection = "rust_backend_unavailable"
+            return None
+
+        report = build_source_record_rust_program(
+            sources=self.sources,
+            recorded_signals=self.recorded_signals.keys(),
+            models=self.models,
+        )
+        if not report.supported or report.program is None:
+            self._perf_stats["rust_sim_program_rejections"] += 1
+            self._rust_sim_program_last_rejection = ",".join(report.reasons)
+            return None
+
+        program = report.program
+        self._perf_stats["rust_sim_program_available"] = 1
+        self._perf_stats["rust_sim_program_node_count"] = program.node_count
+        self._perf_stats["rust_sim_program_state_count"] = len(program.states)
+        self._perf_stats["rust_sim_program_source_count"] = len(program.sources)
+        self._perf_stats["rust_sim_program_record_count"] = len(program.records)
+        self._perf_stats["rust_sim_program_continuous_linear_ops"] = len(
+            program.continuous_linear_ops
+        )
+        self._perf_stats["rust_sim_program_event_count"] = len(program.events)
+        self._perf_stats["rust_sim_program_always_body_count"] = sum(
+            1 for event in program.events if str(getattr(event, "kind", "")) == "always"
+        )
+        self._perf_stats["rust_sim_program_body_stmt_ops"] = len(program.body_stmt_ops)
+        self._perf_stats["rust_sim_program_body_expr_ops"] = len(program.body_expr_ops)
+        self._perf_stats["rust_sim_program_transition_count"] = len(
+            program.transitions
+        )
+        try:
+            rust_program = rust_backend.make_source_record_program(program)
+        except RustBackendError as exc:
+            self._perf_stats["rust_sim_program_rejections"] += 1
+            self._rust_sim_program_last_rejection = f"abi_program_build_failed:{exc}"
+            return None
+
+        raw_times = list(
+            self._whole_segment_uniform_times(
+                tstop=tstop,
+                record_step=record_step,
+                tstep=min(tstep, max_step),
+            )
+        )
+        for src in self.sources:
+            if src.breakpoint_fn is not None:
+                self._add_source_breakpoint_times(raw_times, src, tstop)
+        capacity = max(16, len(self._dedupe_times(raw_times, tstop)) + 8)
+        if program.events or program.transitions:
+            base_step = max(min(tstep, max_step), 1.0e-30)
+            base_steps = int(math.ceil(float(tstop) / base_step)) + 1
+            capacity = max(
+                capacity,
+                128 + 8 * max(base_steps, len(raw_times), len(program.events) + 1),
+            )
+
+        last_runtime_error: RustBackendError | None = None
+        runtime_succeeded = False
+        for _attempt in range(6):
+            try:
+                (
+                    times,
+                    columns,
+                    _steps,
+                    node_values,
+                    state_values,
+                    stats,
+                ) = rust_backend.run_source_record_program(
+                    rust_program,
+                    capacity=capacity,
+                    tstop=tstop,
+                    tstep=tstep,
+                    max_step=max_step,
+                    record_step=record_step,
+                )
+                runtime_succeeded = True
+                break
+            except RustBackendError as exc:
+                last_runtime_error = exc
+                message = str(exc)
+                if "code -841" not in message and "capacity" not in message:
+                    break
+                capacity *= 2
+        if not runtime_succeeded:
+            self._perf_stats["rust_sim_program_rejections"] += 1
+            self._rust_sim_program_last_rejection = f"runtime_failed:{last_runtime_error}"
+            return None
+
+        self._perf_stats["rust_sim_program_enabled"] = 1
+        self._perf_stats["rust_sim_program_source_record_enabled"] = 1
+        self._perf_stats["rust_sim_program_event_transition_enabled"] = int(
+            bool(program.events or program.transitions)
+        )
+        self._perf_stats["rust_sim_program_points"] = len(times)
+        self._perf_stats["rust_sim_program_source_breakpoints"] = int(
+            stats.get("source_breakpoints", 0)
+        )
+        self._perf_stats["rust_sim_program_event_fires"] = int(
+            stats.get("event_fires", 0)
+        )
+        self._perf_stats["rust_sim_program_transition_breakpoints"] = int(
+            stats.get("transition_breakpoints", 0)
+        )
+        self._perf_stats["rust_sim_program_side_effects"] = int(
+            stats.get("side_effects", 0)
+        )
+        result = self._record_trace_result(
+            times,
+            columns,
+            enabled_kind=(
+                "sim_program_event_transition_record"
+                if program.events or program.transitions
+                else "sim_program_source_record"
+            ),
+            step_count=max(0, len(times) - 1),
+        )
+        for name, value in zip(program.node_names, node_values):
+            self.node_voltages[name] = float(value)
+        for state, value in zip(program.states, state_values):
+            try:
+                model_index_text, state_name = state.name.split(":", 1)
+                model = self.models[int(model_index_text)]
+            except (ValueError, IndexError):
+                continue
+            state_value = float(value)
+            if state.is_integer and hasattr(model, "_to_integer"):
+                state_value = model._to_integer(state_value)
+            array_ref_fn = getattr(model, "_state_array_slot_ref", None)
+            array_ref = array_ref_fn(state_name) if array_ref_fn is not None else None
+            if array_ref is not None:
+                array_name, idx = array_ref
+                if array_name not in model.arrays:
+                    model.arrays[array_name] = {}
+                model.arrays[array_name][int(idx)] = state_value
+            else:
+                model.state[state_name] = state_value
+        return result
+
     def _whole_segment_uniform_times(
         self,
         *,
@@ -702,6 +861,7 @@ class Simulator:
         tstep: float,
         max_step: float,
         min_step: float,
+        rust_full_model_required: bool = False,
     ) -> Optional[SimResult]:
         result = self._try_rust_prbs7_full_model_fastpath(
             rust_backend=rust_backend,
@@ -761,6 +921,15 @@ class Simulator:
         )
         if result is not None:
             return result
+        if rust_full_model_required:
+            result = self._try_event_transition_ordered_segment_fastpath(
+                rust_backend=rust_backend,
+                tstop=tstop,
+                record_step=record_step,
+                tstep=tstep,
+            )
+            if result is not None:
+                return result
         # Audit 091c gate inspector + audit 091d executor body. The
         # inspector still records perf counters; if all gates pass and the
         # caller did not disable the 091d executor, run the generic
@@ -908,6 +1077,484 @@ class Simulator:
             times_arr,
             columns,
             enabled_kind="generic_event_state_transition",
+        )
+
+    def _try_event_transition_ordered_segment_fastpath(
+        self,
+        *,
+        rust_backend,
+        tstop: float,
+        record_step: Optional[float],
+        tstep: float,
+    ) -> Optional[SimResult]:
+        """EVAS2 strict event+transition ordered-segment runtime.
+
+        This is the first strict-production bridge from the 101 planner into
+        the full-model dispatcher.  It is deliberately narrower than the 101
+        coverage estimate: no child models, no event-body voltage reads, no
+        timer due, and only direct transition contributions.  The useful
+        property is that Python ``model.evaluate()`` is not called when this
+        path succeeds; the segment trace is produced from typed arrays plus the
+        Rust event/body/transition runtime.
+        """
+        if (
+            rust_backend is None
+            or len(self.models) != 1
+            or not self.recorded_signals
+            or tstep is None
+            or tstep <= 0.0
+            or tstop is None
+            or tstop <= 0.0
+        ):
+            return None
+        model = self.models[0]
+        if getattr(model, "_child_models", []) or []:
+            return None
+        model_cls = getattr(model, "__class__", type(model))
+        profiles = tuple(getattr(model_cls, "_event_transition_plan_profiles", ()) or ())
+        if "event_transition_core" not in profiles:
+            return None
+        if tuple(getattr(model_cls, "_event_body_voltage_read_nodes", ()) or ()):
+            return None
+
+        module = getattr(model_cls, "_module_ast", None)
+        node_names = tuple(getattr(model_cls, "_rust_body_ir_node_names", ()) or ())
+        if module is None or not node_names:
+            return None
+        node_slots = {name: idx for idx, name in enumerate(node_names)}
+        try:
+            runtime = try_build_event_then_transition_shadow_runtime(
+                module,
+                rust_backend,
+                node_slots,
+                default_transition=float(
+                    getattr(model, "default_transition", 1e-12) or 1e-12
+                ),
+            )
+        except Exception:
+            self._perf_stats["rust_full_model_event_transition_core_build_errors"] += 1
+            return None
+        if runtime is None:
+            return None
+        if self._event_transition_runtime_uses_timer(runtime):
+            return None
+
+        native_result = self._try_event_transition_core_native_trace_fastpath(
+            rust_backend=rust_backend,
+            runtime=runtime,
+            model=model,
+            model_cls=model_cls,
+            node_names=node_names,
+            tstop=tstop,
+            record_step=record_step,
+            tstep=tstep,
+        )
+        if native_result is not None:
+            return native_result
+
+        source_by_node = {src.node: src for src in self.sources}
+        local_to_external = {
+            local: getattr(model, "node_map", {}).get(local, local)
+            for local in node_names
+        }
+        external_to_local = {
+            external: local for local, external in local_to_external.items()
+        }
+        source_local_slots = []
+        for local, external in local_to_external.items():
+            src = source_by_node.get(external)
+            if src is not None:
+                source_local_slots.append((node_slots[local], src))
+
+        record_getters = []
+        for signal_name in self.recorded_signals:
+            source = source_by_node.get(signal_name)
+            if source is not None:
+                record_getters.append(("source", signal_name, source))
+                continue
+            local = external_to_local.get(signal_name, signal_name)
+            slot = node_slots.get(local)
+            if slot is None:
+                return None
+            record_getters.append(("node", signal_name, slot))
+
+        state_names = tuple(getattr(model_cls, "_state_scalar_names", ()) or ())
+        param_names = tuple(
+            str(param.name) for param in getattr(module, "parameters", ()) or ()
+        )
+        node_values = array("d", [0.0] * len(node_names))
+        state_values = array(
+            "d",
+            [float(model.state.get(name, 0.0)) for name in state_names],
+        )
+        param_values = array("d")
+        for name in param_names:
+            value = model.params.get(name, 0.0)
+            param_values.append(float(value) if isinstance(value, (int, float)) else 0.0)
+
+        raw_times = self._whole_segment_uniform_times(
+            tstop=tstop,
+            record_step=record_step,
+            tstep=tstep,
+        )
+        source_breakpoints = 0
+        for src in self.sources:
+            if src.breakpoint_fn is not None:
+                before = len(raw_times)
+                self._add_source_breakpoint_times(raw_times, src, tstop)
+                source_breakpoints += len(raw_times) - before
+        planned_times = self._dedupe_times(raw_times, tstop)
+        if not planned_times or abs(planned_times[0]) > 1e-18:
+            planned_times.insert(0, 0.0)
+
+        columns: Dict[str, List[float]] = {
+            name: [] for name in self.recorded_signals
+        }
+        emitted_times: List[float] = []
+        fired_total = 0
+        transition_breakpoints = 0
+        calls_total = 0
+
+        def _refresh_sources(time_value: float) -> None:
+            for slot, src in source_local_slots:
+                node_values[slot] = float(src.waveform(float(time_value)))
+
+        def _record(time_value: float) -> None:
+            emitted_times.append(float(time_value))
+            for kind, signal_name, payload in record_getters:
+                if kind == "source":
+                    columns[signal_name].append(float(payload.waveform(time_value)))
+                else:
+                    columns[signal_name].append(float(node_values[int(payload)]))
+
+        def _step(time_value: float, *, initial_step: bool = False) -> bool:
+            nonlocal calls_total, fired_total
+            _refresh_sources(time_value)
+            try:
+                result = runtime.step(
+                    time=float(time_value),
+                    node_values=node_values,
+                    state_values=state_values,
+                    param_values=param_values,
+                    initial_step=initial_step,
+                )
+            except Exception:
+                self._perf_stats[
+                    "rust_full_model_event_transition_core_runtime_fallbacks"
+                ] += 1
+                return False
+            calls_total += 1
+            fired_total += len(getattr(result, "fired_event_statements", ()) or ())
+            return True
+
+        if not _step(0.0, initial_step=True):
+            return None
+        _record(0.0)
+        prev_t = 0.0
+        min_ramp = 0.15 * float(tstep)
+        for planned_t in planned_times:
+            target_t = float(planned_t)
+            if target_t <= prev_t + 1e-18:
+                continue
+            while True:
+                try:
+                    bp = runtime.next_breakpoint(prev_t, min_ramp)
+                except Exception:
+                    bp = None
+                if bp is None or not (prev_t + 1e-18 < bp < target_t - 1e-18):
+                    break
+                bp = float(bp)
+                if not _step(bp):
+                    return None
+                _record(bp)
+                transition_breakpoints += 1
+                prev_t = bp
+            if not _step(target_t):
+                return None
+            _record(target_t)
+            prev_t = target_t
+
+        integer_names = set(getattr(model_cls, "_integer_state_names", ()) or ())
+        for slot, name in enumerate(state_names):
+            if slot >= len(state_values):
+                break
+            value = float(state_values[slot])
+            if name in integer_names:
+                value = model._to_integer(value)
+            model._state_set_by_slot(slot, name, value)
+
+        transition_program = getattr(
+            getattr(runtime, "transition_runtime", None),
+            "program",
+            None,
+        )
+        for slot in getattr(transition_program, "output_node_slots", ()) or ():
+            slot = int(slot)
+            if 0 <= slot < len(node_names) and slot < len(node_values):
+                model._set_output(
+                    node_names[slot],
+                    float(node_values[slot]),
+                    self.node_voltages,
+                )
+
+        self._perf_stats["rust_full_model_event_transition_core_rust_requested"] = 1
+        self._perf_stats["rust_full_model_event_transition_core_rust_enabled"] = 1
+        self._perf_stats["rust_full_model_event_transition_core_rust_points"] = len(
+            emitted_times
+        )
+        self._perf_stats["rust_full_model_event_transition_core_calls_total"] = (
+            calls_total
+        )
+        self._perf_stats["rust_full_model_event_transition_core_fired_events"] = (
+            fired_total
+        )
+        self._perf_stats[
+            "rust_full_model_event_transition_core_transition_breakpoints"
+        ] = transition_breakpoints
+        self._perf_stats[
+            "rust_full_model_event_transition_core_source_breakpoints"
+        ] = source_breakpoints
+        return self._record_trace_result(
+            array("d", emitted_times),
+            columns,
+            enabled_kind="event_transition_core",
+            step_count=max(0, len(emitted_times) - 1),
+        )
+
+    def _try_event_transition_core_native_trace_fastpath(
+        self,
+        *,
+        rust_backend,
+        runtime,
+        model,
+        model_cls,
+        node_names: Tuple[str, ...],
+        tstop: float,
+        record_step: Optional[float],
+        tstep: float,
+    ) -> Optional[SimResult]:
+        """W1b native scheduler+record for a narrow pulse/cross/transition core."""
+        self._perf_stats[
+            "rust_full_model_event_transition_core_native_trace_requested"
+        ] = 1
+        if rust_backend is None or len(self.recorded_signals) != 1:
+            return None
+        state_names = tuple(getattr(model_cls, "_state_scalar_names", ()) or ())
+        if len(state_names) != 1:
+            return None
+
+        transition_program = getattr(
+            getattr(runtime, "transition_runtime", None),
+            "program",
+            None,
+        )
+        output_slots = tuple(
+            int(slot)
+            for slot in getattr(transition_program, "output_node_slots", ()) or ()
+        )
+        reference_slots = tuple(
+            getattr(transition_program, "reference_node_slots", ()) or ()
+        )
+        expr_segments = tuple(
+            getattr(transition_program, "expr_segments", ()) or ()
+        )
+        if len(output_slots) != 1 or reference_slots != (None,) or len(expr_segments) != 4:
+            return None
+        output_slot = output_slots[0]
+        if output_slot < 0 or output_slot >= len(node_names):
+            return None
+        output_local = node_names[output_slot]
+        output_external = getattr(model, "node_map", {}).get(output_local, output_local)
+        record_name = next(iter(self.recorded_signals))
+        if record_name not in {output_local, output_external}:
+            return None
+
+        def _const_value(ops) -> Optional[float]:
+            ops = tuple(ops or ())
+            if len(ops) != 1 or int(getattr(ops[0], "op_kind", -1)) != BODY_EXPR_CONST:
+                return None
+            return float(getattr(ops[0], "value", 0.0))
+
+        target_ops = tuple(expr_segments[0] or ())
+        if (
+            len(target_ops) != 1
+            or int(getattr(target_ops[0], "op_kind", -1)) != BODY_EXPR_READ_STATE
+            or int(getattr(target_ops[0], "index", -1)) != 0
+        ):
+            return None
+        transition_delay = _const_value(expr_segments[1])
+        transition_rise = _const_value(expr_segments[2])
+        transition_fall = _const_value(expr_segments[3])
+        if transition_delay is None or transition_rise is None or transition_fall is None:
+            return None
+
+        event_runtimes = tuple(
+            getattr(getattr(runtime, "event_runtime", None), "event_runtimes", ())
+            or ()
+        )
+        if len(event_runtimes) != 2:
+            return None
+
+        initial_state_value: Optional[float] = None
+        event_state_value: Optional[float] = None
+        edge_node_slot: Optional[int] = None
+        edge_threshold: Optional[float] = None
+        edge_direction: Optional[int] = None
+
+        for event_runtime in event_runtimes:
+            due_runtime = getattr(event_runtime, "due_runtime", None)
+            triggers = tuple(getattr(getattr(due_runtime, "program", None), "triggers", ()) or ())
+            body_batch = getattr(event_runtime, "body_batch", None)
+            stmt_ops = tuple(getattr(body_batch, "stmt_ops", ()) or ())
+            expr_ops = tuple(getattr(body_batch, "expr_ops", ()) or ())
+            if (
+                len(stmt_ops) != 1
+                or int(getattr(stmt_ops[0], "target_kind", -1)) != TARGET_STATE
+                or int(getattr(stmt_ops[0], "target_id", -1)) != 0
+                or int(getattr(stmt_ops[0], "expr_start", -1)) != 0
+            ):
+                return None
+            expr_count = int(getattr(stmt_ops[0], "expr_count", -1))
+            body_value = _const_value(expr_ops[:expr_count])
+            if body_value is None:
+                return None
+            if len(triggers) != 1:
+                return None
+            trigger = triggers[0]
+            kind = str(getattr(trigger, "kind", ""))
+            if kind == "initial_step":
+                initial_state_value = body_value
+                continue
+            if kind != "cross":
+                return None
+            trigger_expr_ops = tuple(getattr(trigger, "expr_ops", ()) or ())
+            if (
+                len(trigger_expr_ops) != 3
+                or int(getattr(trigger_expr_ops[0], "op_kind", -1)) != BODY_EXPR_READ_NODE
+                or int(getattr(trigger_expr_ops[1], "op_kind", -1)) != BODY_EXPR_CONST
+                or int(getattr(trigger_expr_ops[2], "op_kind", -1)) != BODY_EXPR_SUB
+            ):
+                return None
+            edge_node_slot = int(getattr(trigger_expr_ops[0], "index", -1))
+            edge_threshold = float(getattr(trigger_expr_ops[1], "value", 0.0))
+            edge_direction = int(getattr(trigger, "direction", 0))
+            event_state_value = body_value
+
+        if (
+            initial_state_value is None
+            or event_state_value is None
+            or edge_node_slot is None
+            or edge_threshold is None
+            or edge_direction is None
+            or edge_node_slot < 0
+            or edge_node_slot >= len(node_names)
+        ):
+            return None
+
+        edge_local = node_names[edge_node_slot]
+        edge_external = getattr(model, "node_map", {}).get(edge_local, edge_local)
+        source_by_node = {src.node: src for src in self.sources}
+        edge_source = source_by_node.get(edge_external)
+        if edge_source is None:
+            return None
+        pulse_meta = self._waveform_metadata(edge_source.waveform)
+        if not pulse_meta or pulse_meta.get("kind") != "pulse":
+            return None
+
+        sample_step = float(record_step or tstep)
+        raw_times = self._whole_segment_uniform_times(
+            tstop=tstop,
+            record_step=record_step,
+            tstep=tstep,
+        )
+        for src in self.sources:
+            if src.breakpoint_fn is not None:
+                self._add_source_breakpoint_times(raw_times, src, tstop)
+        planned_count = len(self._dedupe_times(raw_times, tstop))
+        capacity = max(16, planned_count * 6 + 32)
+        try:
+            time_values, out_values, final_state, stats = (
+                rust_backend.event_transition_core_trace_pulse(
+                    capacity=capacity,
+                    tstop=tstop,
+                    sample_step=sample_step,
+                    tstep=tstep,
+                    pulse_meta=pulse_meta,
+                    edge_threshold=edge_threshold,
+                    edge_direction=edge_direction,
+                    initial_state_value=initial_state_value,
+                    event_state_value=event_state_value,
+                    transition_delay=transition_delay,
+                    transition_rise=transition_rise,
+                    transition_fall=transition_fall,
+                    default_transition=float(
+                        getattr(model, "default_transition", 1e-12) or 1e-12
+                    ),
+                )
+            )
+        except RustBackendError:
+            self._perf_stats[
+                "rust_full_model_event_transition_core_native_trace_fallbacks"
+            ] += 1
+            return None
+
+        model._state_set_by_slot(0, state_names[0], final_state)
+        if len(out_values):
+            model._set_output(output_local, float(out_values[-1]), self.node_voltages)
+        self._perf_stats[
+            "rust_full_model_event_transition_core_native_trace_enabled"
+        ] = 1
+        self._perf_stats["rust_full_model_event_transition_core_enabled"] = 1
+        self._perf_stats["rust_full_model_event_transition_core_rust_requested"] = 1
+        self._perf_stats["rust_full_model_event_transition_core_rust_enabled"] = 1
+        self._perf_stats[
+            "rust_full_model_event_transition_core_native_trace_points"
+        ] = len(time_values)
+        self._perf_stats["rust_full_model_event_transition_core_rust_points"] = len(
+            time_values
+        )
+        self._perf_stats["rust_full_model_event_transition_core_calls_total"] = len(
+            time_values
+        )
+        self._perf_stats["rust_full_model_event_transition_core_fired_events"] = int(
+            stats.get("fired_events", 0)
+        )
+        self._perf_stats[
+            "rust_full_model_event_transition_core_transition_breakpoints"
+        ] = int(stats.get("transition_breakpoints", 0))
+        self._perf_stats[
+            "rust_full_model_event_transition_core_source_breakpoints"
+        ] = int(stats.get("source_breakpoints", 0))
+        self._perf_stats[
+            "rust_full_model_event_transition_core_native_trace_fired_events"
+        ] = int(stats.get("fired_events", 0))
+        self._perf_stats[
+            "rust_full_model_event_transition_core_native_trace_transition_breakpoints"
+        ] = int(stats.get("transition_breakpoints", 0))
+        self._perf_stats[
+            "rust_full_model_event_transition_core_native_trace_source_breakpoints"
+        ] = int(stats.get("source_breakpoints", 0))
+        return self._record_trace_result(
+            time_values,
+            {record_name: out_values},
+            enabled_kind="event_transition_core_native_trace",
+            step_count=max(0, len(time_values) - 1),
+        )
+
+    @staticmethod
+    def _event_transition_runtime_uses_timer(runtime) -> bool:
+        event_runtimes = tuple(
+            getattr(getattr(runtime, "event_runtime", None), "event_runtimes", ())
+            or ()
+        )
+        return any(
+            str(getattr(trigger, "kind", "")) == "timer"
+            for event_runtime in event_runtimes
+            for trigger in getattr(
+                getattr(getattr(event_runtime, "due_runtime", None), "program", None),
+                "triggers",
+                (),
+            )
         )
 
     def _inspect_generic_event_state_transition_dispatch(
@@ -2972,7 +3619,11 @@ class Simulator:
             generic_executor: bool = False,
             rust_event_write_shadow: bool = False,
             rust_event_write_production: bool = False,
+            rust_body_ir: bool = False,
+            rust_event_transition_shadow: bool = False,
+            rust_event_transition_production: bool = False,
             rust_full_model_fastpath: bool = False,
+            rust_full_model_required: bool = False,
             event_trace_audit: bool = False,
             rust_required: bool = False) -> SimResult:
         """Run transient simulation with adaptive step control near cross events."""
@@ -2986,6 +3637,8 @@ class Simulator:
         indexed_state_storage_requested = bool(indexed_state_storage)
         if not rust_static_eval:
             rust_static_fast_sync = False
+        if rust_event_transition_production:
+            rust_event_transition_shadow = False
 
         def _model_tree_has_event_write_ir() -> bool:
             def _visit(model) -> bool:
@@ -3025,6 +3678,8 @@ class Simulator:
             rust_event_write_production = False
         if rust_static_eval or rust_transition_shadow:
             indexed_arrays = True
+            indexed_state_storage = True
+        if rust_event_transition_production:
             indexed_state_storage = True
         if rust_event_write_shadow or rust_event_write_production:
             indexed_state_storage = True
@@ -3226,10 +3881,88 @@ class Simulator:
             "rust_event_linear_write_production_calls_total": 0,
             "rust_event_linear_write_production_executed_total": 0,
             "rust_event_linear_write_production_fallbacks_total": 0,
+            "rust_body_ir_requested": int(bool(rust_body_ir)),
+            "rust_body_ir_available": 0,
+            "rust_body_ir_enabled": 0,
+            "rust_body_ir_candidate_models": 0,
+            "rust_body_ir_models": 0,
+            "rust_body_ir_stmt_ops": 0,
+            "rust_body_ir_expr_ops": 0,
+            "rust_body_ir_production_batches_total": 0,
+            "rust_body_ir_production_calls_total": 0,
+            "rust_body_ir_production_executed_total": 0,
+            "rust_body_ir_production_fallbacks_total": 0,
+            "rust_body_ir_production_node_writes_total": 0,
+            "rust_body_ir_production_state_writes_total": 0,
+            "rust_event_transition_shadow_requested": int(
+                bool(rust_event_transition_shadow)
+            ),
+            "rust_event_transition_shadow_available": 0,
+            "rust_event_transition_shadow_enabled": 0,
+            "rust_event_transition_shadow_candidate_models": 0,
+            "rust_event_transition_shadow_models": 0,
+            "rust_event_transition_shadow_calls_total": 0,
+            "rust_event_transition_shadow_matches_total": 0,
+            "rust_event_transition_shadow_mismatches_total": 0,
+            "rust_event_transition_shadow_errors_total": 0,
+            "rust_event_transition_shadow_value_checks_total": 0,
+            "rust_event_transition_shadow_max_abs_diff": 0.0,
+            "rust_event_transition_production_requested": int(
+                bool(rust_event_transition_production)
+            ),
+            "rust_event_transition_production_available": 0,
+            "rust_event_transition_production_enabled": 0,
+            "rust_event_transition_production_candidate_models": 0,
+            "rust_event_transition_production_models": 0,
+            "rust_event_transition_production_calls_total": 0,
+            "rust_event_transition_production_executed_total": 0,
+            "rust_event_transition_production_fallbacks_total": 0,
+            "rust_event_transition_production_state_writes_total": 0,
+            "rust_event_transition_production_output_writes_total": 0,
+            "rust_event_transition_production_fired_events_total": 0,
+            "rust_event_transition_production_breakpoint_scans_total": 0,
+            "rust_event_transition_production_breakpoint_clamps_total": 0,
+            "rust_event_transition_plan_core_candidate_models": 0,
+            "rust_event_transition_plan_core_event_statements": 0,
+            "rust_event_transition_plan_core_due_triggers": 0,
+            "rust_event_transition_plan_core_transitions": 0,
+            "rust_event_transition_plan_core_output_writes": 0,
+            "rust_event_transition_plan_ordered_v1_candidate_models": 0,
+            "rust_event_transition_plan_ordered_v1_event_statements": 0,
+            "rust_event_transition_plan_ordered_v1_due_triggers": 0,
+            "rust_event_transition_plan_ordered_v1_transitions": 0,
+            "rust_event_transition_plan_ordered_v1_output_writes": 0,
+            "rust_event_transition_plan_side_effect_candidate_models": 0,
+            "rust_event_transition_plan_side_effect_event_statements": 0,
+            "rust_event_transition_plan_side_effect_due_triggers": 0,
+            "rust_event_transition_plan_side_effect_transitions": 0,
+            "rust_event_transition_plan_side_effect_output_writes": 0,
             "rust_full_model_fastpath_requested": int(bool(rust_full_model_fastpath)),
+            "rust_full_model_required_requested": int(bool(rust_full_model_required)),
             "rust_full_model_fastpath_available": 0,
             "rust_full_model_fastpath_enabled": 0,
+            "rust_full_model_required_failures": 0,
             "rust_full_model_fastpath_fallbacks_total": 0,
+            "rust_sim_program_requested": 0,
+            "rust_sim_program_available": 0,
+            "rust_sim_program_enabled": 0,
+            "rust_sim_program_source_record_enabled": 0,
+            "rust_sim_program_event_transition_enabled": 0,
+            "rust_sim_program_node_count": 0,
+            "rust_sim_program_state_count": 0,
+            "rust_sim_program_source_count": 0,
+            "rust_sim_program_record_count": 0,
+            "rust_sim_program_continuous_linear_ops": 0,
+            "rust_sim_program_event_count": 0,
+            "rust_sim_program_always_body_count": 0,
+            "rust_sim_program_body_stmt_ops": 0,
+            "rust_sim_program_body_expr_ops": 0,
+            "rust_sim_program_transition_count": 0,
+            "rust_sim_program_points": 0,
+            "rust_sim_program_source_breakpoints": 0,
+            "rust_sim_program_event_fires": 0,
+            "rust_sim_program_transition_breakpoints": 0,
+            "rust_sim_program_rejections": 0,
             "rust_full_model_prbs7_points": 0,
             "rust_full_model_prbs7_cross_events": 0,
             "rust_full_model_prbs7_scheduled_crosses": 0,
@@ -3279,6 +4012,23 @@ class Simulator:
             "rust_full_model_cppll_reacquire_rust_enabled": 0,
             "rust_full_model_cppll_reacquire_rust_fallbacks": 0,
             "rust_full_model_cppll_reacquire_rust_points": 0,
+            "rust_full_model_event_transition_core_enabled": 0,
+            "rust_full_model_event_transition_core_rust_requested": 0,
+            "rust_full_model_event_transition_core_rust_enabled": 0,
+            "rust_full_model_event_transition_core_rust_points": 0,
+            "rust_full_model_event_transition_core_calls_total": 0,
+            "rust_full_model_event_transition_core_fired_events": 0,
+            "rust_full_model_event_transition_core_transition_breakpoints": 0,
+            "rust_full_model_event_transition_core_source_breakpoints": 0,
+            "rust_full_model_event_transition_core_build_errors": 0,
+            "rust_full_model_event_transition_core_runtime_fallbacks": 0,
+            "rust_full_model_event_transition_core_native_trace_requested": 0,
+            "rust_full_model_event_transition_core_native_trace_enabled": 0,
+            "rust_full_model_event_transition_core_native_trace_points": 0,
+            "rust_full_model_event_transition_core_native_trace_fired_events": 0,
+            "rust_full_model_event_transition_core_native_trace_transition_breakpoints": 0,
+            "rust_full_model_event_transition_core_native_trace_source_breakpoints": 0,
+            "rust_full_model_event_transition_core_native_trace_fallbacks": 0,
             "rust_timer_lfsr_output_batches_total": 0,
             "rust_timer_lfsr_output_calls_total": 0,
             "rust_timer_lfsr_output_due_total": 0,
@@ -3554,6 +4304,12 @@ class Simulator:
                         production=production,
                     )
 
+        def _set_model_rust_body_ir_backend(backend, *, production: bool = False):
+            for model in self.models:
+                setter = getattr(model, "_set_rust_body_ir_backend", None)
+                if setter is not None:
+                    setter(backend, production=production)
+
         def _set_model_event_trace_audit_enabled(enabled: bool):
             for model in self.models:
                 setter = getattr(model, "_set_event_trace_audit_enabled", None)
@@ -3657,6 +4413,7 @@ class Simulator:
         _set_model_rust_timer_event_backend(None, production=False)
         _set_model_rust_event_due_shadow_backend(None)
         _set_model_rust_event_write_backend(None)
+        _set_model_rust_body_ir_backend(None, production=False)
         _set_model_event_trace_audit_enabled(False)
         _set_model_static_branch_indexed_io_empty()
         _set_model_node_resolution_cache_enabled(True)
@@ -3672,12 +4429,15 @@ class Simulator:
                 rust_static_eval
                 or rust_transition_shadow
                 or rust_transition_production
+                or rust_event_transition_shadow
+                or rust_event_transition_production
                 or rust_event_interpolation
                 or rust_timer_event
                 or rust_event_due_shadow
                 or rust_cross_above_production
                 or rust_event_write_shadow
                 or rust_event_write_production
+                or rust_body_ir
                 or rust_full_model_fastpath
                 or indexed_arrays
             )
@@ -3689,12 +4449,15 @@ class Simulator:
                 rust_static_eval
                 or rust_transition_shadow
                 or rust_transition_production
+                or rust_event_transition_shadow
+                or rust_event_transition_production
                 or rust_event_interpolation
                 or rust_timer_event
                 or rust_event_due_shadow
                 or rust_cross_above_production
                 or rust_event_write_shadow
                 or rust_event_write_production
+                or rust_body_ir
                 or rust_full_model_fastpath
                 or indexed_arrays
             )
@@ -3710,6 +4473,10 @@ class Simulator:
                 self._perf_stats["rust_static_eval_available"] = 1
             if rust_transition_shadow:
                 self._perf_stats["rust_transition_shadow_available"] = 1
+            if rust_event_transition_shadow:
+                self._perf_stats["rust_event_transition_shadow_available"] = 1
+            if rust_event_transition_production:
+                self._perf_stats["rust_event_transition_production_available"] = 1
             if rust_transition_production:
                 self._perf_stats["rust_transition_production_available"] = 1
                 self._perf_stats["rust_transition_production_enabled"] = 1
@@ -3748,8 +4515,427 @@ class Simulator:
             if rust_event_write_production:
                 self._perf_stats["rust_event_write_production_available"] = 1
                 self._perf_stats["rust_event_write_production_enabled"] = 1
+            if rust_body_ir:
+                self._perf_stats["rust_body_ir_available"] = 1
+                self._perf_stats["rust_body_ir_enabled"] = 1
+                _set_model_rust_body_ir_backend(rust_backend, production=True)
             if rust_full_model_fastpath:
                 self._perf_stats["rust_full_model_fastpath_available"] = 1
+
+        def _aggregate_rust_body_ir_plan_stats():
+            candidate_models = 0
+            enabled_models = 0
+            stmt_ops = 0
+            expr_ops = 0
+
+            def _visit(model):
+                nonlocal candidate_models, enabled_models, stmt_ops, expr_ops
+                cls = getattr(model, "__class__", type(model))
+                model_stmt_ops = tuple(getattr(cls, "_rust_body_ir_stmt_ops", ()) or ())
+                model_expr_ops = tuple(getattr(cls, "_rust_body_ir_expr_ops", ()) or ())
+                if model_stmt_ops:
+                    candidate_models += 1
+                    stmt_ops += len(model_stmt_ops)
+                    expr_ops += len(model_expr_ops)
+                    if getattr(model, "_rust_body_ir_batch", None) is not None:
+                        enabled_models += 1
+                for child in getattr(model, "_child_models", []) or []:
+                    _visit(child)
+
+            for model in self.models:
+                _visit(model)
+            self._perf_stats["rust_body_ir_candidate_models"] = candidate_models
+            self._perf_stats["rust_body_ir_models"] = enabled_models
+            self._perf_stats["rust_body_ir_stmt_ops"] = stmt_ops
+            self._perf_stats["rust_body_ir_expr_ops"] = expr_ops
+
+        _aggregate_rust_body_ir_plan_stats()
+
+        def _aggregate_event_transition_plan_stats():
+            profile_suffixes = {
+                "event_transition_core": "core",
+                "event_transition_ordered_v1": "ordered_v1",
+                "event_transition_with_side_effect_boundary": "side_effect",
+            }
+
+            def _visit(model):
+                cls = getattr(model, "__class__", type(model))
+                profiles = tuple(
+                    getattr(cls, "_event_transition_plan_profiles", ()) or ()
+                )
+                for profile in profiles:
+                    suffix = profile_suffixes.get(str(profile))
+                    if suffix is None:
+                        continue
+                    self._perf_stats[
+                        f"rust_event_transition_plan_{suffix}_candidate_models"
+                    ] += 1
+                    self._perf_stats[
+                        f"rust_event_transition_plan_{suffix}_event_statements"
+                    ] += int(
+                        getattr(cls, "_event_transition_plan_event_count", 0) or 0
+                    )
+                    self._perf_stats[
+                        f"rust_event_transition_plan_{suffix}_due_triggers"
+                    ] += int(
+                        getattr(cls, "_event_transition_plan_due_trigger_count", 0)
+                        or 0
+                    )
+                    self._perf_stats[
+                        f"rust_event_transition_plan_{suffix}_transitions"
+                    ] += int(
+                        getattr(cls, "_event_transition_plan_transition_count", 0)
+                        or 0
+                    )
+                    self._perf_stats[
+                        f"rust_event_transition_plan_{suffix}_output_writes"
+                    ] += int(
+                        getattr(cls, "_event_transition_plan_output_write_count", 0)
+                        or 0
+                    )
+                for child in getattr(model, "_child_models", []) or []:
+                    _visit(child)
+
+            for model in self.models:
+                _visit(model)
+
+        _aggregate_event_transition_plan_stats()
+
+        rust_event_transition_plans: Dict[int, tuple] = {}
+        rust_event_transition_production_buffers: Dict[int, tuple] = {}
+
+        def _build_event_transition_plans():
+            if (
+                not (rust_event_transition_shadow or rust_event_transition_production)
+                or rust_backend is None
+            ):
+                return
+            candidates = 0
+            planned = 0
+            for model_index, model in enumerate(self.models):
+                cls = getattr(model, "__class__", type(model))
+                profiles = tuple(
+                    getattr(cls, "_event_transition_plan_profiles", ()) or ()
+                )
+                if "event_transition_core" not in profiles:
+                    continue
+                candidates += 1
+                module = getattr(cls, "_module_ast", None)
+                node_names = tuple(getattr(cls, "_rust_body_ir_node_names", ()) or ())
+                if module is None or not node_names:
+                    continue
+                node_slots = {name: idx for idx, name in enumerate(node_names)}
+                try:
+                    runtime = try_build_event_then_transition_shadow_runtime(
+                        module,
+                        rust_backend,
+                        node_slots,
+                        default_transition=float(
+                            getattr(model, "default_transition", 1e-12) or 1e-12
+                        ),
+                    )
+                except Exception:
+                    self._perf_stats["rust_event_transition_shadow_errors_total"] += 1
+                    continue
+                if runtime is None:
+                    continue
+                if rust_event_transition_production:
+                    event_body_reads = tuple(
+                        getattr(cls, "_event_body_voltage_read_nodes", ()) or ()
+                    )
+                    if event_body_reads:
+                        continue
+                    event_runtimes = tuple(
+                        getattr(
+                            getattr(runtime, "event_runtime", None),
+                            "event_runtimes",
+                            (),
+                        )
+                        or ()
+                    )
+                    uses_timer = any(
+                        str(getattr(trigger, "kind", "")) == "timer"
+                        for event_runtime in event_runtimes
+                        for trigger in getattr(
+                            getattr(
+                                getattr(event_runtime, "due_runtime", None),
+                                "program",
+                                None,
+                            ),
+                            "triggers",
+                            (),
+                        )
+                    )
+                    if uses_timer:
+                        continue
+                rust_event_transition_plans[model_index] = (
+                    model,
+                    runtime,
+                    node_names,
+                    tuple(getattr(cls, "_state_scalar_names", ()) or ()),
+                    tuple(
+                        str(param.name)
+                        for param in getattr(module, "parameters", ()) or ()
+                    ),
+                )
+                planned += 1
+            if rust_event_transition_shadow:
+                self._perf_stats[
+                    "rust_event_transition_shadow_candidate_models"
+                ] = candidates
+                self._perf_stats["rust_event_transition_shadow_models"] = planned
+            if rust_event_transition_production:
+                self._perf_stats[
+                    "rust_event_transition_production_candidate_models"
+                ] = candidates
+                self._perf_stats["rust_event_transition_production_models"] = planned
+            if planned and rust_event_transition_shadow:
+                self._perf_stats["rust_event_transition_shadow_enabled"] = 1
+            if planned and rust_event_transition_production:
+                self._perf_stats["rust_event_transition_production_enabled"] = 1
+
+        def _fill_event_transition_node_array(model, node_names, values) -> None:
+            for idx, local_name in enumerate(node_names):
+                external_name = model.node_map.get(local_name, local_name)
+                if external_name in self.node_voltages:
+                    values[idx] = float(self.node_voltages.get(external_name, 0.0))
+                else:
+                    values[idx] = float(model.output_nodes.get(local_name, 0.0))
+
+        def _event_transition_node_array(model, node_names: Tuple[str, ...]) -> array:
+            values = array("d", [0.0] * len(node_names))
+            _fill_event_transition_node_array(model, node_names, values)
+            return values
+
+        def _fill_event_transition_state_array(model, state_names, values) -> None:
+            for idx, name in enumerate(state_names):
+                values[idx] = float(model.state.get(name, 0.0))
+
+        def _event_transition_state_array(model, state_names: Tuple[str, ...]) -> array:
+            values = array("d", [0.0] * len(state_names))
+            _fill_event_transition_state_array(model, state_names, values)
+            return values
+
+        def _event_transition_param_array(model, param_names: Tuple[str, ...]) -> array:
+            values = array("d")
+            for name in param_names:
+                value = model.params.get(name, 0.0)
+                values.append(float(value) if isinstance(value, (int, float)) else 0.0)
+            return values
+
+        def _run_rust_event_transition_shadow_pre(
+            model_index: int,
+            eval_time: float,
+            *,
+            initial_step: bool = False,
+        ):
+            if not rust_event_transition_shadow:
+                return None
+            plan = rust_event_transition_plans.get(model_index)
+            if plan is None:
+                return None
+            model, runtime, node_names, state_names, param_names = plan
+            node_values = _event_transition_node_array(model, node_names)
+            state_values = _event_transition_state_array(model, state_names)
+            param_values = _event_transition_param_array(model, param_names)
+            try:
+                runtime.step(
+                    time=eval_time,
+                    node_values=node_values,
+                    state_values=state_values,
+                    param_values=param_values,
+                    initial_step=initial_step,
+                )
+            except Exception:
+                self._perf_stats["rust_event_transition_shadow_errors_total"] += 1
+                return None
+            self._perf_stats["rust_event_transition_shadow_calls_total"] += 1
+            return (model, node_names, state_names, node_values, state_values)
+
+        def _compare_rust_event_transition_shadow(shadow_result) -> None:
+            if shadow_result is None:
+                return
+            model, node_names, state_names, node_values, state_values = shadow_result
+            node_slots = {name: idx for idx, name in enumerate(node_names)}
+            check_nodes = set(getattr(model.__class__, "_static_output_write_nodes", ()) or ())
+            check_nodes.update(model.output_nodes.keys())
+            max_diff = 0.0
+            checks = 0
+            for local_name in sorted(check_nodes):
+                slot = node_slots.get(local_name)
+                if slot is None:
+                    continue
+                external_name = model.node_map.get(local_name, local_name)
+                if external_name in self.node_voltages:
+                    python_value = float(self.node_voltages.get(external_name, 0.0))
+                else:
+                    python_value = float(model.output_nodes.get(local_name, 0.0))
+                diff = abs(float(node_values[slot]) - python_value)
+                max_diff = max(max_diff, diff)
+                checks += 1
+            for slot, name in enumerate(state_names):
+                if slot >= len(state_values):
+                    break
+                diff = abs(float(state_values[slot]) - float(model.state.get(name, 0.0)))
+                max_diff = max(max_diff, diff)
+                checks += 1
+            self._perf_stats[
+                "rust_event_transition_shadow_value_checks_total"
+            ] += checks
+            if max_diff > self._perf_stats["rust_event_transition_shadow_max_abs_diff"]:
+                self._perf_stats["rust_event_transition_shadow_max_abs_diff"] = max_diff
+            if max_diff <= 1e-9:
+                self._perf_stats["rust_event_transition_shadow_matches_total"] += 1
+            else:
+                self._perf_stats["rust_event_transition_shadow_mismatches_total"] += 1
+
+        def _sync_rust_event_transition_state(model, state_names, state_values) -> int:
+            integer_names = set(getattr(model.__class__, "_integer_state_names", ()) or ())
+            writes = 0
+            for slot, name in enumerate(state_names):
+                if slot >= len(state_values):
+                    break
+                value = float(state_values[slot])
+                if name in integer_names:
+                    value = model._to_integer(value)
+                model._state_set_by_slot(slot, name, value)
+                writes += 1
+            return writes
+
+        def _sync_rust_event_transition_outputs(
+            model,
+            runtime,
+            node_names,
+            node_values,
+        ) -> int:
+            node_slots = {name: idx for idx, name in enumerate(node_names)}
+            transition_program = getattr(
+                getattr(runtime, "transition_runtime", None),
+                "program",
+                None,
+            )
+            output_slots = set(
+                int(slot)
+                for slot in getattr(transition_program, "output_node_slots", ()) or ()
+            )
+            for local_name in getattr(model.__class__, "_static_output_write_nodes", ()) or ():
+                slot = node_slots.get(local_name)
+                if slot is not None:
+                    output_slots.add(slot)
+            writes = 0
+            for slot in sorted(output_slots):
+                if slot < 0 or slot >= len(node_names) or slot >= len(node_values):
+                    continue
+                model._set_output(
+                    node_names[slot],
+                    float(node_values[slot]),
+                    self.node_voltages,
+                )
+                writes += 1
+            return writes
+
+        def _run_rust_event_transition_production(
+            model_index: int,
+            eval_time: float,
+        ) -> bool:
+            if not rust_event_transition_production or event_trace_audit:
+                return False
+            plan = rust_event_transition_plans.get(model_index)
+            if plan is None:
+                return False
+            model, runtime, node_names, state_names, param_names = plan
+            if getattr(model, "_child_models", None):
+                self._perf_stats[
+                    "rust_event_transition_production_fallbacks_total"
+                ] += 1
+                return False
+            if getattr(model, "_transition_pending_count", 0):
+                self._perf_stats[
+                    "rust_event_transition_production_fallbacks_total"
+                ] += 1
+                return False
+            model._event_trace_audit_phase = "evaluate"
+            model._event_time = eval_time
+            model._bound_step = 0.0
+            buffers = rust_event_transition_production_buffers.get(model_index)
+            if buffers is None:
+                node_values = _event_transition_node_array(model, node_names)
+                state_values = _event_transition_state_array(model, state_names)
+                param_values = _event_transition_param_array(model, param_names)
+                rust_event_transition_production_buffers[model_index] = (
+                    node_values,
+                    state_values,
+                    param_values,
+                )
+            else:
+                node_values, state_values, param_values = buffers
+                _fill_event_transition_node_array(model, node_names, node_values)
+                _fill_event_transition_state_array(model, state_names, state_values)
+            try:
+                result = runtime.step(
+                    time=eval_time,
+                    node_values=node_values,
+                    state_values=state_values,
+                    param_values=param_values,
+                    initial_step=False,
+                )
+            except Exception:
+                self._perf_stats[
+                    "rust_event_transition_production_fallbacks_total"
+                ] += 1
+                return False
+
+            self._perf_stats["rust_event_transition_production_calls_total"] += 1
+            self._perf_stats["rust_event_transition_production_executed_total"] += 1
+            state_writes = _sync_rust_event_transition_state(
+                model,
+                state_names,
+                state_values,
+            )
+            output_writes = _sync_rust_event_transition_outputs(
+                model,
+                runtime,
+                node_names,
+                node_values,
+            )
+            fired_events = len(getattr(result, "fired_event_statements", ()) or ())
+            if fired_events:
+                model._step_event_fired = True
+            self._perf_stats[
+                "rust_event_transition_production_state_writes_total"
+            ] += state_writes
+            self._perf_stats[
+                "rust_event_transition_production_output_writes_total"
+            ] += output_writes
+            self._perf_stats[
+                "rust_event_transition_production_fired_events_total"
+            ] += fired_events
+            return True
+
+        def _rust_event_transition_next_breakpoint(time_value: float) -> Optional[float]:
+            if not rust_event_transition_production:
+                return None
+            best: Optional[float] = None
+            for _model, runtime, _node_names, _state_names, _param_names in (
+                rust_event_transition_plans.values()
+            ):
+                self._perf_stats[
+                    "rust_event_transition_production_breakpoint_scans_total"
+                ] += 1
+                try:
+                    bp = runtime.next_breakpoint(
+                        time_value,
+                        transition_breakpoint_min_ramp,
+                    )
+                except Exception:
+                    bp = None
+                if bp is not None and bp > time_value and (
+                    best is None or bp < best
+                ):
+                    best = bp
+            return best
+
+        _build_event_transition_plans()
         if indexed_state_storage:
             _install_indexed_state_storage()
         if static_branch_fastpath:
@@ -3763,6 +4949,15 @@ class Simulator:
         source_breakpoint_sources = [src for src in self.sources if src.breakpoint_fn is not None]
         self._generic_executor_enabled = bool(generic_executor)
         if rust_full_model_fastpath:
+            sim_program_result = self._try_rust_sim_program_fastpath(
+                rust_backend=rust_backend,
+                tstop=tstop,
+                record_step=record_step,
+                tstep=tstep,
+                max_step=max_step,
+            )
+            if sim_program_result is not None:
+                return sim_program_result
             full_model_result = self._try_compiler_whole_segment_fastpath(
                 rust_backend=rust_backend,
                 tstop=tstop,
@@ -3770,9 +4965,24 @@ class Simulator:
                 tstep=tstep,
                 max_step=max_step,
                 min_step=min_step,
+                rust_full_model_required=rust_full_model_required,
             )
             if full_model_result is not None:
                 return full_model_result
+            if rust_full_model_required:
+                self._perf_stats["rust_full_model_required_failures"] = 1
+                rejection = getattr(
+                    self,
+                    "_rust_sim_program_last_rejection",
+                    "unknown",
+                )
+                raise RuntimeError(
+                    "EVAS2.0 Rust full-model path was required but no "
+                    "supported whole-segment Rust runtime matched this design. "
+                    "Use EVAS1.0 for Python fallback or extend the EVAS2.0 "
+                    "Rust lowering coverage. "
+                    f"RustSimProgram rejection: {rejection}"
+                )
         transition_breakpoint_min_ramp = 0.15 * max_step
 
         def _set_transition_breakpoint_threshold(model):
@@ -3860,14 +5070,44 @@ class Simulator:
             _set_initial_condition_mode(model, True)
 
         # Fire initial_step events
-        for model in self.models:
+        for model_index, model in enumerate(self.models):
+            shadow_result = _run_rust_event_transition_shadow_pre(
+                model_index,
+                0.0,
+                initial_step=True,
+            )
             model.initial_step(self.node_voltages, 0.0)
+            _compare_rust_event_transition_shadow(shadow_result)
+
+        def _evaluate_model_with_optional_body_ir(
+            model_index: int,
+            model,
+            eval_time: float,
+        ) -> bool:
+            shadow_result = _run_rust_event_transition_shadow_pre(
+                model_index,
+                eval_time,
+                initial_step=False,
+            )
+            if rust_body_ir:
+                runner = getattr(model, "_try_evaluate_rust_body_ir", None)
+                if runner is not None and runner(self.node_voltages, eval_time):
+                    _compare_rust_event_transition_shadow(shadow_result)
+                    return True
+            if _run_rust_event_transition_production(model_index, eval_time):
+                _compare_rust_event_transition_shadow(shadow_result)
+                return True
+            model.evaluate(self.node_voltages, eval_time)
+            _compare_rust_event_transition_shadow(shadow_result)
+            return False
 
         # Evaluate models at t=0 so output nodes are assigned before recording.
         # Without this, output nodes default to 0, producing spurious values in
         # post-processing (e.g. noise = vout_o - vin_i = 0 - 1 = -1 V).
-        for model, has_post_update_events in zip(self.models, model_has_post_update_events):
-            model.evaluate(self.node_voltages, 0.0)
+        for model_index, (model, has_post_update_events) in enumerate(
+            zip(self.models, model_has_post_update_events)
+        ):
+            _evaluate_model_with_optional_body_ir(model_index, model, 0.0)
             model._expire_absolute_timers(0.0)
             if has_post_update_events and model.post_update_events(self.node_voltages, 0.0):
                 model.refresh_outputs(self.node_voltages, 0.0)
@@ -5236,6 +6476,16 @@ class Simulator:
                     self._perf_stats["model_breakpoint_clamps"] += 1
                     if dt < 1e-18:
                         dt = 1e-18
+            bp = _rust_event_transition_next_breakpoint(time)
+            if bp is not None and bp > time and bp < time + dt:
+                dt = bp - time
+                force_record_point = True
+                self._perf_stats["model_breakpoint_clamps"] += 1
+                self._perf_stats[
+                    "rust_event_transition_production_breakpoint_clamps_total"
+                ] += 1
+                if dt < 1e-18:
+                    dt = 1e-18
             if profile_clock is not None:
                 _add_profile_time("model_breakpoint_scan_s", _section_start)
 
@@ -5469,7 +6719,11 @@ class Simulator:
                             transition_snapshot = _snapshot_rust_transition_states(
                                 segment_model_index
                             )
-                            segment_model.evaluate(self.node_voltages, time)
+                            _evaluate_model_with_optional_body_ir(
+                                segment_model_index,
+                                segment_model,
+                                time,
+                            )
                             _run_rust_transition_shadow(
                                 segment_model_index,
                                 transition_snapshot,
@@ -5546,7 +6800,7 @@ class Simulator:
                     self._perf_stats["model_prepare_step_skips"] += 1
                 _section_start = profile_clock() if profile_clock is not None else 0.0
                 transition_snapshot = _snapshot_rust_transition_states(model_index)
-                model.evaluate(self.node_voltages, time)
+                _evaluate_model_with_optional_body_ir(model_index, model, time)
                 _run_rust_transition_shadow(model_index, transition_snapshot)
                 if profile_clock is not None:
                     elapsed = _add_profile_time("model_evaluate_s", _section_start)
@@ -5839,6 +7093,12 @@ class Simulator:
                 "rust_event_linear_write_production_calls": "rust_event_linear_write_production_calls_total",
                 "rust_event_linear_write_production_executed": "rust_event_linear_write_production_executed_total",
                 "rust_event_linear_write_production_fallbacks": "rust_event_linear_write_production_fallbacks_total",
+                "rust_body_ir_production_batches": "rust_body_ir_production_batches_total",
+                "rust_body_ir_production_calls": "rust_body_ir_production_calls_total",
+                "rust_body_ir_production_executed": "rust_body_ir_production_executed_total",
+                "rust_body_ir_production_fallbacks": "rust_body_ir_production_fallbacks_total",
+                "rust_body_ir_production_node_writes": "rust_body_ir_production_node_writes_total",
+                "rust_body_ir_production_state_writes": "rust_body_ir_production_state_writes_total",
                 "rust_timer_lfsr_output_batches": "rust_timer_lfsr_output_batches_total",
                 "rust_timer_lfsr_output_calls": "rust_timer_lfsr_output_calls_total",
                 "rust_timer_lfsr_output_due": "rust_timer_lfsr_output_due_total",
@@ -5992,6 +7252,7 @@ class Simulator:
         _set_model_rust_timer_event_backend(None, production=False)
         _set_model_rust_event_due_shadow_backend(None)
         _set_model_rust_event_write_backend(None)
+        _set_model_rust_body_ir_backend(None, production=False)
         _set_model_event_trace_audit_enabled(False)
         _set_model_static_branch_indexed_io_empty()
 

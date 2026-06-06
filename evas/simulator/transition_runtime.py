@@ -16,17 +16,28 @@ from evas.simulator.expr_ir import (
     BindingTableIR,
     BodyExprOp,
     BranchAccessIR,
+    BinaryExprIR,
     FunctionCallIR,
     LiteralIR,
+    UnaryExprIR,
     encode_body_expr_ops,
+    static_node_ref_name,
 )
 from evas.simulator.rust_backend import RustBackend
-from evas.simulator.stmt_ir import BlockIR, ContributionIR, EventStatementIR, StmtIR
+from evas.simulator.stmt_ir import (
+    AssignmentIR,
+    BlockIR,
+    ContributionIR,
+    EventStatementIR,
+    ForStatementIR,
+    StmtIR,
+    unroll_static_for_statement,
+)
 
 
 @dataclass(frozen=True)
 class TransitionContributionProgram:
-    """Continuous transition contributions encoded as target/delay/rise/fall ops."""
+    """Continuous transition contributions encoded as target/delay/rise/fall/bias/scale ops."""
 
     output_node_slots: Tuple[int, ...]
     reference_node_slots: Tuple[Optional[int], ...]
@@ -119,7 +130,7 @@ class RustTransitionContributionRuntime:
         input_rises = array("d")
         input_falls = array("d")
         for idx in range(self.program.contribution_count):
-            base = idx * 4
+            base = idx * 6
             input_targets.append(float(values[base]))
             input_delays.append(float(values[base + 1]))
             input_rises.append(float(values[base + 2]))
@@ -148,7 +159,11 @@ class RustTransitionContributionRuntime:
         for idx, output_slot in enumerate(self.program.output_node_slots):
             reference_slot = self.program.reference_node_slots[idx]
             reference = 0.0 if reference_slot is None else float(node_values[reference_slot])
-            node_values[output_slot] = reference + float(self.output_values[idx])
+            output_bias = float(values[idx * 6 + 4])
+            output_scale = float(values[idx * 6 + 5])
+            node_values[output_slot] = (
+                reference + output_bias + output_scale * float(self.output_values[idx])
+            )
         return tuple(float(value) for value in self.output_values)
 
     def next_breakpoint(
@@ -216,6 +231,31 @@ def _append_transition_contribution_specs(
     if isinstance(stmt_ir, EventStatementIR):
         return True
 
+    if isinstance(stmt_ir, ForStatementIR):
+        unrolled = unroll_static_for_statement(stmt_ir)
+        if unrolled is None:
+            return False
+        loop_var = getattr(getattr(stmt_ir.init, "target", None), "name", None)
+        if loop_var is not None:
+            unrolled = BlockIR(
+                tuple(
+                    child
+                    for child in unrolled.statements
+                    if not (
+                        isinstance(child, AssignmentIR)
+                        and getattr(child.target, "name", None) == loop_var
+                    )
+                )
+            )
+        return _append_transition_contribution_specs(
+            unrolled,
+            bindings,
+            node_slots,
+            output_slots,
+            reference_slots,
+            expr_segments,
+        )
+
     if not isinstance(stmt_ir, ContributionIR):
         return False
 
@@ -246,28 +286,40 @@ def _encode_transition_contribution_target(
 ) -> Optional[tuple[int, Optional[int]]]:
     if branch.access_type != "V":
         return None
-    if any(
-        child is not None
-        for child in (
-            branch.node1_index,
-            branch.node1_index2,
-            branch.node2_index,
-            branch.node2_index2,
-        )
-    ):
+    output_name = static_node_ref_name(
+        branch.node1,
+        branch.node1_index,
+        branch.node1_index2,
+    )
+    if output_name is None:
         return None
-    output_slot = node_slots.get(branch.node1)
+    output_slot = node_slots.get(output_name)
     if output_slot is None:
         return None
     reference_slot = None
     if branch.node2 is not None:
-        reference_slot = node_slots.get(branch.node2)
+        reference_name = static_node_ref_name(
+            branch.node2,
+            branch.node2_index,
+            branch.node2_index2,
+        )
+        if reference_name is None:
+            return None
+        reference_slot = node_slots.get(reference_name)
         if reference_slot is None:
             return None
     return output_slot, reference_slot
 
 
-def _transition_call_args(expr) -> Optional[Tuple[object, object, object, object]]:
+def _transition_call_args(expr) -> Optional[Tuple[object, object, object, object, object, object]]:
+    parts = _scaled_transition_parts(expr)
+    if parts is None:
+        return None
+    target, delay, rise, fall, output_bias, output_scale = parts
+    return target, delay, rise, fall, output_bias, output_scale
+
+
+def _direct_transition_call_args(expr) -> Optional[Tuple[object, object, object, object]]:
     if not isinstance(expr, FunctionCallIR) or expr.name != "transition":
         return None
     if len(expr.args) > 4:
@@ -278,3 +330,68 @@ def _transition_call_args(expr) -> Optional[Tuple[object, object, object, object
     rise = expr.args[2] if len(expr.args) > 2 else zero
     fall = expr.args[3] if len(expr.args) > 3 else rise
     return target, delay, rise, fall
+
+
+def _scaled_transition_parts(expr) -> Optional[Tuple[object, object, object, object, object, object]]:
+    direct = _direct_transition_call_args(expr)
+    if direct is not None:
+        return (*direct, LiteralIR(0.0), LiteralIR(1.0))
+
+    if isinstance(expr, UnaryExprIR) and expr.op == "-":
+        child = _scaled_transition_parts(expr.operand)
+        if child is None:
+            return None
+        target, delay, rise, fall, bias, scale = child
+        return target, delay, rise, fall, UnaryExprIR("-", bias), UnaryExprIR("-", scale)
+
+    if not isinstance(expr, BinaryExprIR):
+        return None
+
+    if expr.op in {"+", "-"}:
+        left = _scaled_transition_parts(expr.left)
+        right = _scaled_transition_parts(expr.right)
+        if left is not None and right is not None:
+            return None
+        if left is not None:
+            target, delay, rise, fall, bias, scale = left
+            output_bias = BinaryExprIR(expr.op, bias, expr.right)
+            return target, delay, rise, fall, output_bias, scale
+        if right is not None:
+            target, delay, rise, fall, bias, scale = right
+            if expr.op == "+":
+                output_bias = BinaryExprIR("+", expr.left, bias)
+                output_scale = scale
+            else:
+                output_bias = BinaryExprIR("-", expr.left, bias)
+                output_scale = UnaryExprIR("-", scale)
+            return target, delay, rise, fall, output_bias, output_scale
+        return None
+
+    if expr.op == "*":
+        left = _scaled_transition_parts(expr.left)
+        right = _scaled_transition_parts(expr.right)
+        if left is not None and right is not None:
+            return None
+        if left is not None:
+            target, delay, rise, fall, bias, scale = left
+            return (
+                target,
+                delay,
+                rise,
+                fall,
+                BinaryExprIR("*", bias, expr.right),
+                BinaryExprIR("*", scale, expr.right),
+            )
+        if right is not None:
+            target, delay, rise, fall, bias, scale = right
+            return (
+                target,
+                delay,
+                rise,
+                fall,
+                BinaryExprIR("*", expr.left, bias),
+                BinaryExprIR("*", expr.left, scale),
+            )
+        return None
+
+    return None

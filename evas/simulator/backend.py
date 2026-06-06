@@ -30,6 +30,18 @@ from evas.simulator.evaluate_ir import (
     TARGET_STATE,
     normalize_linear_ops,
 )
+from evas.simulator.expr_ir import build_state_binding_ir
+from evas.simulator.event_transition_plan import (
+    EVENT_TRANSITION_PROFILE_SUPPORT,
+    analyze_event_transition_segment_plan,
+    summarize_event_transition_plans,
+)
+from evas.simulator.rust_backend import BODY_TARGET_NODE, BODY_TARGET_STATE
+from evas.simulator.stmt_ir import (
+    classify_body_stmt_ops_rejection,
+    encode_body_stmt_ops,
+    lower_stmt,
+)
 from evas.simulator.whole_segment import validate_whole_segment_candidate
 
 
@@ -39,6 +51,7 @@ class CompilationError(Exception):
 
 class CompiledModel:
     """Base class for compiled Verilog-A models."""
+    _module_ast = None
     _module_registry: Dict[str, Any] = {}
     _module_ports: List[str] = []
     _static_voltage_read_nodes = ()
@@ -65,6 +78,26 @@ class CompiledModel:
     _event_lfsr_output_nodes_by_state = ()
     _event_lfsr_output_hold_states = ()
     _whole_segment_candidates = ()
+    _rust_body_ir_node_names = ()
+    _rust_body_ir_param_names = ()
+    _rust_body_ir_state_names = ()
+    _rust_body_ir_integer_state_names = ()
+    _rust_body_ir_stmt_ops = ()
+    _rust_body_ir_expr_ops = ()
+    _rust_body_ir_target_node_slots = ()
+    _rust_body_ir_target_state_slots = ()
+    _rust_body_ir_rejection_reason = "not_collected"
+    _rust_body_ir_rejection_tags = ()
+    _event_transition_plan_profiles = ()
+    _event_transition_plan_rejection_reasons = {}
+    _event_transition_plan_blocker_tags = {}
+    _event_transition_plan_event_count = 0
+    _event_transition_plan_due_trigger_count = 0
+    _event_transition_plan_output_write_count = 0
+    _event_transition_plan_transition_count = 0
+    _event_transition_plan_state_assignment_count = 0
+    _event_transition_plan_side_effect_count = 0
+    _event_transition_plan_control_flow_count = 0
     _state_owned_timer_targets = ()
     _static_branch_fastpath_codegen = False
     _dynamic_node_cache_limit = 4096
@@ -264,6 +297,12 @@ class CompiledModel:
             "indexed_state_array_writes": 0,
             "indexed_state_array_reads": 0,
             "indexed_state_array_oob_writes": 0,
+            "rust_body_ir_production_batches": 0,
+            "rust_body_ir_production_calls": 0,
+            "rust_body_ir_production_executed": 0,
+            "rust_body_ir_production_fallbacks": 0,
+            "rust_body_ir_production_node_writes": 0,
+            "rust_body_ir_production_state_writes": 0,
         }
         # Lazy-allocated integrator states (only used when idt/idtmod appears)
         self._idt_states: Optional[Dict[str, Dict[str, float]]] = None
@@ -326,6 +365,9 @@ class CompiledModel:
         self._rust_event_linear_write_batches: Dict[str, Dict[str, Any]] = {}
         self._rust_timer_lfsr_output_batches: Dict[str, Dict[str, Any]] = {}
         self._rust_timer_lfsr_output_hold_by_state: Dict[str, Dict[str, Any]] = {}
+        self._rust_body_ir_backend: Optional[Any] = None
+        self._rust_body_ir_batch: Optional[Any] = None
+        self._rust_body_ir_production_enabled: bool = False
         # Per-instance deterministic RNG streams.
         self._rng_default = random.Random(0)
         self._rng_streams: Dict[int, random.Random] = {}
@@ -344,6 +386,109 @@ class CompiledModel:
 
     def final_step(self, node_voltages: Dict[str, float], time: float):
         pass
+
+    def _set_rust_body_ir_backend(self, backend, *, production: bool = False):
+        """Install the opt-in 094 body-IR production backend for this tree."""
+        self._rust_body_ir_backend = backend
+        self._rust_body_ir_batch = None
+        self._rust_body_ir_production_enabled = bool(production)
+        if backend is not None and production:
+            stmt_ops = tuple(getattr(self.__class__, "_rust_body_ir_stmt_ops", ()) or ())
+            expr_ops = tuple(getattr(self.__class__, "_rust_body_ir_expr_ops", ()) or ())
+            if stmt_ops:
+                try:
+                    self._rust_body_ir_batch = backend.make_body_ir_batch(
+                        stmt_ops=stmt_ops,
+                        expr_ops=expr_ops,
+                    )
+                    self._perf_stats["rust_body_ir_production_batches"] = 1
+                except Exception:
+                    self._rust_body_ir_batch = None
+                    self._perf_stats["rust_body_ir_production_fallbacks"] += 1
+        for child in self._child_models:
+            child._set_rust_body_ir_backend(backend, production=production)
+
+    def _try_evaluate_rust_body_ir(
+        self,
+        node_voltages: Dict[str, float],
+        time: float,
+    ) -> bool:
+        """Try to execute this model's conservative 094 body IR in Rust.
+
+        This first production hook still packs one model's local node, state,
+        and parameter arrays per call.  It proves the 094 body IR can own real
+        evaluate semantics under an explicit gate; it is not the final
+        whole-step typed-array fast path.
+        """
+
+        if (
+            not self._rust_body_ir_production_enabled
+            or self._rust_body_ir_batch is None
+            or self._event_trace_audit_enabled
+            or self._event_context_active
+        ):
+            return False
+        if self._child_models or self._transition_pending_count > 0:
+            return False
+
+        node_names = tuple(getattr(self.__class__, "_rust_body_ir_node_names", ()) or ())
+        state_names = tuple(getattr(self.__class__, "_rust_body_ir_state_names", ()) or ())
+        param_names = tuple(getattr(self.__class__, "_rust_body_ir_param_names", ()) or ())
+        try:
+            node_values = array(
+                "d",
+                (float(self._get_voltage(name, node_voltages)) for name in node_names),
+            )
+            state_values = array(
+                "d",
+                (
+                    float(self._state_get_by_slot(slot, name))
+                    for slot, name in enumerate(state_names)
+                ),
+            )
+            param_values = array(
+                "d",
+                (float(self.params.get(name, 0.0)) for name in param_names),
+            )
+        except Exception:
+            self._perf_stats["rust_body_ir_production_fallbacks"] += 1
+            return False
+
+        backend = self._rust_body_ir_backend
+        try:
+            backend.evaluate_body_ir(
+                self._rust_body_ir_batch,
+                node_values=node_values,
+                state_values=state_values,
+                param_values=param_values,
+            )
+        except Exception:
+            self._perf_stats["rust_body_ir_production_fallbacks"] += 1
+            return False
+
+        self._event_trace_audit_phase = "evaluate"
+        self._event_time = time
+        self._bound_step = 0.0
+
+        target_state_slots = tuple(
+            getattr(self.__class__, "_rust_body_ir_target_state_slots", ()) or ()
+        )
+        for slot in target_state_slots:
+            if 0 <= slot < len(state_names) and slot < len(state_values):
+                self._state_set_by_slot(slot, state_names[slot], state_values[slot])
+
+        target_node_slots = tuple(
+            getattr(self.__class__, "_rust_body_ir_target_node_slots", ()) or ()
+        )
+        for slot in target_node_slots:
+            if 0 <= slot < len(node_names) and slot < len(node_values):
+                self._set_output(node_names[slot], node_values[slot], node_voltages)
+
+        self._perf_stats["rust_body_ir_production_calls"] += 1
+        self._perf_stats["rust_body_ir_production_executed"] += 1
+        self._perf_stats["rust_body_ir_production_state_writes"] += len(target_state_slots)
+        self._perf_stats["rust_body_ir_production_node_writes"] += len(target_node_slots)
+        return True
 
     @staticmethod
     def _rust_static_affine_scalar_uses_params(value: Any) -> bool:
@@ -4397,6 +4542,26 @@ class _ModuleCompiler:
             if mod.analog_block
             else ()
         )
+        rust_body_ir_metadata = (
+            self._collect_rust_body_ir_metadata(mod, branch_io)
+            if mod.analog_block
+            else {
+                "rejection_reason": "no_analog_block",
+                "node_names": (),
+                "param_names": (),
+                "state_names": (),
+                "integer_state_names": (),
+                "stmt_ops": (),
+                "expr_ops": (),
+                "target_node_slots": (),
+                "target_state_slots": (),
+                "rejection_tags": (),
+            }
+        )
+        event_transition_plan_metadata = self._collect_event_transition_plan_metadata(
+            mod,
+            tuple(rust_body_ir_metadata["node_names"]),
+        )
         self._rust_output_hold_state_names = set(event_lfsr_output_hold_states)
         # Audit 088: static analyzer for transition defer safety.
         self._transition_defer_unsafe_nodes = (
@@ -4689,6 +4854,7 @@ class _ModuleCompiler:
             )
 
         cls = namespace[f'{mod.name}_Model']
+        cls._module_ast = mod
         cls._uses_idtmod = self._uses_idtmod
         cls._needs_future_node_voltages = self._needs_future_node_voltages
         cls._static_branch_fastpath_codegen = self.static_branch_fastpath_codegen
@@ -4736,6 +4902,56 @@ class _ModuleCompiler:
         )
         cls._event_lfsr_output_hold_states = tuple(event_lfsr_output_hold_states)
         cls._whole_segment_candidates = tuple(whole_segment_candidates)
+        cls._rust_body_ir_node_names = tuple(rust_body_ir_metadata["node_names"])
+        cls._rust_body_ir_param_names = tuple(rust_body_ir_metadata["param_names"])
+        cls._rust_body_ir_state_names = tuple(rust_body_ir_metadata["state_names"])
+        cls._rust_body_ir_integer_state_names = tuple(
+            rust_body_ir_metadata["integer_state_names"]
+        )
+        cls._rust_body_ir_stmt_ops = tuple(rust_body_ir_metadata["stmt_ops"])
+        cls._rust_body_ir_expr_ops = tuple(rust_body_ir_metadata["expr_ops"])
+        cls._rust_body_ir_target_node_slots = tuple(
+            rust_body_ir_metadata["target_node_slots"]
+        )
+        cls._rust_body_ir_target_state_slots = tuple(
+            rust_body_ir_metadata["target_state_slots"]
+        )
+        cls._rust_body_ir_rejection_reason = str(
+            rust_body_ir_metadata["rejection_reason"]
+        )
+        cls._rust_body_ir_rejection_tags = tuple(
+            rust_body_ir_metadata["rejection_tags"]
+        )
+        cls._event_transition_plan_profiles = tuple(
+            event_transition_plan_metadata["accepted_profiles"]
+        )
+        cls._event_transition_plan_rejection_reasons = dict(
+            event_transition_plan_metadata["rejection_reasons"]
+        )
+        cls._event_transition_plan_blocker_tags = dict(
+            event_transition_plan_metadata["blocker_tags"]
+        )
+        cls._event_transition_plan_event_count = int(
+            event_transition_plan_metadata["event_count"]
+        )
+        cls._event_transition_plan_due_trigger_count = int(
+            event_transition_plan_metadata["due_trigger_count"]
+        )
+        cls._event_transition_plan_output_write_count = int(
+            event_transition_plan_metadata["output_write_count"]
+        )
+        cls._event_transition_plan_transition_count = int(
+            event_transition_plan_metadata["transition_count"]
+        )
+        cls._event_transition_plan_state_assignment_count = int(
+            event_transition_plan_metadata["state_assignment_count"]
+        )
+        cls._event_transition_plan_side_effect_count = int(
+            event_transition_plan_metadata["side_effect_count"]
+        )
+        cls._event_transition_plan_control_flow_count = int(
+            event_transition_plan_metadata["control_flow_count"]
+        )
         cls._state_owned_timer_targets = tuple(
             sorted(self._state_owned_timer_targets.items())
         )
@@ -5207,6 +5423,160 @@ class _ModuleCompiler:
             "dynamic_voltage_read_count": 0,
             "dynamic_output_write_count": 0,
         }
+
+    def _collect_rust_body_ir_metadata(
+        self,
+        mod: Module,
+        branch_io: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Collect conservative 094 body-IR metadata for generated classes."""
+
+        empty = {
+            "node_names": (),
+            "param_names": (),
+            "state_names": (),
+            "integer_state_names": (),
+            "stmt_ops": (),
+            "expr_ops": (),
+            "target_node_slots": (),
+            "target_state_slots": (),
+            "rejection_tags": (),
+        }
+
+        analog_block = getattr(mod, "analog_block", None)
+        body = getattr(analog_block, "body", None)
+        if body is None:
+            return {**empty, "rejection_reason": "no_analog_block"}
+
+        stmt_ir = lower_stmt(body)
+        if stmt_ir is None:
+            return {
+                **empty,
+                "rejection_reason": "stmt_lower_failed",
+                "rejection_tags": ("stmt_lower_failed",),
+            }
+
+        node_names = tuple(
+            sorted(
+                set(str(name) for name in getattr(mod, "ports", ()) or ())
+                | set(str(name) for name in branch_io["static_voltage_read_nodes"])
+                | set(str(name) for name in branch_io["static_output_write_nodes"])
+            )
+        )
+        node_slots = {name: idx for idx, name in enumerate(node_names)}
+        bindings = build_state_binding_ir(mod)
+        program = encode_body_stmt_ops(stmt_ir, bindings, node_slots)
+        if program is None:
+            rejection_tags = classify_body_stmt_ops_rejection(
+                stmt_ir,
+                bindings,
+                node_slots,
+            )
+            return {
+                **empty,
+                "node_names": node_names,
+                "rejection_reason": self._primary_rust_body_ir_rejection_reason(
+                    rejection_tags
+                ),
+                "rejection_tags": rejection_tags,
+            }
+        if not program.stmt_ops:
+            return {
+                **empty,
+                "node_names": node_names,
+                "rejection_reason": "empty_body",
+                "rejection_tags": ("empty_body",),
+            }
+
+        param_names = tuple(str(param.name) for param in getattr(mod, "parameters", ()) or ())
+        state_names = tuple(
+            str(variable.name)
+            for variable in getattr(mod, "variables", ()) or ()
+            if not getattr(variable, "is_array", False)
+        )
+        integer_state_names = tuple(
+            str(variable.name)
+            for variable in getattr(mod, "variables", ()) or ()
+            if (
+                not getattr(variable, "is_array", False)
+                and self._is_integer_decl(variable)
+            )
+        )
+        target_node_slots = tuple(
+            sorted(
+                {
+                    int(op.target_id)
+                    for op in program.stmt_ops
+                    if int(op.target_kind) == BODY_TARGET_NODE
+                }
+            )
+        )
+        target_state_slots = tuple(
+            sorted(
+                {
+                    int(op.target_id)
+                    for op in program.stmt_ops
+                    if int(op.target_kind) == BODY_TARGET_STATE
+                }
+            )
+        )
+        return {
+            "rejection_reason": "ok",
+            "node_names": node_names,
+            "param_names": param_names,
+            "state_names": state_names,
+            "integer_state_names": integer_state_names,
+            "stmt_ops": tuple(program.stmt_ops),
+            "expr_ops": tuple(program.expr_ops),
+            "target_node_slots": target_node_slots,
+            "target_state_slots": target_state_slots,
+            "rejection_tags": (),
+        }
+
+    def _collect_event_transition_plan_metadata(
+        self,
+        mod: Module,
+        node_names: Tuple[str, ...],
+    ) -> Dict[str, Any]:
+        """Collect compiler-visible 101 event/transition planner metadata."""
+
+        plans = {
+            profile_name: analyze_event_transition_segment_plan(
+                mod,
+                node_names,
+                profile=profile_name,
+                supported_tags=supported_tags,
+            )
+            for profile_name, supported_tags in EVENT_TRANSITION_PROFILE_SUPPORT.items()
+        }
+        return summarize_event_transition_plans(plans)
+
+    @staticmethod
+    def _primary_rust_body_ir_rejection_reason(tags: Tuple[str, ...]) -> str:
+        """Pick a stable primary reason from diagnostic rejection tags."""
+
+        priority = (
+            "event_statement",
+            "transition_expr",
+            "complex_if_write_set",
+            "array_assignment_target",
+            "array_read_or_dynamic_index",
+            "differential_output_target",
+            "indexed_output_target",
+            "special_identifier:$abstime",
+            "for_loop",
+            "case_statement",
+            "while_loop",
+        )
+        tag_set = set(tags)
+        for tag in priority:
+            if tag in tag_set:
+                return tag
+        for prefix in ("system_task:", "system_function:", "event_", "unsupported_"):
+            for tag in tags:
+                if tag.startswith(prefix):
+                    return tag
+        return tags[0] if tags else "body_stmt_ops_unsupported"
 
     def _collect_static_branch_io(self, stmt) -> Dict[str, Any]:
         acc = self._empty_static_branch_io()

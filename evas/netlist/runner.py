@@ -1183,6 +1183,19 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     ) or os.environ.get("EVAS_RUST_FULL_MODEL_FASTPATH", "").strip().lower() in {
         "1", "true", "yes", "on", "enabled"
     }
+    evas_engine = str(simopt.get("evas_engine", "")).strip().lower()
+    evas2_engine = (
+        evas_engine in {"evas2", "rust2"}
+        or _simopt_bool(simopt, "evas2", False)
+        or os.environ.get("EVAS_ENGINE", "").strip().lower() in {"evas2", "rust2"}
+    )
+    rust_full_model_required = _simopt_bool(
+        simopt,
+        'evas_rust_full_model_required',
+        False,
+    ) or os.environ.get("EVAS_RUST_FULL_MODEL_REQUIRED", "").strip().lower() in {
+        "1", "true", "yes", "on", "enabled"
+    }
     event_trace_audit = _simopt_bool(
         simopt,
         'evas_event_trace_audit',
@@ -1197,6 +1210,10 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     ) or os.environ.get("EVAS_RUST_REQUIRED", "").strip().lower() in {
         "1", "true", "yes", "on", "enabled"
     }
+    if evas2_engine:
+        rust_full_model_fastpath = True
+        rust_full_model_required = True
+        rust_required = True
     indexed_arrays_effective = (
         indexed_arrays
         or rust_static_eval
@@ -1266,6 +1283,10 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write("    evas_rust_timer_event = true")
     if rust_full_model_fastpath:
         log.write("    evas_rust_full_model_fastpath = true")
+    if rust_full_model_required:
+        log.write("    evas_rust_full_model_required = true")
+    if evas2_engine:
+        log.write("    evas_engine = evas2")
     if event_trace_audit:
         log.write("    evas_event_trace_audit = true")
     if rust_required:
@@ -1297,6 +1318,7 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
                      rust_event_write_shadow=rust_event_write_shadow,
                      rust_event_write_production=rust_event_write_production,
                      rust_full_model_fastpath=rust_full_model_fastpath,
+                     rust_full_model_required=rust_full_model_required,
                      event_trace_audit=event_trace_audit,
                      rust_required=rust_required)
 

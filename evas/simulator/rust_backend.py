@@ -97,10 +97,68 @@ class RustBodyStmtOp(ctypes.Structure):
     ]
 
 
+class RustSimSourceSpec(ctypes.Structure):
+    _fields_ = [
+        ("kind", ctypes.c_uint8),
+        ("flags", ctypes.c_uint8),
+        ("node_id", ctypes.c_size_t),
+        ("data_start", ctypes.c_size_t),
+        ("data_count", ctypes.c_size_t),
+        ("p0", ctypes.c_double),
+        ("p1", ctypes.c_double),
+        ("p2", ctypes.c_double),
+        ("p3", ctypes.c_double),
+        ("p4", ctypes.c_double),
+        ("p5", ctypes.c_double),
+        ("p6", ctypes.c_double),
+        ("p7", ctypes.c_double),
+    ]
+
+
+class RustSimEventSpec(ctypes.Structure):
+    _fields_ = [
+        ("kind", ctypes.c_uint8),
+        ("phase", ctypes.c_uint8),
+        ("direction", ctypes.c_int32),
+        ("expr_start", ctypes.c_size_t),
+        ("expr_count", ctypes.c_size_t),
+        ("time_tol_start", ctypes.c_size_t),
+        ("time_tol_count", ctypes.c_size_t),
+        ("expr_tol_start", ctypes.c_size_t),
+        ("expr_tol_count", ctypes.c_size_t),
+        ("timer_start_expr_start", ctypes.c_size_t),
+        ("timer_start_expr_count", ctypes.c_size_t),
+        ("timer_period_expr_start", ctypes.c_size_t),
+        ("timer_period_expr_count", ctypes.c_size_t),
+        ("body_stmt_start", ctypes.c_size_t),
+        ("body_stmt_count", ctypes.c_size_t),
+    ]
+
+
+class RustSimTransitionSpec(ctypes.Structure):
+    _fields_ = [
+        ("output_node_id", ctypes.c_size_t),
+        ("reference_node_id", ctypes.c_size_t),
+        ("target_expr_start", ctypes.c_size_t),
+        ("target_expr_count", ctypes.c_size_t),
+        ("delay_expr_start", ctypes.c_size_t),
+        ("delay_expr_count", ctypes.c_size_t),
+        ("rise_expr_start", ctypes.c_size_t),
+        ("rise_expr_count", ctypes.c_size_t),
+        ("fall_expr_start", ctypes.c_size_t),
+        ("fall_expr_count", ctypes.c_size_t),
+        ("output_bias_expr_start", ctypes.c_size_t),
+        ("output_bias_expr_count", ctypes.c_size_t),
+        ("output_scale_expr_start", ctypes.c_size_t),
+        ("output_scale_expr_count", ctypes.c_size_t),
+    ]
+
+
 BODY_EXPR_CONST = 0
 BODY_EXPR_READ_NODE = 1
 BODY_EXPR_READ_STATE = 2
 BODY_EXPR_READ_PARAM = 3
+BODY_EXPR_READ_TIME = 4
 BODY_EXPR_NEG = 10
 BODY_EXPR_NOT = 11
 BODY_EXPR_ADD = 20
@@ -119,6 +177,9 @@ BODY_EXPR_LOR = 37
 BODY_EXPR_BITAND = 38
 BODY_EXPR_BITOR = 39
 BODY_EXPR_BITXOR = 40
+BODY_EXPR_SHL = 41
+BODY_EXPR_SHR = 42
+BODY_EXPR_BITNOT = 43
 BODY_EXPR_SELECT = 50
 BODY_EXPR_ABS = 60
 BODY_EXPR_SQRT = 61
@@ -132,9 +193,339 @@ BODY_EXPR_CEIL = 68
 BODY_EXPR_MIN = 69
 BODY_EXPR_MAX = 70
 BODY_EXPR_POW = 71
+BODY_EXPR_TAN = 72
+BODY_EXPR_TANH = 73
+BODY_EXPR_RDIST_NORMAL = 80
 
 BODY_TARGET_NODE = 0
 BODY_TARGET_STATE = 1
+BODY_STMT_FILE_OPEN = 247
+BODY_STMT_FILE_WRITE = 248
+BODY_STMT_FILE_CLOSE = 249
+BODY_STMT_IF = 250
+BODY_STMT_ELSE = 251
+BODY_STMT_ENDIF = 252
+BODY_STMT_BOUND_STEP = 253
+
+RUST_SIM_SOURCE_DC = 0
+RUST_SIM_SOURCE_PULSE = 1
+RUST_SIM_SOURCE_SINE = 2
+RUST_SIM_SOURCE_PWL = 3
+RUST_SIM_EVENT_INITIAL_STEP = 0
+RUST_SIM_EVENT_CROSS = 1
+RUST_SIM_EVENT_ABOVE = 2
+RUST_SIM_EVENT_TIMER = 3
+RUST_SIM_EVENT_ALWAYS = 4
+RUST_SIM_EVENT_FINAL_STEP = 5
+
+
+def _rust_sim_source_kind_code(kind: str) -> int:
+    if kind == "dc":
+        return RUST_SIM_SOURCE_DC
+    if kind == "pulse":
+        return RUST_SIM_SOURCE_PULSE
+    if kind == "sine":
+        return RUST_SIM_SOURCE_SINE
+    if kind == "pwl":
+        return RUST_SIM_SOURCE_PWL
+    raise RustBackendError(f"unsupported RustSim source kind: {kind!r}")
+
+
+def _rust_sim_event_kind_code(kind: str) -> int:
+    if kind == "initial_step":
+        return RUST_SIM_EVENT_INITIAL_STEP
+    if kind == "cross":
+        return RUST_SIM_EVENT_CROSS
+    if kind == "above":
+        return RUST_SIM_EVENT_ABOVE
+    if kind == "timer":
+        return RUST_SIM_EVENT_TIMER
+    if kind == "always":
+        return RUST_SIM_EVENT_ALWAYS
+    if kind == "final_step":
+        return RUST_SIM_EVENT_FINAL_STEP
+    raise RustBackendError(f"unsupported RustSim event kind: {kind!r}")
+
+
+class RustSimSourceRecordProgram:
+    """ctypes-backed source+record RustSimProgram slice."""
+
+    def __init__(self, program):
+        self.node_names: Tuple[str, ...] = tuple(program.node_names)
+        self.record_names: Tuple[str, ...] = tuple(program.record_names)
+        self.record_node_ids: Tuple[int, ...] = tuple(
+            int(node_id) for node_id in program.record_node_ids
+        )
+        self.state_names: Tuple[str, ...] = tuple(
+            str(getattr(state, "name", "")) for state in program.states
+        )
+        self.node_initial_values: Tuple[float, ...] = tuple(
+            float(getattr(node, "initial_value", 0.0)) for node in program.nodes
+        )
+        self.state_initial_values: Tuple[float, ...] = tuple(
+            float(getattr(state, "initial_value", 0.0)) for state in program.states
+        )
+        self.param_values: Tuple[float, ...] = tuple(
+            float(getattr(param, "value", 0.0)) for param in getattr(program, "params", ())
+        )
+        self.side_effects: Tuple[object, ...] = tuple(
+            getattr(program, "side_effects", ()) or ()
+        )
+        self.source_data: Tuple[float, ...] = tuple(
+            float(value) for value in getattr(program, "source_data", ())
+        )
+        specs = []
+        for source in program.sources:
+            params = list(float(value) for value in getattr(source, "params", ()))
+            if len(params) > 8:
+                raise RustBackendError(
+                    f"RustSim source {getattr(source, 'node', '')!r} has too many params"
+                )
+            params.extend([0.0] * (8 - len(params)))
+            specs.append(
+                RustSimSourceSpec(
+                    _rust_sim_source_kind_code(str(source.kind)),
+                    int(getattr(source, "flags", 0)),
+                    int(source.node_id),
+                    int(getattr(source, "data_start", 0)),
+                    int(getattr(source, "data_count", 0)),
+                    *params,
+                )
+            )
+        self.source_count = len(specs)
+        source_array_type = RustSimSourceSpec * self.source_count
+        data_array_type = ctypes.c_double * len(self.source_data)
+        record_array_type = ctypes.c_size_t * len(self.record_node_ids)
+        self._c_sources = source_array_type(*specs)
+        self._c_source_data = data_array_type(*self.source_data)
+        self._c_record_node_ids = record_array_type(*self.record_node_ids)
+        param_array_type = ctypes.c_double * len(self.param_values)
+        self._c_param_values = param_array_type(*self.param_values)
+        body_stmt_ops = tuple(getattr(program, "body_stmt_ops", ()) or ())
+        body_expr_ops = tuple(getattr(program, "body_expr_ops", ()) or ())
+        self._body_ir_batch = RustBodyIrBatch(
+            stmt_ops=body_stmt_ops,
+            expr_ops=body_expr_ops,
+        )
+        event_specs = []
+        for event in tuple(getattr(program, "events", ()) or ()):
+            event_specs.append(
+                RustSimEventSpec(
+                    _rust_sim_event_kind_code(str(event.kind)),
+                    int(getattr(event, "phase", 0)),
+                    int(getattr(event, "direction", 0)),
+                    int(getattr(event, "expr_start", 0)),
+                    int(getattr(event, "expr_count", 0)),
+                    int(getattr(event, "time_tol_start", 0)),
+                    int(getattr(event, "time_tol_count", 0)),
+                    int(getattr(event, "expr_tol_start", 0)),
+                    int(getattr(event, "expr_tol_count", 0)),
+                    int(getattr(event, "timer_start_expr_start", 0)),
+                    int(getattr(event, "timer_start_expr_count", 0)),
+                    int(getattr(event, "timer_period_expr_start", 0)),
+                    int(getattr(event, "timer_period_expr_count", 0)),
+                    int(getattr(event, "body_stmt_start", 0)),
+                    int(getattr(event, "body_stmt_count", 0)),
+                )
+            )
+        transition_specs = []
+        for transition in tuple(getattr(program, "transitions", ()) or ()):
+            reference_node_id = getattr(transition, "reference_node_id", None)
+            transition_specs.append(
+                RustSimTransitionSpec(
+                    int(getattr(transition, "output_node_id", 0)),
+                    _usize_max() if reference_node_id is None else int(reference_node_id),
+                    int(getattr(transition, "target_expr_start", 0)),
+                    int(getattr(transition, "target_expr_count", 0)),
+                    int(getattr(transition, "delay_expr_start", 0)),
+                    int(getattr(transition, "delay_expr_count", 0)),
+                    int(getattr(transition, "rise_expr_start", 0)),
+                    int(getattr(transition, "rise_expr_count", 0)),
+                    int(getattr(transition, "fall_expr_start", 0)),
+                    int(getattr(transition, "fall_expr_count", 0)),
+                    int(getattr(transition, "output_bias_expr_start", 0)),
+                    int(getattr(transition, "output_bias_expr_count", 0)),
+                    int(getattr(transition, "output_scale_expr_start", 0)),
+                    int(getattr(transition, "output_scale_expr_count", 0)),
+                )
+            )
+        event_array_type = RustSimEventSpec * len(event_specs)
+        transition_array_type = RustSimTransitionSpec * len(transition_specs)
+        self._c_events = event_array_type(*event_specs)
+        self._c_transitions = transition_array_type(*transition_specs)
+        linear_ops = []
+        for op in tuple(getattr(program, "continuous_linear_ops", ()) or ()):
+            condition = getattr(op, "condition", None)
+            linear_ops.append(
+                LinearOp(
+                    target_kind=int(op.target_kind),
+                    target_id=int(op.target_id),
+                    bias=float(op.bias),
+                    terms=tuple(
+                        LinearTerm(
+                            source_kind=int(term.source_kind),
+                            source_id=int(term.source_id),
+                            gain=float(term.gain),
+                        )
+                        for term in getattr(op, "terms", ())
+                    ),
+                    condition=(
+                        None
+                        if condition is None
+                        else LinearCondition(
+                            op_kind=int(condition.op_kind),
+                            left_bias=float(condition.left_bias),
+                            left_terms=tuple(
+                                LinearTerm(
+                                    source_kind=int(term.source_kind),
+                                    source_id=int(term.source_id),
+                                    gain=float(term.gain),
+                                )
+                                for term in getattr(condition, "left_terms", ())
+                            ),
+                            right_bias=float(condition.right_bias),
+                            right_terms=tuple(
+                                LinearTerm(
+                                    source_kind=int(term.source_kind),
+                                    source_id=int(term.source_id),
+                                    gain=float(term.gain),
+                                )
+                                for term in getattr(condition, "right_terms", ())
+                            ),
+                        )
+                    ),
+                    false_bias=float(getattr(op, "false_bias", 0.0)),
+                    false_terms=tuple(
+                        LinearTerm(
+                            source_kind=int(term.source_kind),
+                            source_id=int(term.source_id),
+                            gain=float(term.gain),
+                        )
+                        for term in getattr(op, "false_terms", ())
+                    ),
+                    target_integer=bool(getattr(op, "target_integer", False)),
+                )
+            )
+        self._linear_batch = RustLinearBatch(linear_ops)
+
+    def apply_side_effects(
+        self,
+        events: Iterable[tuple[int, int, float, tuple[float, ...]]],
+    ) -> None:
+        handles: dict[int, tuple[object, ...]] = {}
+        try:
+            for kind, spec_id, _time, values in events:
+                if spec_id < 0 or spec_id >= len(self.side_effects):
+                    continue
+                spec = self.side_effects[spec_id]
+                action = str(getattr(spec, "kind", ""))
+                if action == "fopen" and kind == BODY_STMT_FILE_OPEN:
+                    filename = str(getattr(spec, "filename", "output.txt"))
+                    mode = str(getattr(spec, "mode", "w") or "w")
+                    handle_id = int(spec_id) + 1
+                    paths = [Path(filename)]
+                    output_dir = os.environ.get("EVAS_SIDE_EFFECT_OUTPUT_DIR", "")
+                    if output_dir and not Path(filename).is_absolute():
+                        output_path = Path(output_dir) / filename
+                        if output_path not in paths:
+                            paths.append(output_path)
+                    opened = []
+                    for path in paths:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        opened.append(open(path, mode, encoding="utf-8"))
+                    handles[handle_id] = tuple(opened)
+                    continue
+                if action == "fwrite" and kind == BODY_STMT_FILE_WRITE:
+                    if not values:
+                        continue
+                    handle_id = int(round(float(values[0])))
+                    fmt = str(getattr(spec, "fmt", ""))
+                    args = tuple(float(value) for value in values[1:])
+                    try:
+                        msg = (fmt % args) if args else fmt
+                    except Exception:
+                        coerced = tuple(
+                            int(round(value))
+                            if abs(value - round(value)) <= 1.0e-9
+                            else value
+                            for value in args
+                        )
+                        msg = (fmt % coerced) if coerced else fmt
+                    targets = handles.get(handle_id) or ()
+                    for target in targets:
+                        target.write(msg + "\n")
+                    continue
+                if action == "fclose" and kind == BODY_STMT_FILE_CLOSE:
+                    if not values:
+                        continue
+                    handle_id = int(round(float(values[0])))
+                    targets = handles.pop(handle_id, ())
+                    for target in targets:
+                        target.close()
+        finally:
+            for targets in handles.values():
+                for target in targets:
+                    target.close()
+
+    @property
+    def source_ptr(self):
+        return self._c_sources
+
+    @property
+    def source_data_ptr(self):
+        return self._c_source_data
+
+    @property
+    def record_node_ids_ptr(self):
+        return self._c_record_node_ids
+
+    @property
+    def node_count(self) -> int:
+        return len(self.node_names)
+
+    @property
+    def record_count(self) -> int:
+        return len(self.record_names)
+
+    @property
+    def state_count(self) -> int:
+        return len(self.state_names)
+
+    @property
+    def param_count(self) -> int:
+        return len(self.param_values)
+
+    @property
+    def continuous_linear_count(self) -> int:
+        return len(self._linear_batch)
+
+    @property
+    def event_count(self) -> int:
+        return len(self._c_events)
+
+    @property
+    def transition_count(self) -> int:
+        return len(self._c_transitions)
+
+    @property
+    def linear_batch(self):
+        return self._linear_batch
+
+    @property
+    def body_ir_batch(self):
+        return self._body_ir_batch
+
+    @property
+    def event_ptr(self):
+        return self._c_events
+
+    @property
+    def transition_ptr(self):
+        return self._c_transitions
+
+    @property
+    def param_ptr(self):
+        return self._c_param_values
 
 
 class RustLfsrEventBatch:
@@ -1188,6 +1579,172 @@ class RustBackend:
             ]
             transition_state_fn.restype = ctypes.c_int
         self._transition_state_step = transition_state_fn
+        try:
+            event_transition_trace_pulse_fn = (
+                self._lib.evas_rust_event_transition_core_trace_pulse
+            )
+        except AttributeError:
+            event_transition_trace_pulse_fn = None
+        if event_transition_trace_pulse_fn is not None:
+            event_transition_trace_pulse_fn.argtypes = [
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_size_t),
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_uint8,
+                ctypes.c_double,
+                ctypes.c_int,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.POINTER(ctypes.c_size_t),
+                ctypes.POINTER(ctypes.c_size_t),
+                ctypes.POINTER(ctypes.c_size_t),
+            ]
+            event_transition_trace_pulse_fn.restype = ctypes.c_int
+        self._event_transition_core_trace_pulse = event_transition_trace_pulse_fn
+        try:
+            source_record_fn = self._lib.evas_rust_run_source_record_program
+        except AttributeError:
+            source_record_fn = None
+        if source_record_fn is not None:
+            source_record_fn.argtypes = [
+                ctypes.POINTER(RustSimSourceSpec),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_size_t),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_size_t),
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_uint8,
+                ctypes.POINTER(ctypes.c_size_t),
+            ]
+            source_record_fn.restype = ctypes.c_int
+        self._run_source_record_program = source_record_fn
+        try:
+            source_linear_record_fn = (
+                self._lib.evas_rust_run_source_linear_record_program
+            )
+        except AttributeError:
+            source_linear_record_fn = None
+        if source_linear_record_fn is not None:
+            source_linear_record_fn.argtypes = [
+                ctypes.POINTER(RustSimSourceSpec),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(RustLinearOp),
+                ctypes.c_size_t,
+                ctypes.POINTER(RustLinearTerm),
+                ctypes.c_size_t,
+                ctypes.POINTER(RustLinearCondition),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_size_t),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_size_t),
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_uint8,
+                ctypes.POINTER(ctypes.c_size_t),
+            ]
+            source_linear_record_fn.restype = ctypes.c_int
+        self._run_source_linear_record_program = source_linear_record_fn
+        try:
+            event_transition_record_fn = (
+                self._lib.evas_rust_run_event_transition_record_program
+            )
+        except AttributeError:
+            event_transition_record_fn = None
+        if event_transition_record_fn is not None:
+            event_transition_record_fn.argtypes = [
+                ctypes.POINTER(RustSimSourceSpec),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(RustLinearOp),
+                ctypes.c_size_t,
+                ctypes.POINTER(RustLinearTerm),
+                ctypes.c_size_t,
+                ctypes.POINTER(RustLinearCondition),
+                ctypes.c_size_t,
+                ctypes.POINTER(RustBodyStmtOp),
+                ctypes.c_size_t,
+                ctypes.POINTER(RustBodyExprOp),
+                ctypes.c_size_t,
+                ctypes.POINTER(RustSimEventSpec),
+                ctypes.c_size_t,
+                ctypes.POINTER(RustSimTransitionSpec),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_uint8),
+                ctypes.POINTER(ctypes.c_size_t),
+                ctypes.POINTER(ctypes.c_size_t),
+                ctypes.POINTER(ctypes.c_size_t),
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_size_t),
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_size_t),
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_size_t),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_size_t),
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_uint8,
+                ctypes.c_double,
+                ctypes.POINTER(ctypes.c_size_t),
+                ctypes.POINTER(ctypes.c_size_t),
+                ctypes.POINTER(ctypes.c_size_t),
+            ]
+            event_transition_record_fn.restype = ctypes.c_int
+        self._run_event_transition_record_program = event_transition_record_fn
         timer_bp_fn = self._lib.evas_rust_next_timer_breakpoint
         timer_bp_fn.argtypes = [
             ctypes.POINTER(ctypes.c_double),
@@ -1820,6 +2377,336 @@ class RustBackend:
             if copied:
                 for idx, value in enumerate(buffer):
                     values[idx] = caster(value)
+
+    def event_transition_core_trace_pulse(
+        self,
+        *,
+        capacity: int,
+        tstop: float,
+        sample_step: float,
+        tstep: float,
+        pulse_meta: Mapping[str, object],
+        edge_threshold: float,
+        edge_direction: int,
+        initial_state_value: float,
+        event_state_value: float,
+        transition_delay: float,
+        transition_rise: float,
+        transition_fall: float,
+        default_transition: float,
+    ) -> tuple[array, array, float, dict[str, int]]:
+        if self._event_transition_core_trace_pulse is None:
+            raise RustBackendError(
+                "Rust event-transition core native trace is not available"
+            )
+        if capacity <= 0:
+            raise RustBackendError("event-transition trace capacity must be positive")
+
+        time_values = array("d", [0.0] * int(capacity))
+        out_values = array("d", [0.0] * int(capacity))
+        time_buffer, _ = self._double_buffer(time_values)
+        out_buffer, _ = self._double_buffer(out_values)
+        out_count = ctypes.c_size_t(0)
+        final_state = ctypes.c_double(0.0)
+        fired_events = ctypes.c_size_t(0)
+        transition_breakpoints = ctypes.c_size_t(0)
+        source_breakpoints = ctypes.c_size_t(0)
+        has_width = bool(pulse_meta.get("has_width", False))
+
+        rc = self._event_transition_core_trace_pulse(
+            time_buffer,
+            out_buffer,
+            int(capacity),
+            ctypes.byref(out_count),
+            float(tstop),
+            float(sample_step),
+            float(tstep),
+            float(pulse_meta.get("v_lo", 0.0) or 0.0),
+            float(pulse_meta.get("v_hi", 0.0) or 0.0),
+            float(pulse_meta.get("period", 0.0) or 0.0),
+            float(pulse_meta.get("duty", 0.5) or 0.5),
+            float(pulse_meta.get("rise", 0.0) or 0.0),
+            float(pulse_meta.get("fall", 0.0) or 0.0),
+            float(pulse_meta.get("delay", 0.0) or 0.0),
+            float(pulse_meta.get("width", 0.0) or 0.0),
+            1 if has_width else 0,
+            float(edge_threshold),
+            int(edge_direction),
+            float(initial_state_value),
+            float(event_state_value),
+            float(transition_delay),
+            float(transition_rise),
+            float(transition_fall),
+            float(default_transition),
+            ctypes.byref(final_state),
+            ctypes.byref(fired_events),
+            ctypes.byref(transition_breakpoints),
+            ctypes.byref(source_breakpoints),
+        )
+        if rc != 0:
+            raise RustBackendError(
+                f"Rust event-transition core native trace failed with code {rc}"
+            )
+        count = int(out_count.value)
+        return (
+            array("d", time_values[:count]),
+            array("d", out_values[:count]),
+            float(final_state.value),
+            {
+                "fired_events": int(fired_events.value),
+                "transition_breakpoints": int(transition_breakpoints.value),
+                "source_breakpoints": int(source_breakpoints.value),
+            },
+        )
+
+    def make_source_record_program(self, program) -> RustSimSourceRecordProgram:
+        return RustSimSourceRecordProgram(program)
+
+    def run_source_record_program(
+        self,
+        program: RustSimSourceRecordProgram,
+        *,
+        capacity: int,
+        tstop: float,
+        tstep: float,
+        max_step: float,
+        record_step: Optional[float],
+    ) -> tuple[array, dict[str, array], array, array, array, dict[str, int]]:
+        use_event_transition_abi = (
+            program.event_count > 0
+            or program.transition_count > 0
+            or len(program.body_ir_batch) > 0
+        )
+        use_linear_abi = (
+            program.continuous_linear_count > 0
+            or program.state_count > 0
+        )
+        if (
+            use_event_transition_abi
+            and self._run_event_transition_record_program is None
+        ):
+            raise RustBackendError(
+                "RustSim event+transition+record program ABI is not available"
+            )
+        if (
+            not use_event_transition_abi
+            and use_linear_abi
+            and self._run_source_linear_record_program is None
+        ):
+            raise RustBackendError(
+                "RustSim source+linear+record program ABI is not available"
+            )
+        if (
+            not use_event_transition_abi
+            and not use_linear_abi
+            and self._run_source_record_program is None
+        ):
+            raise RustBackendError("RustSim source+record program ABI is not available")
+        if capacity <= 0:
+            raise RustBackendError("RustSim source+record capacity must be positive")
+        if program.record_count <= 0:
+            raise RustBackendError("RustSim source+record requires recorded nodes")
+
+        time_values = array("d", [0.0] * int(capacity))
+        signal_values = array("d", [0.0] * int(capacity) * program.record_count)
+        step_values = array("d", [0.0] * int(capacity))
+        node_values = array("d", program.node_initial_values)
+        state_values = array("d", program.state_initial_values)
+        time_buffer, _ = self._double_buffer(time_values)
+        signal_buffer, _ = self._double_buffer(signal_values)
+        step_buffer, _ = self._double_buffer(step_values)
+        node_buffer, copied_nodes = self._double_buffer(node_values)
+        state_buffer, copied_states = self._double_buffer(state_values)
+        out_count = ctypes.c_size_t(0)
+        source_breakpoints = ctypes.c_size_t(0)
+        event_fires = ctypes.c_size_t(0)
+        transition_breakpoints = ctypes.c_size_t(0)
+        use_record_step = record_step is not None
+        side_effect_capacity = max(
+            16,
+            int(program.event_count) * 8 + len(program.side_effects) * 8 + 8,
+        )
+        side_effect_value_capacity = side_effect_capacity * 8
+        SideKindArray = ctypes.c_uint8 * side_effect_capacity
+        SideIndexArray = ctypes.c_size_t * side_effect_capacity
+        SideValueArray = ctypes.c_double * side_effect_value_capacity
+        side_kinds = SideKindArray()
+        side_specs = SideIndexArray()
+        side_arg_starts = SideIndexArray()
+        side_arg_counts = SideIndexArray()
+        side_times = SideValueArray()
+        side_values = SideValueArray()
+        side_effect_count = ctypes.c_size_t(0)
+        side_effect_value_count = ctypes.c_size_t(0)
+
+        if use_event_transition_abi:
+            batch = program.linear_batch
+            body_batch = program.body_ir_batch
+            rc = self._run_event_transition_record_program(
+                program.source_ptr,
+                int(program.source_count),
+                program.source_data_ptr,
+                len(program.source_data),
+                batch.op_ptr,
+                len(batch),
+                batch.term_ptr,
+                len(batch.terms),
+                batch.condition_ptr,
+                len(batch.conditions),
+                body_batch.stmt_ptr,
+                len(body_batch),
+                body_batch.expr_ptr,
+                len(body_batch.expr_ops),
+                program.event_ptr,
+                int(program.event_count),
+                program.transition_ptr,
+                int(program.transition_count),
+                side_kinds,
+                side_specs,
+                side_arg_starts,
+                side_arg_counts,
+                side_times,
+                int(side_effect_capacity),
+                ctypes.byref(side_effect_count),
+                side_values,
+                int(side_effect_value_capacity),
+                ctypes.byref(side_effect_value_count),
+                program.param_ptr,
+                int(program.param_count),
+                node_buffer,
+                int(program.node_count),
+                state_buffer,
+                int(program.state_count),
+                program.record_node_ids_ptr,
+                int(program.record_count),
+                time_buffer,
+                signal_buffer,
+                step_buffer,
+                int(capacity),
+                ctypes.byref(out_count),
+                float(tstop),
+                float(tstep),
+                float(max_step),
+                float(record_step if record_step is not None else 0.0),
+                1 if use_record_step else 0,
+                0.15 * float(tstep),
+                ctypes.byref(source_breakpoints),
+                ctypes.byref(event_fires),
+                ctypes.byref(transition_breakpoints),
+            )
+        elif use_linear_abi:
+            batch = program.linear_batch
+            rc = self._run_source_linear_record_program(
+                program.source_ptr,
+                int(program.source_count),
+                program.source_data_ptr,
+                len(program.source_data),
+                batch.op_ptr,
+                len(batch),
+                batch.term_ptr,
+                len(batch.terms),
+                batch.condition_ptr,
+                len(batch.conditions),
+                node_buffer,
+                int(program.node_count),
+                state_buffer,
+                int(program.state_count),
+                program.record_node_ids_ptr,
+                int(program.record_count),
+                time_buffer,
+                signal_buffer,
+                step_buffer,
+                int(capacity),
+                ctypes.byref(out_count),
+                float(tstop),
+                float(tstep),
+                float(max_step),
+                float(record_step if record_step is not None else 0.0),
+                1 if use_record_step else 0,
+                ctypes.byref(source_breakpoints),
+            )
+        else:
+            rc = self._run_source_record_program(
+                program.source_ptr,
+                int(program.source_count),
+                program.source_data_ptr,
+                len(program.source_data),
+                node_buffer,
+                int(program.node_count),
+                program.record_node_ids_ptr,
+                int(program.record_count),
+                time_buffer,
+                signal_buffer,
+                step_buffer,
+                int(capacity),
+                ctypes.byref(out_count),
+                float(tstop),
+                float(tstep),
+                float(max_step),
+                float(record_step if record_step is not None else 0.0),
+                1 if use_record_step else 0,
+                ctypes.byref(source_breakpoints),
+            )
+        if rc != 0:
+            raise RustBackendError(
+                f"RustSim source+record program failed with code {rc}"
+            )
+        side_event_count = int(side_effect_count.value)
+        if side_event_count > side_effect_capacity:
+            raise RustBackendError(
+                f"RustSim side-effect log produced {side_event_count} events "
+                f"for capacity {side_effect_capacity}"
+            )
+        if side_event_count:
+            side_events: list[tuple[int, int, float, tuple[float, ...]]] = []
+            for idx in range(side_event_count):
+                arg_start = int(side_arg_starts[idx])
+                arg_count = int(side_arg_counts[idx])
+                arg_end = arg_start + arg_count
+                if arg_end > side_effect_value_capacity:
+                    raise RustBackendError("RustSim side-effect value log overflowed")
+                side_events.append(
+                    (
+                        int(side_kinds[idx]),
+                        int(side_specs[idx]),
+                        float(side_times[idx]),
+                        tuple(float(side_values[pos]) for pos in range(arg_start, arg_end)),
+                    )
+                )
+            program.apply_side_effects(side_events)
+        if copied_nodes:
+            for idx, value in enumerate(node_buffer):
+                node_values[idx] = float(value)
+        if copied_states:
+            for idx, value in enumerate(state_buffer):
+                state_values[idx] = float(value)
+        count = int(out_count.value)
+        if count > capacity:
+            raise RustBackendError(
+                f"RustSim source+record produced {count} points for capacity {capacity}"
+            )
+        columns: dict[str, array] = {}
+        for col_idx, name in enumerate(program.record_names):
+            columns[name] = array(
+                "d",
+                (
+                    float(signal_values[row * program.record_count + col_idx])
+                    for row in range(count)
+                ),
+            )
+        return (
+            array("d", time_values[:count]),
+            columns,
+            array("d", step_values[:count]),
+            node_values,
+            state_values,
+            {
+                "source_breakpoints": int(source_breakpoints.value),
+                "event_fires": int(event_fires.value),
+                "transition_breakpoints": int(transition_breakpoints.value),
+                "side_effects": side_event_count,
+            },
+        )
 
     def next_timer_breakpoint(
         self,

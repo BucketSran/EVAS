@@ -1,15 +1,9 @@
 """Unit tests for audit 091d generic-executor body.
 
-091d replaces 091c's no-op inspector with an actual executor: when
-`generic_executor=True` is passed to Simulator.run() along with
-`rust_full_model_fastpath=True`, the dispatcher runs a fixed-grid
-time loop calling model.evaluate() instead of the engine's adaptive
-stepper. This bypasses prepare_step + source/breakpoint/err_ratio
-scans (~25% of cmp_delay wall per profile) at the cost of less
-precise cross-event timing.
-
-091d is intentionally opt-in (default off). 091e would migrate the
-inner loop to Rust ABI for the actual model_evaluate_s reduction.
+091d added a legacy opt-in fixed-grid executor. Current EVAS2 RustSimProgram
+coverage accepts this fixture before the legacy executor, so the activation
+tests assert that production prefers the strict RustSimProgram path instead of
+forcing the older proof-of-concept executor.
 """
 from __future__ import annotations
 
@@ -92,7 +86,7 @@ def _build_sim():
 
 class TestExecutorActivation:
 
-    def test_executor_runs_when_flag_enabled(self):
+    def test_rust_sim_program_supersedes_executor_when_supported(self):
         _build_rust_core_or_skip()
         sim = _build_sim()
         sim.run(
@@ -101,11 +95,12 @@ class TestExecutorActivation:
             generic_executor=True,
         )
         stats = sim._perf_stats
-        # Dispatcher reached the candidate model.
-        assert stats["generic_executor_models_with_candidate"] >= 1
-        # Executor actually ran (not just dispatcher inspector).
-        assert stats["generic_executor_runs"] == 1
-        # No runtime fallback (clean execution).
+        assert stats["rust_sim_program_enabled"] == 1
+        assert stats["rust_sim_program_event_transition_enabled"] == 1
+        # The legacy executor is below RustSimProgram and should not steal a
+        # design that the strict Rust path can already own.
+        assert stats["generic_executor_models_with_candidate"] == 0
+        assert stats["generic_executor_runs"] == 0
         assert stats["generic_executor_runtime_fallbacks"] == 0
 
     def test_executor_does_not_run_without_flag(self):
@@ -117,9 +112,9 @@ class TestExecutorActivation:
             # generic_executor=False default
         )
         stats = sim._perf_stats
-        # Inspector still records candidate presence
-        assert stats["generic_executor_models_with_candidate"] >= 1
-        # But executor did NOT run.
+        assert stats["rust_sim_program_enabled"] == 1
+        assert stats["rust_sim_program_event_transition_enabled"] == 1
+        assert stats["generic_executor_models_with_candidate"] == 0
         assert stats["generic_executor_runs"] == 0
 
 

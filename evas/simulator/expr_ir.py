@@ -44,6 +44,7 @@ from evas.simulator.rust_backend import (
     BODY_EXPR_ABS,
     BODY_EXPR_ADD,
     BODY_EXPR_BITAND,
+    BODY_EXPR_BITNOT,
     BODY_EXPR_BITOR,
     BODY_EXPR_BITXOR,
     BODY_EXPR_CEIL,
@@ -69,13 +70,19 @@ from evas.simulator.rust_backend import (
     BODY_EXPR_NEG,
     BODY_EXPR_NOT,
     BODY_EXPR_POW,
+    BODY_EXPR_RDIST_NORMAL,
     BODY_EXPR_READ_NODE,
     BODY_EXPR_READ_PARAM,
     BODY_EXPR_READ_STATE,
+    BODY_EXPR_READ_TIME,
     BODY_EXPR_SELECT,
+    BODY_EXPR_SHL,
+    BODY_EXPR_SHR,
     BODY_EXPR_SIN,
     BODY_EXPR_SQRT,
     BODY_EXPR_SUB,
+    BODY_EXPR_TAN,
+    BODY_EXPR_TANH,
     BodyExprOp,
 )
 
@@ -154,11 +161,14 @@ _BODY_BINARY_OPS = {
     "&": BODY_EXPR_BITAND,
     "|": BODY_EXPR_BITOR,
     "^": BODY_EXPR_BITXOR,
+    "<<": BODY_EXPR_SHL,
+    ">>": BODY_EXPR_SHR,
 }
 
 _BODY_UNARY_OPS = {
     "-": BODY_EXPR_NEG,
     "!": BODY_EXPR_NOT,
+    "~": BODY_EXPR_BITNOT,
 }
 
 _BODY_FUNCTION_OPS = {
@@ -169,11 +179,14 @@ _BODY_FUNCTION_OPS = {
     "log": (BODY_EXPR_LOG10, 1),
     "sin": (BODY_EXPR_SIN, 1),
     "cos": (BODY_EXPR_COS, 1),
+    "tan": (BODY_EXPR_TAN, 1),
+    "tanh": (BODY_EXPR_TANH, 1),
     "floor": (BODY_EXPR_FLOOR, 1),
     "ceil": (BODY_EXPR_CEIL, 1),
     "min": (BODY_EXPR_MIN, 2),
     "max": (BODY_EXPR_MAX, 2),
     "pow": (BODY_EXPR_POW, 2),
+    "$rdist_normal": (BODY_EXPR_RDIST_NORMAL, 3),
 }
 
 
@@ -567,34 +580,111 @@ def build_state_binding_ir(module: object) -> BindingTableIR:
     for slot, name in enumerate(getattr(module, "ports", ()) or ()):
         bindings.append(StateBindingIR(name=str(name), kind=SYMBOL_PORT, slot=slot))
 
+    variables = tuple(getattr(module, "variables", ()) or ())
     scalar_slot = 0
-    array_slot = 0
-    for variable in getattr(module, "variables", ()) or ():
+    for variable in variables:
         integer = getattr(variable, "var_type", None) == ParamType.INTEGER
         if getattr(variable, "is_array", False):
+            continue
+        bindings.append(
+            StateBindingIR(
+                name=str(variable.name),
+                kind=SYMBOL_STATE_SCALAR,
+                slot=scalar_slot,
+                integer=integer,
+            )
+        )
+        scalar_slot += 1
+
+    array_slot = 0
+    for variable in variables:
+        integer = getattr(variable, "var_type", None) == ParamType.INTEGER
+        if getattr(variable, "is_array", False):
+            raw_lo = getattr(variable, "array_lo", None)
+            raw_hi = getattr(variable, "array_hi", None)
+            lo = int(raw_lo if raw_lo is not None else 0)
+            hi = int(raw_hi if raw_hi is not None else 0)
+            lo_i = min(lo, hi)
+            hi_i = max(lo, hi)
             bindings.append(
                 StateBindingIR(
                     name=str(variable.name),
                     kind=SYMBOL_STATE_ARRAY,
                     slot=array_slot,
                     integer=integer,
-                    lo=getattr(variable, "array_lo", None),
-                    hi=getattr(variable, "array_hi", None),
+                    lo=lo_i,
+                    hi=hi_i,
                 )
             )
+            for idx in range(lo_i, hi_i + 1):
+                bindings.append(
+                    StateBindingIR(
+                        name=_state_array_slot_name(str(variable.name), idx),
+                        kind=SYMBOL_STATE_SCALAR,
+                        slot=scalar_slot,
+                        integer=integer,
+                        lo=idx,
+                        hi=idx,
+                    )
+                )
+                scalar_slot += 1
             array_slot += 1
-        else:
-            bindings.append(
-                StateBindingIR(
-                    name=str(variable.name),
-                    kind=SYMBOL_STATE_SCALAR,
-                    slot=scalar_slot,
-                    integer=integer,
-                )
-            )
-            scalar_slot += 1
 
     return BindingTableIR(tuple(bindings))
+
+
+def resolve_static_array_element_binding(
+    expr_ir: ArrayAccessIR,
+    bindings: BindingTableIR,
+) -> Optional[StateBindingIR]:
+    """Resolve ``arr[constant]`` to the flattened scalar state slot binding."""
+
+    array_binding = bindings.resolve(expr_ir.name)
+    if array_binding is None or array_binding.kind != SYMBOL_STATE_ARRAY:
+        return None
+    idx = _static_integer_expr_value(expr_ir.index)
+    if idx is None:
+        return None
+    if array_binding.lo is not None and idx < int(array_binding.lo):
+        return None
+    if array_binding.hi is not None and idx > int(array_binding.hi):
+        return None
+    binding = bindings.resolve(_state_array_slot_name(expr_ir.name, idx))
+    if binding is None or binding.kind != SYMBOL_STATE_SCALAR:
+        return None
+    return binding
+
+
+def static_array_element_name(
+    expr_ir: ArrayAccessIR,
+    bindings: BindingTableIR,
+) -> Optional[str]:
+    binding = resolve_static_array_element_binding(expr_ir, bindings)
+    return binding.name if binding is not None else None
+
+
+def static_node_ref_name(
+    name: str,
+    index1: Optional[ExprIR] = None,
+    index2: Optional[ExprIR] = None,
+) -> Optional[str]:
+    """Return a compile-time node name for ``node[i]`` / ``node[i][j]``.
+
+    Dynamic index expressions return ``None`` so production Rust lowerings can
+    keep falling back instead of guessing a runtime node-id mapping.
+    """
+
+    if index1 is None:
+        return str(name)
+    idx1 = _static_integer_expr_value(index1)
+    if idx1 is None:
+        return None
+    if index2 is None:
+        return f"{name}[{idx1}]"
+    idx2 = _static_integer_expr_value(index2)
+    if idx2 is None:
+        return None
+    return f"{name}[{idx1}][{idx2}]"
 
 
 def iter_identifier_names(expr_ir: ExprIR) -> Iterator[str]:
@@ -678,6 +768,9 @@ def _append_body_expr_ops(
         return True
 
     if isinstance(expr_ir, IdentifierIR):
+        if expr_ir.name in {"$abstime", "$realtime"}:
+            ops.append(BodyExprOp(BODY_EXPR_READ_TIME))
+            return True
         if expr_ir.name == "inf":
             ops.append(BodyExprOp(BODY_EXPR_CONST, value=float("inf")))
             return True
@@ -694,6 +787,13 @@ def _append_body_expr_ops(
             ops.append(BodyExprOp(BODY_EXPR_READ_NODE, index=node_slots[expr_ir.name]))
             return True
         return False
+
+    if isinstance(expr_ir, ArrayAccessIR):
+        binding = resolve_static_array_element_binding(expr_ir, bindings)
+        if binding is None:
+            return False
+        ops.append(BodyExprOp(BODY_EXPR_READ_STATE, index=binding.slot))
+        return True
 
     if isinstance(expr_ir, BranchAccessIR):
         return _append_branch_body_expr_ops(expr_ir, bindings, node_slots, ops)
@@ -746,6 +846,94 @@ def _append_body_expr_ops(
     return False
 
 
+def _state_array_slot_name(name: str, idx: int) -> str:
+    return f"{name}[{int(idx)}]"
+
+
+def _static_integer_expr_value(expr_ir: ExprIR) -> Optional[int]:
+    numeric = _static_numeric_expr_value(expr_ir)
+    if numeric is None:
+        return None
+    idx = int(numeric)
+    if numeric != float(idx):
+        return None
+    return idx
+
+
+def _static_numeric_expr_value(expr_ir: ExprIR) -> Optional[float]:
+    if isinstance(expr_ir, LiteralIR):
+        value = expr_ir.value
+        if not isinstance(value, (int, float)):
+            return None
+        return float(value)
+    if isinstance(expr_ir, UnaryExprIR):
+        value = _static_numeric_expr_value(expr_ir.operand)
+        if value is None:
+            return None
+        if expr_ir.op == "+":
+            return value
+        if expr_ir.op == "-":
+            return -value
+        if expr_ir.op == "!":
+            return 0.0 if value else 1.0
+        if expr_ir.op == "~":
+            return float(~int(value))
+        return None
+    if isinstance(expr_ir, BinaryExprIR):
+        left = _static_numeric_expr_value(expr_ir.left)
+        right = _static_numeric_expr_value(expr_ir.right)
+        if left is None or right is None:
+            return None
+        try:
+            if expr_ir.op == "+":
+                return left + right
+            if expr_ir.op == "-":
+                return left - right
+            if expr_ir.op == "*":
+                return left * right
+            if expr_ir.op == "/":
+                return None if right == 0.0 else left / right
+            if expr_ir.op == "%":
+                return None if right == 0.0 else float(int(left) % int(right))
+            if expr_ir.op == "<<":
+                return float(int(left) << int(right))
+            if expr_ir.op == ">>":
+                return float(int(left) >> int(right))
+            if expr_ir.op == "&":
+                return float(int(left) & int(right))
+            if expr_ir.op == "|":
+                return float(int(left) | int(right))
+            if expr_ir.op == "^":
+                return float(int(left) ^ int(right))
+            if expr_ir.op == ">":
+                return 1.0 if left > right else 0.0
+            if expr_ir.op == "<":
+                return 1.0 if left < right else 0.0
+            if expr_ir.op == ">=":
+                return 1.0 if left >= right else 0.0
+            if expr_ir.op == "<=":
+                return 1.0 if left <= right else 0.0
+            if expr_ir.op == "==":
+                return 1.0 if left == right else 0.0
+            if expr_ir.op == "!=":
+                return 1.0 if left != right else 0.0
+            if expr_ir.op == "&&":
+                return 1.0 if left and right else 0.0
+            if expr_ir.op == "||":
+                return 1.0 if left or right else 0.0
+        except (OverflowError, ValueError):
+            return None
+        return None
+    if isinstance(expr_ir, TernaryExprIR):
+        cond = _static_numeric_expr_value(expr_ir.cond)
+        if cond is None:
+            return None
+        return _static_numeric_expr_value(
+            expr_ir.true_expr if cond else expr_ir.false_expr
+        )
+    return None
+
+
 def _append_branch_body_expr_ops(
     expr_ir: BranchAccessIR,
     bindings: BindingTableIR,
@@ -754,23 +942,27 @@ def _append_branch_body_expr_ops(
 ) -> bool:
     if expr_ir.access_type != "V":
         return False
-    if any(
-        child is not None
-        for child in (
-            expr_ir.node1_index,
-            expr_ir.node1_index2,
-            expr_ir.node2_index,
-            expr_ir.node2_index2,
-        )
-    ):
+    node1_name = static_node_ref_name(
+        expr_ir.node1,
+        expr_ir.node1_index,
+        expr_ir.node1_index2,
+    )
+    if node1_name is None:
         return False
-    node1_slot = node_slots.get(expr_ir.node1)
+    node1_slot = node_slots.get(node1_name)
     if node1_slot is None:
         return False
     ops.append(BodyExprOp(BODY_EXPR_READ_NODE, index=node1_slot))
     if expr_ir.node2 is None:
         return True
-    node2_slot = node_slots.get(expr_ir.node2)
+    node2_name = static_node_ref_name(
+        expr_ir.node2,
+        expr_ir.node2_index,
+        expr_ir.node2_index2,
+    )
+    if node2_name is None:
+        return False
+    node2_slot = node_slots.get(node2_name)
     if node2_slot is None:
         return False
     ops.append(BodyExprOp(BODY_EXPR_READ_NODE, index=node2_slot))

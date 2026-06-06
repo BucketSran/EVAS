@@ -30,6 +30,11 @@ from evas.simulator.engine import (
 from evas.simulator.backend import CompiledModel
 from evas.simulator.backend import CompilationError
 from evas.simulator.backend import compile_module
+from evas.simulator.rust_coverage import (
+    audit_veriloga_paths,
+    estimate_event_transition_plan_profiles,
+    estimate_event_transition_profiles,
+)
 from evas.compiler.parser import parse
 
 
@@ -504,6 +509,478 @@ class TestSimulator:
         assert result.signals["vdd"].min() == pytest.approx(1.8)
         assert result.signals["vdd"].max() == pytest.approx(1.8)
 
+    def test_rust_sim_program_dc_source_record_matches_default(self):
+        _build_rust_core_or_skip()
+
+        def run_model(use_rust: bool):
+            sim = Simulator()
+            sim.add_source("vdd", dc(1.8))
+            sim.record("vdd")
+            result = sim.run(
+                tstop=5e-9,
+                tstep=1e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            return result, sim
+
+        default_result, _default_sim = run_model(False)
+        rust_result, rust_sim = run_model(True)
+
+        assert rust_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert rust_result.signals["vdd"].tolist() == pytest.approx(
+            default_result.signals["vdd"].tolist()
+        )
+        assert rust_sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust_sim._perf_stats["rust_sim_program_source_record_enabled"] == 1
+        assert rust_sim._perf_stats["rust_full_model_fastpath_enabled"] == 1
+
+    def test_rust_sim_program_pulse_breakpoints_match_default(self):
+        _build_rust_core_or_skip()
+
+        def run_model(use_rust: bool):
+            sim = Simulator()
+            sim.add_source(
+                "clk",
+                pulse(
+                    0.0,
+                    1.0,
+                    period=4e-9,
+                    rise=1e-9,
+                    fall=1e-9,
+                    width=1e-9,
+                ),
+            )
+            sim.record("clk")
+            result = sim.run(
+                tstop=5e-9,
+                tstep=2e-9,
+                record_step=2e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            return result, sim
+
+        default_result, _default_sim = run_model(False)
+        rust_result, rust_sim = run_model(True)
+
+        assert rust_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert rust_result.signals["clk"].tolist() == pytest.approx(
+            default_result.signals["clk"].tolist()
+        )
+        assert rust_sim._perf_stats["rust_sim_program_source_breakpoints"] > 0
+        assert rust_sim._perf_stats["rust_sim_program_source_record_enabled"] == 1
+
+    def test_rust_sim_program_pwl_source_record_matches_default(self):
+        _build_rust_core_or_skip()
+
+        def run_model(use_rust: bool):
+            sim = Simulator()
+            sim.add_source(
+                "vin",
+                pwl(
+                    [0.0, 1e-9, 3e-9, 4e-9],
+                    [0.0, 0.5, 1.5, 0.25],
+                ),
+            )
+            sim.record("vin")
+            result = sim.run(
+                tstop=4e-9,
+                tstep=2e-9,
+                record_step=2e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            return result, sim
+
+        default_result, _default_sim = run_model(False)
+        rust_result, rust_sim = run_model(True)
+
+        assert rust_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert rust_result.signals["vin"].tolist() == pytest.approx(
+            default_result.signals["vin"].tolist()
+        )
+        assert rust_sim._perf_stats["rust_sim_program_source_breakpoints"] > 0
+        assert rust_sim._perf_stats["rust_sim_program_source_record_enabled"] == 1
+
+    def test_rust_sim_program_continuous_linear_model_matches_default(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rustsim_gain(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    parameter real gain = 2.0;
+    analog begin
+        V(vout) <+ gain * V(vin) + 0.1;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def run_model(use_rust: bool):
+            model = ModelCls()
+            model.node_map = {"vin": "VIN", "vout": "VOUT"}
+            sim = Simulator()
+            sim.add_source("VIN", dc(0.4))
+            sim.add_model(model)
+            sim.record("VOUT")
+            result = sim.run(
+                tstop=2e-9,
+                tstep=1e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            return result, sim
+
+        default_result, _default_sim = run_model(False)
+        rust_result, rust_sim = run_model(True)
+
+        assert rust_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert rust_result.signals["VOUT"].tolist() == pytest.approx(
+            default_result.signals["VOUT"].tolist()
+        )
+        assert rust_sim._perf_stats["rust_sim_program_continuous_linear_ops"] == 1
+        assert rust_sim._perf_stats["rust_sim_program_source_record_enabled"] == 1
+
+    def test_rust_sim_program_continuous_state_write_matches_default(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rustsim_stateassign(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    real acc = 0.0;
+    analog begin
+        acc = V(vin) + 0.1;
+        V(vout) <+ acc;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def run_model(use_rust: bool):
+            model = ModelCls()
+            model.node_map = {"vin": "VIN", "vout": "VOUT"}
+            sim = Simulator()
+            sim.add_source("VIN", dc(0.25))
+            sim.add_model(model)
+            sim.record("VOUT")
+            result = sim.run(
+                tstop=2e-9,
+                tstep=1e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            return result, sim, model
+
+        default_result, _default_sim, default_model = run_model(False)
+        rust_result, rust_sim, rust_model = run_model(True)
+
+        assert rust_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert rust_result.signals["VOUT"].tolist() == pytest.approx(
+            default_result.signals["VOUT"].tolist()
+        )
+        assert rust_model.state["acc"] == pytest.approx(default_model.state["acc"])
+        assert rust_sim._perf_stats["rust_sim_program_state_count"] == 1
+        assert rust_sim._perf_stats["rust_sim_program_continuous_linear_ops"] == 2
+        assert rust_sim._perf_stats["rust_sim_program_source_record_enabled"] == 1
+
+    def test_rust_sim_program_body_differential_contribution_matches_default(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rustsim_diff_contrib(ref, out);
+    input voltage ref;
+    output voltage out;
+    integer ready = 0;
+    analog begin
+        @(initial_step) ready = 1;
+        V(out, ref) <+ 0.25;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def run_model(use_rust: bool):
+            model = ModelCls()
+            model.node_map = {"ref": "REF", "out": "OUT"}
+            sim = Simulator()
+            sim.add_source("REF", dc(0.5))
+            sim.add_model(model)
+            sim.record("OUT")
+            result = sim.run(
+                tstop=2e-9,
+                tstep=1e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            return result, sim, model
+
+        default_result, _default_sim, default_model = run_model(False)
+        rust_result, rust_sim, rust_model = run_model(True)
+
+        assert rust_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert rust_result.signals["OUT"].tolist() == pytest.approx(
+            default_result.signals["OUT"].tolist()
+        )
+        assert rust_result.signals["OUT"][-1] == pytest.approx(0.75)
+        assert rust_model.state["ready"] == pytest.approx(default_model.state["ready"])
+        assert rust_sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust_sim._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert rust_sim._perf_stats["rust_sim_program_always_body_count"] == 1
+
+    def test_rust_sim_program_event_body_case_matches_default(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rustsim_case_body(out);
+    output voltage out;
+    integer code = 0;
+    real y = 0.0;
+    analog begin
+        @(initial_step) begin
+            code = 2;
+            case (code)
+                0: y = 0.1;
+                1, 2: y = 0.8;
+                default: y = 0.2;
+            endcase
+        end
+        V(out) <+ y;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def run_model(use_rust: bool):
+            model = ModelCls()
+            sim = Simulator()
+            sim.add_model(model)
+            sim.record("out")
+            result = sim.run(
+                tstop=2e-9,
+                tstep=1e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            return result, sim, model
+
+        default_result, _default_sim, default_model = run_model(False)
+        rust_result, rust_sim, rust_model = run_model(True)
+
+        assert rust_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert rust_result.signals["out"].tolist() == pytest.approx(
+            default_result.signals["out"].tolist()
+        )
+        assert rust_result.signals["out"][-1] == pytest.approx(0.8)
+        assert rust_model.state["code"] == pytest.approx(default_model.state["code"])
+        assert rust_model.state["y"] == pytest.approx(default_model.state["y"])
+        assert rust_sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust_sim._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+
+    def test_rust_sim_program_final_step_updates_state_after_trace(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rustsim_final_step(out);
+    output voltage out;
+    integer flag = 0;
+    analog begin
+        @(initial_step) flag = 1;
+        @(final_step) flag = 7;
+        V(out) <+ flag;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def run_model(use_rust: bool):
+            model = ModelCls()
+            sim = Simulator()
+            sim.add_model(model)
+            sim.record("out")
+            result = sim.run(
+                tstop=2e-9,
+                tstep=1e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            return result, sim, model
+
+        default_result, _default_sim, default_model = run_model(False)
+        rust_result, rust_sim, rust_model = run_model(True)
+
+        assert rust_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert rust_result.signals["out"].tolist() == pytest.approx(
+            default_result.signals["out"].tolist()
+        )
+        assert rust_result.signals["out"][-1] == pytest.approx(1.0)
+        assert default_model.state["flag"] == 7
+        assert rust_model.state["flag"] == 7
+        assert rust_sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust_sim._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert rust_sim._perf_stats["rust_sim_program_event_fires"] >= 2
+
+    def test_rust_sim_program_body_tan_tanh_matches_default(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rustsim_tan_tanh(vin, out);
+    input voltage vin;
+    output voltage out;
+    integer ready = 0;
+    analog begin
+        @(initial_step) ready = 1;
+        V(out) <+ tan(V(vin) - 0.5) + tanh(V(vin));
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def run_model(use_rust: bool):
+            model = ModelCls()
+            model.node_map = {"vin": "VIN", "out": "OUT"}
+            sim = Simulator()
+            sim.add_source("VIN", dc(0.25))
+            sim.add_model(model)
+            sim.record("OUT")
+            result = sim.run(
+                tstop=2e-9,
+                tstep=1e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            return result, sim
+
+        default_result, _default_sim = run_model(False)
+        rust_result, rust_sim = run_model(True)
+
+        assert rust_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert rust_result.signals["OUT"].tolist() == pytest.approx(
+            default_result.signals["OUT"].tolist()
+        )
+        assert rust_result.signals["OUT"][-1] == pytest.approx(
+            math.tan(-0.25) + math.tanh(0.25)
+        )
+        assert rust_sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust_sim._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+
+    def test_rust_sim_program_pure_continuous_nonlinear_body_matches_default(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rustsim_multitone_body(out);
+    output voltage out;
+    parameter real a1 = 0.2;
+    parameter real a2 = 0.05;
+    parameter real f1 = 1.0e9;
+    parameter real f2 = 2.0e9;
+    analog begin
+        V(out) <+ a1 * sin(6.283185307179586 * f1 * $abstime)
+                + a2 * sin(6.283185307179586 * f2 * $abstime);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def run_model(use_rust: bool):
+            model = ModelCls()
+            model.node_map = {"out": "OUT"}
+            sim = Simulator()
+            sim.add_model(model)
+            sim.record("OUT")
+            result = sim.run(
+                tstop=2e-9,
+                tstep=0.25e-9,
+                record_step=0.25e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            return result, sim
+
+        default_result, _default_sim = run_model(False)
+        rust_result, rust_sim = run_model(True)
+
+        expected_times = [idx * 0.25e-9 for idx in range(9)]
+        assert rust_result.time.tolist() == pytest.approx(expected_times)
+        for time_value, signal_value in zip(
+            rust_result.time.tolist(),
+            rust_result.signals["OUT"].tolist(),
+        ):
+            expected = 0.2 * math.sin(6.283185307179586 * 1.0e9 * time_value)
+            expected += 0.05 * math.sin(6.283185307179586 * 2.0e9 * time_value)
+            assert signal_value == pytest.approx(expected, abs=1e-12)
+        for time_value, signal_value in zip(
+            default_result.time.tolist(),
+            default_result.signals["OUT"].tolist(),
+        ):
+            expected = 0.2 * math.sin(6.283185307179586 * 1.0e9 * time_value)
+            expected += 0.05 * math.sin(6.283185307179586 * 2.0e9 * time_value)
+            assert signal_value == pytest.approx(expected, abs=1e-12)
+        assert rust_sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust_sim._perf_stats["rust_sim_program_always_body_count"] == 1
+        assert rust_sim._perf_stats["rust_sim_program_continuous_linear_ops"] == 0
+
+    def test_rust_sim_program_rdist_normal_noise_behavior(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rustsim_noise_body(vin, out);
+    input voltage vin;
+    output voltage out;
+    parameter real sigma = 0.1;
+    analog begin
+        V(out) <+ V(vin) + sigma * $rdist_normal(0, 0, 1);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        model.node_map = {"vin": "VIN", "out": "OUT"}
+        sim = Simulator()
+        sim.add_source("VIN", dc(1.0))
+        sim.add_model(model)
+        sim.record("VIN")
+        sim.record("OUT")
+        result = sim.run(
+            tstop=100e-9,
+            tstep=1e-9,
+            record_step=1e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        noises = result.signals["OUT"] - result.signals["VIN"]
+        mean = sum(noises.tolist()) / len(noises)
+        var = sum((float(value) - mean) ** 2 for value in noises.tolist()) / len(noises)
+        assert var**0.5 > 0.01
+        assert max(abs(float(value)) for value in noises.tolist()) > 0.05
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert sim._perf_stats["rust_sim_program_always_body_count"] == 1
+
     def test_time_array_starts_at_zero(self):
         sim = Simulator()
         sim.add_source("v", dc(0.0))
@@ -598,6 +1075,23 @@ class TestSimulator:
         assert default_stats["err_ratio_skipped_sources"] == 0
         assert fast._perf_stats["dynamic_step_shrinks"] == 0
         assert fast._perf_stats["err_ratio_skipped_sources"] > 0
+
+    def test_rust_full_model_required_rejects_python_fallback(self):
+        sim = Simulator()
+        sim.add_source("vin", ramp(0.0, 1.0, 0.0, 1e-9))
+        sim.record("vin")
+
+        with pytest.raises(RuntimeError, match="EVAS2.0 Rust full-model path"):
+            sim.run(
+                tstop=1e-9,
+                tstep=1e-9,
+                rust_full_model_fastpath=True,
+                rust_full_model_required=True,
+            )
+
+        assert sim._perf_stats["rust_full_model_required_failures"] == 1
+        assert sim._perf_stats["rust_full_model_fastpath_enabled"] == 0
+        assert sim._perf_stats["rust_sim_program_rejections"] == 1
 
     def test_indexed_snapshot_profile_records_sidecar_timing_without_changing_result(self):
         sim = Simulator()
@@ -835,6 +1329,1181 @@ endmodule
         assert indexed_sim._perf_stats["indexed_state_scalar_writes_total"] > 0
         assert indexed_sim._perf_stats["indexed_state_array_writes_total"] > 0
         assert indexed_sim._perf_stats["indexed_state_array_oob_writes_total"] == 0
+
+    def test_compiler_emits_094_body_ir_metadata_for_general_body(self):
+        src = """\
+`include "disciplines.vams"
+module body_ir_gain(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    parameter real gain = 2.0;
+    real acc = 0.0;
+    integer code = 0;
+    analog begin
+        acc = gain * V(vin);
+        if (acc > 0.5) code = 1; else code = 0;
+        V(vout) <+ code ? acc : 0.0;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        assert ModelCls._rust_body_ir_rejection_reason == "ok"
+        assert len(ModelCls._rust_body_ir_stmt_ops) == 7
+        assert len(ModelCls._rust_body_ir_expr_ops) > 0
+        assert ModelCls._rust_body_ir_node_names == ("vin", "vout")
+        assert ModelCls._rust_body_ir_param_names == ("gain",)
+        assert ModelCls._rust_body_ir_state_names == ("acc", "code")
+        assert ModelCls._rust_body_ir_target_node_slots == (1,)
+        assert ModelCls._rust_body_ir_target_state_slots == (0, 1)
+
+    def test_current_rust_coverage_audit_reports_body_ir_candidates(self, tmp_path):
+        body_path = tmp_path / "body.va"
+        body_path.write_text(
+            """\
+`include "disciplines.vams"
+module body_ir_gain(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    parameter real gain = 2.0;
+    real acc = 0.0;
+    analog begin
+        acc = acc + gain * V(vin);
+        V(vout) <+ acc;
+    end
+endmodule
+"""
+        )
+        event_path = tmp_path / "event.va"
+        event_path.write_text(
+            """\
+`include "disciplines.vams"
+module event_only(clk, out);
+    input voltage clk;
+    output voltage out;
+    real state = 0.0;
+    analog begin
+        @(cross(V(clk)-0.5, +1)) state = 1.0;
+        V(out) <+ state;
+    end
+endmodule
+"""
+        )
+        event_transition_path = tmp_path / "event_transition.va"
+        event_transition_path.write_text(
+            """\
+`include "disciplines.vams"
+module event_transition(clk, out);
+    input voltage clk;
+    output voltage out;
+    real state = 0.0;
+    analog begin
+        @(initial_step) state = 0.0;
+        @(cross(V(clk)-0.5, +1)) state = 1.0;
+        V(out) <+ transition(state, 0.0, 1n, 1n);
+    end
+endmodule
+"""
+        )
+
+        summary = audit_veriloga_paths((body_path, event_path, event_transition_path))
+
+        assert summary.total_files == 3
+        assert summary.compile_ok == 3
+        assert summary.rust_body_ir_candidates == 1
+        reasons = {
+            row.path: row.rust_body_ir_rejection_reason
+            for row in summary.rows
+        }
+        tags = {
+            row.path: set(row.rust_body_ir_rejection_tags)
+            for row in summary.rows
+        }
+        assert reasons[str(body_path)] == "ok"
+        assert reasons[str(event_path)] in {"event_cross", "event_statement"}
+        assert {"event_cross", "event_statement"} <= tags[str(event_path)]
+
+        estimates = estimate_event_transition_profiles(summary.rows)
+        assert estimates["event_transition_core"]["candidate_count"] == 2
+        assert str(event_path) in set(
+            estimates["event_transition_core"]["candidate_paths"]
+        )
+        assert str(event_transition_path) in set(
+            estimates["event_transition_core"]["candidate_paths"]
+        )
+        plan_estimates = estimate_event_transition_plan_profiles(summary.rows)
+        assert plan_estimates["event_transition_core"]["candidate_count"] == 2
+        assert str(event_path) in set(
+            plan_estimates["event_transition_core"]["candidate_paths"]
+        )
+        assert str(event_transition_path) in set(
+            plan_estimates["event_transition_core"]["candidate_paths"]
+        )
+        event_transition_cls = compile_module(parse(event_transition_path.read_text()))
+        assert "event_transition_core" in (
+            event_transition_cls._event_transition_plan_profiles
+        )
+        assert event_transition_cls._event_transition_plan_event_count == 2
+        assert event_transition_cls._event_transition_plan_transition_count == 1
+
+    def test_engine_reports_event_transition_plan_metadata(self):
+        src = """\
+`include "disciplines.vams"
+module event_transition(clk, out);
+    input voltage clk;
+    output voltage out;
+    real state = 0.0;
+    analog begin
+        @(initial_step) state = 0.0;
+        @(cross(V(clk)-0.5, +1)) state = 1.0;
+        V(out) <+ transition(state, 0.0, 1n, 1n);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        model.node_map = {"clk": "CLK", "out": "OUT"}
+        sim = Simulator()
+        sim.add_source("CLK", dc(0.0))
+        sim.add_model(model)
+        sim.record("OUT")
+        sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert sim._perf_stats["rust_event_transition_plan_core_candidate_models"] == 1
+        assert sim._perf_stats["rust_event_transition_plan_core_event_statements"] == 2
+        assert sim._perf_stats["rust_event_transition_plan_core_due_triggers"] == 2
+        assert sim._perf_stats["rust_event_transition_plan_core_transitions"] == 1
+        assert sim._perf_stats["rust_event_transition_plan_ordered_v1_candidate_models"] == 1
+        assert sim._perf_stats["rust_event_transition_plan_side_effect_candidate_models"] == 1
+
+    def test_rust_event_transition_shadow_executes_and_matches_python(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module event_transition(clk, out);
+    input voltage clk;
+    output voltage out;
+    real state = 0.0;
+    analog begin
+        @(initial_step) state = 0.0;
+        @(cross(V(clk)-0.5, +1)) state = 1.0;
+        V(out) <+ transition(state, 0.0, 1n, 1n);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        model.node_map = {"clk": "CLK", "out": "OUT"}
+        sim = Simulator()
+        sim.add_source("CLK", pulse(0.0, 1.0, period=2e-9, width=1e-9))
+        sim.add_model(model)
+        sim.record("OUT")
+        sim.run(
+            tstop=3e-9,
+            tstep=1e-9,
+            rust_event_transition_shadow=True,
+            rust_required=True,
+        )
+
+        assert sim._perf_stats["rust_event_transition_shadow_available"] == 1
+        assert sim._perf_stats["rust_event_transition_shadow_enabled"] == 1
+        assert sim._perf_stats["rust_event_transition_shadow_models"] == 1
+        assert sim._perf_stats["rust_event_transition_shadow_calls_total"] > 0
+        assert sim._perf_stats["rust_event_transition_shadow_matches_total"] > 0
+        assert sim._perf_stats["rust_event_transition_shadow_mismatches_total"] == 0
+        assert sim._perf_stats["rust_event_transition_shadow_errors_total"] == 0
+
+    def test_rust_event_transition_production_matches_default_waveform(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module event_transition_prod(clk, out);
+    input voltage clk;
+    output voltage out;
+    real state = 0.0;
+    analog begin
+        @(initial_step) state = 0.0;
+        @(cross(V(clk)-0.5, +1)) state = 1.0;
+        V(out) <+ transition(state, 0.0, 1n, 1n);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            model.node_map = {"clk": "CLK", "out": "OUT"}
+            sim = Simulator()
+            sim.add_source("CLK", pulse(0.0, 1.0, period=2e-9, width=1e-9))
+            sim.add_model(model)
+            sim.record("OUT")
+            return sim, model
+
+        ref, ref_model = build_sim()
+        ref_result = ref.run(tstop=3e-9, tstep=1e-9, record_step=250e-12)
+
+        rust, rust_model = build_sim()
+        rust_result = rust.run(
+            tstop=3e-9,
+            tstep=1e-9,
+            record_step=250e-12,
+            rust_event_transition_production=True,
+            rust_required=True,
+        )
+
+        assert list(rust_result.time) == pytest.approx(list(ref_result.time))
+        assert list(rust_result.signals["OUT"]) == pytest.approx(
+            list(ref_result.signals["OUT"])
+        )
+        assert rust_model.state["state"] == pytest.approx(ref_model.state["state"])
+        assert rust._perf_stats["rust_event_transition_production_requested"] == 1
+        assert rust._perf_stats["rust_event_transition_production_available"] == 1
+        assert rust._perf_stats["rust_event_transition_production_enabled"] == 1
+        assert rust._perf_stats["rust_event_transition_production_models"] == 1
+        assert rust._perf_stats["rust_event_transition_production_calls_total"] > 0
+        assert rust._perf_stats["rust_event_transition_production_executed_total"] > 0
+        assert rust._perf_stats["rust_event_transition_production_fallbacks_total"] == 0
+        assert rust._perf_stats["rust_event_transition_production_state_writes_total"] > 0
+        assert rust._perf_stats["rust_event_transition_production_output_writes_total"] > 0
+        assert rust._perf_stats["rust_event_transition_production_fired_events_total"] > 0
+        assert ref._perf_stats["rust_event_transition_production_requested"] == 0
+
+    def test_rust_sim_program_event_transition_strict_full_model_matches_default(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module event_transition_evas2(clk, out);
+    input voltage clk;
+    output voltage out;
+    real state = 0.0;
+    analog begin
+        @(initial_step) state = 0.0;
+        @(cross(V(clk)-0.5, +1)) state = 1.0;
+        V(out) <+ transition(state, 0.0, 1n, 1n);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            model.node_map = {"clk": "CLK", "out": "OUT"}
+            sim = Simulator()
+            sim.add_source("CLK", pulse(0.0, 1.0, period=2e-9, width=1e-9))
+            sim.add_model(model)
+            sim.record("OUT")
+            return sim, model
+
+        ref, ref_model = build_sim()
+        ref_result = ref.run(tstop=3e-9, tstep=1e-9, record_step=250e-12)
+
+        rust, rust_model = build_sim()
+        rust_result = rust.run(
+            tstop=3e-9,
+            tstep=1e-9,
+            record_step=250e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+        )
+
+        time_deltas = [
+            abs(float(rust_t) - float(ref_t))
+            for ref_t, rust_t in zip(ref_result.time, rust_result.time)
+        ]
+        signal_deltas = [
+            abs(float(rust_v) - float(ref_v))
+            for ref_v, rust_v in zip(
+                ref_result.signals["OUT"],
+                rust_result.signals["OUT"],
+            )
+        ]
+        max_time_delta = max(time_deltas)
+        max_signal_delta = max(signal_deltas)
+        assert len(rust_result.time) == len(ref_result.time)
+        assert max_time_delta < 1.0e-13
+        # The strict Rust path owns its scheduler, so it can differ from the
+        # Python adaptive scheduler by tens of femtoseconds. For this fixture
+        # the transition slope is 1 / 1ns, so the observed output delta must be
+        # explained by the time-grid delta rather than event/body semantics.
+        assert max_signal_delta <= max_time_delta / 1.0e-9 + 1.0e-9
+        assert rust_model.state["state"] == pytest.approx(ref_model.state["state"])
+        assert rust._perf_stats["rust_full_model_required_failures"] == 0
+        assert rust._perf_stats["rust_full_model_fastpath_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_event_count"] == 2
+        assert rust._perf_stats["rust_sim_program_body_stmt_ops"] == 2
+        assert rust._perf_stats["rust_sim_program_transition_count"] == 1
+        assert rust._perf_stats["rust_sim_program_event_fires"] > 0
+        assert rust._perf_stats["rust_sim_program_transition_breakpoints"] > 0
+        assert rust._perf_stats["rust_event_transition_production_requested"] == 0
+        assert rust._perf_stats["generic_executor_runs"] == 0
+
+    def test_rust_sim_program_post_update_cross_refreshes_outputs(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module post_cross_evas2(inp, mid, out);
+    input voltage inp;
+    output voltage mid, out;
+    integer seen = 0;
+    analog begin
+        V(mid) <+ V(inp);
+        @(cross(V(mid)-0.5, +1)) seen = 1;
+        V(out) <+ seen;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            model.node_map = {"inp": "IN", "mid": "MID", "out": "OUT"}
+            sim = Simulator()
+            sim.add_source(
+                "IN",
+                pulse(0.0, 1.0, delay=0.5e-9, period=4e-9, width=2e-9),
+            )
+            sim.add_model(model)
+            sim.record("OUT")
+            return sim, model
+
+        ref, ref_model = build_sim()
+        ref_result = ref.run(
+            tstop=2e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            skip_source_error_control=True,
+        )
+
+        rust, rust_model = build_sim()
+        rust_result = rust.run(
+            tstop=2e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert list(rust_result.time) == pytest.approx(list(ref_result.time))
+        assert list(rust_result.signals["OUT"]) == pytest.approx(
+            list(ref_result.signals["OUT"])
+        )
+        assert rust_model.state["seen"] == pytest.approx(ref_model.state["seen"])
+        assert rust_model.state["seen"] == pytest.approx(1.0)
+        assert rust._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_event_count"] == 3
+        assert rust._perf_stats["rust_sim_program_event_fires"] >= 1
+        assert rust._perf_stats["generic_executor_runs"] == 0
+
+    def test_rust_sim_program_conditional_integer_weighted_transition_target(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module weighted_transition_target(en, b0, b1, b2, b3, out);
+    input voltage en, b0, b1, b2, b3;
+    output voltage out;
+    parameter real vth = 0.5;
+    parameter real vlo = 0.0;
+    parameter real vhi = 1.0;
+    parameter real tr = 1n;
+    integer code = 0;
+    real y = 0.0;
+    analog begin
+        if (V(en) > vth) begin
+            code = (V(b0) > vth ? 1 : 0)
+                 + (V(b1) > vth ? 2 : 0)
+                 + (V(b2) > vth ? 4 : 0)
+                 + (V(b3) > vth ? 8 : 0);
+        end else begin
+            code = 0;
+        end
+        y = vlo + (vhi - vlo) * code / 15.0;
+        V(out) <+ transition(y, 0.0, tr, tr);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            model.node_map = {
+                "en": "EN",
+                "b0": "B0",
+                "b1": "B1",
+                "b2": "B2",
+                "b3": "B3",
+                "out": "OUT",
+            }
+            sim = Simulator()
+            sim.add_source("B2", dc(1.0))
+            sim.add_source("EN", dc(1.0))
+            sim.add_source("B3", dc(1.0))
+            sim.add_source("B0", dc(1.0))
+            sim.add_source("B1", dc(0.0))
+            sim.add_model(model)
+            sim.record("OUT")
+            return sim, model
+
+        ref, ref_model = build_sim()
+        ref_result = ref.run(
+            tstop=2e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            skip_source_error_control=True,
+        )
+
+        rust, rust_model = build_sim()
+        rust_result = rust.run(
+            tstop=2e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        time_deltas = [
+            abs(float(rust_t) - float(ref_t))
+            for ref_t, rust_t in zip(ref_result.time, rust_result.time)
+        ]
+        signal_deltas = [
+            abs(float(rust_v) - float(ref_v))
+            for ref_v, rust_v in zip(
+                ref_result.signals["OUT"],
+                rust_result.signals["OUT"],
+            )
+        ]
+        max_time_delta = max(time_deltas)
+        max_signal_delta = max(signal_deltas)
+        assert len(rust_result.time) == len(ref_result.time)
+        assert max_time_delta < 1.0e-13
+        assert max_signal_delta <= max_time_delta / 100e-12 + 1.0e-9
+        assert rust_result.signals["OUT"][-1] > 0.8
+        assert rust_model.state["code"] == pytest.approx(ref_model.state["code"])
+        assert rust_model.state["y"] == pytest.approx(ref_model.state["y"])
+        assert rust_model.state["code"] == pytest.approx(13.0)
+        assert rust._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_always_body_count"] == 1
+        assert rust._perf_stats["rust_sim_program_body_stmt_ops"] == 6
+        assert rust._perf_stats["rust_sim_program_transition_count"] == 1
+        assert rust._perf_stats["rust_sim_program_event_fires"] > 0
+        assert rust._perf_stats["generic_executor_runs"] == 0
+
+    def test_rust_sim_program_static_state_array_transition_target(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module state_array_transition_target(en, b0, b1, out);
+    input voltage en, b0, b1;
+    output voltage out;
+    parameter real vth = 0.5;
+    parameter real tr = 100p;
+    integer bits[0:1];
+    real code = 0.0;
+    analog begin
+        if (V(en) > vth) begin
+            bits[0] = V(b0) > vth ? 1 : 0;
+            bits[1] = V(b1) > vth ? 1 : 0;
+        end else begin
+            bits[0] = 0;
+            bits[1] = 0;
+        end
+        code = bits[0] + 2.0 * bits[1];
+        V(out) <+ transition(code / 3.0, 0.0, tr, tr);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            model.node_map = {"en": "EN", "b0": "B0", "b1": "B1", "out": "OUT"}
+            sim = Simulator()
+            sim.add_source("EN", dc(1.0))
+            sim.add_source("B0", dc(1.0))
+            sim.add_source("B1", dc(0.0))
+            sim.add_model(model)
+            sim.record("OUT")
+            return sim, model
+
+        ref, ref_model = build_sim()
+        ref_result = ref.run(
+            tstop=2e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            skip_source_error_control=True,
+        )
+
+        rust, rust_model = build_sim()
+        rust_result = rust.run(
+            tstop=2e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        time_deltas = [
+            abs(float(rust_t) - float(ref_t))
+            for ref_t, rust_t in zip(ref_result.time, rust_result.time)
+        ]
+        signal_deltas = [
+            abs(float(rust_v) - float(ref_v))
+            for ref_v, rust_v in zip(
+                ref_result.signals["OUT"],
+                rust_result.signals["OUT"],
+            )
+        ]
+        max_time_delta = max(time_deltas)
+        max_signal_delta = max(signal_deltas)
+        assert len(rust_result.time) == len(ref_result.time)
+        assert max_time_delta < 1.0e-13
+        assert max_signal_delta <= max_time_delta / 100e-12 + 1.0e-9
+        assert rust_model.arrays["bits"][0] == ref_model.arrays["bits"][0] == 1
+        assert rust_model.arrays["bits"][1] == ref_model.arrays["bits"][1] == 0
+        assert rust_model.state["code"] == pytest.approx(ref_model.state["code"])
+        assert rust_model.state["code"] == pytest.approx(1.0)
+        assert rust._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_always_body_count"] == 1
+        assert rust._perf_stats["rust_sim_program_body_stmt_ops"] == 8
+        assert rust._perf_stats["rust_sim_program_transition_count"] == 1
+        assert rust._perf_stats["generic_executor_runs"] == 0
+
+    def test_rust_sim_program_static_bus_bitshift_transition_targets(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module bus_bitshift_transition_target(din, out);
+    input voltage [0:3] din;
+    output voltage [0:1] out;
+    parameter real vth = 0.5;
+    parameter real tr = 100p;
+    integer code = 0;
+    integer inv = 0;
+    real y = 0.0;
+    analog begin
+        if (V(din[3]) > vth) begin
+            code = ((V(din[0]) > vth ? 1 : 0) << 0)
+                 | ((V(din[1]) > vth ? 1 : 0) << 1)
+                 | ((V(din[2]) > vth ? 1 : 0) << 2);
+        end else begin
+            inv = 0;
+        end
+        inv = (~(code >> 1)) & 3;
+        y = (code + inv) / 15.0;
+        V(out[0]) <+ transition(y, 0.0, tr, tr);
+        V(out[1]) <+ transition(code & 1, 0.0, tr, tr);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            sim = Simulator()
+            sim.add_source("din[0]", dc(1.0))
+            sim.add_source("din[1]", dc(0.0))
+            sim.add_source("din[2]", dc(1.0))
+            sim.add_source("din[3]", dc(1.0))
+            sim.add_model(model)
+            sim.record("out[0]")
+            sim.record("out[1]")
+            return sim, model
+
+        ref, ref_model = build_sim()
+        ref_result = ref.run(
+            tstop=2e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            skip_source_error_control=True,
+        )
+
+        rust, rust_model = build_sim()
+        rust_result = rust.run(
+            tstop=2e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert list(rust_result.time) == pytest.approx(list(ref_result.time))
+        assert list(rust_result.signals["out[0]"]) == pytest.approx(
+            list(ref_result.signals["out[0]"])
+        )
+        assert list(rust_result.signals["out[1]"]) == pytest.approx(
+            list(ref_result.signals["out[1]"])
+        )
+        assert rust_model.state["code"] == pytest.approx(ref_model.state["code"])
+        assert rust_model.state["inv"] == pytest.approx(ref_model.state["inv"])
+        assert rust_model.state["y"] == pytest.approx(ref_model.state["y"])
+        assert rust_model.state["code"] == pytest.approx(5.0)
+        assert rust_model.state["inv"] == pytest.approx(1.0)
+        assert rust_model.state["y"] == pytest.approx(0.4)
+        assert rust._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_always_body_count"] == 1
+        assert rust._perf_stats["rust_sim_program_transition_count"] == 2
+        assert rust._perf_stats["generic_executor_runs"] == 0
+
+    def test_rust_sim_program_static_for_bus_state_transition_target(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module for_bus_state_transition_target(din, out);
+    input voltage [0:3] din;
+    output voltage out;
+    parameter real vth = 0.5;
+    parameter real tr = 100p;
+    integer i = 0;
+    integer bits[0:3];
+    integer code = 0;
+    real y = 0.0;
+    analog begin
+        code = 0;
+        for (i = 0; i < 4; i = i + 1) begin
+            bits[i] = V(din[i]) > vth ? 1 : 0;
+            code = code + (bits[i] << i);
+        end
+        y = code / 15.0;
+        V(out) <+ transition(y, 0.0, tr, tr);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            sim = Simulator()
+            sim.add_source("din[0]", dc(1.0))
+            sim.add_source("din[1]", dc(0.0))
+            sim.add_source("din[2]", dc(1.0))
+            sim.add_source("din[3]", dc(1.0))
+            sim.add_model(model)
+            sim.record("out")
+            return sim, model
+
+        ref, ref_model = build_sim()
+        ref_result = ref.run(
+            tstop=2e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            skip_source_error_control=True,
+        )
+
+        rust, rust_model = build_sim()
+        rust_result = rust.run(
+            tstop=2e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert list(rust_result.time) == pytest.approx(list(ref_result.time))
+        assert list(rust_result.signals["out"]) == pytest.approx(
+            list(ref_result.signals["out"])
+        )
+        assert rust_model.state["code"] == pytest.approx(ref_model.state["code"])
+        assert rust_model.state["code"] == pytest.approx(13.0)
+        assert rust_model.state["y"] == pytest.approx(ref_model.state["y"])
+        assert rust_model.arrays["bits"][0] == ref_model.arrays["bits"][0] == 1
+        assert rust_model.arrays["bits"][1] == ref_model.arrays["bits"][1] == 0
+        assert rust_model.arrays["bits"][2] == ref_model.arrays["bits"][2] == 1
+        assert rust_model.arrays["bits"][3] == ref_model.arrays["bits"][3] == 1
+        assert rust._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_always_body_count"] == 1
+        assert rust._perf_stats["rust_sim_program_body_stmt_ops"] >= 12
+        assert rust._perf_stats["rust_sim_program_transition_count"] == 1
+        assert rust._perf_stats["generic_executor_runs"] == 0
+
+    def test_rust_sim_program_top_level_static_for_transition_outputs(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module top_level_static_for_transition_outputs(out);
+    output voltage [0:3] out;
+    parameter real tr = 100p;
+    integer i = 0;
+    real val[0:3];
+    analog begin
+        @(initial_step) begin
+            for (i = 0; i < 4; i = i + 1) begin
+                val[i] = i == 2 ? 0.8 : 0.2;
+            end
+        end
+        for (i = 0; i < 4; i = i + 1) begin
+            V(out[i]) <+ transition(val[i], 0.0, tr, tr);
+        end
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            sim = Simulator()
+            sim.add_model(model)
+            for idx in range(4):
+                sim.record(f"out[{idx}]")
+            return sim, model
+
+        ref, ref_model = build_sim()
+        ref_result = ref.run(
+            tstop=2e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            skip_source_error_control=True,
+        )
+
+        rust, rust_model = build_sim()
+        rust_result = rust.run(
+            tstop=2e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert list(rust_result.time) == pytest.approx(list(ref_result.time))
+        for idx in range(4):
+            assert list(rust_result.signals[f"out[{idx}]"]) == pytest.approx(
+                list(ref_result.signals[f"out[{idx}]"])
+            )
+            assert rust_model.arrays["val"][idx] == pytest.approx(
+                ref_model.arrays["val"][idx]
+            )
+        assert rust_model.arrays["val"][2] == pytest.approx(0.8)
+        assert rust._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_transition_count"] == 4
+        assert rust._perf_stats["generic_executor_runs"] == 0
+
+    def test_rust_sim_program_one_based_state_array_transition_target(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module one_based_state_array_transition_target(out);
+    output voltage out;
+    parameter real vdd = 0.9;
+    parameter real tr = 100p;
+    integer bits[8:1];
+    analog begin
+        @(initial_step) begin
+            bits[8] = 1;
+            bits[1] = 0;
+        end
+        V(out) <+ transition(bits[8] ? vdd : 0.0, 0.0, tr, tr);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            sim = Simulator()
+            sim.add_model(model)
+            sim.record("out")
+            return sim, model
+
+        ref, ref_model = build_sim()
+        ref_result = ref.run(
+            tstop=2e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            skip_source_error_control=True,
+        )
+
+        rust, rust_model = build_sim()
+        rust_result = rust.run(
+            tstop=2e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert list(rust_result.time) == pytest.approx(list(ref_result.time))
+        assert list(rust_result.signals["out"]) == pytest.approx(
+            list(ref_result.signals["out"])
+        )
+        assert rust_model.arrays["bits"][8] == ref_model.arrays["bits"][8] == 1
+        assert rust._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_transition_count"] == 1
+        assert rust._perf_stats["generic_executor_runs"] == 0
+
+    def test_rust_sim_program_event_body_ignores_display_strobe_for_waveform(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module event_strobe_noop(out);
+    output voltage out;
+    parameter real tr = 100p;
+    integer code = 0;
+    analog begin
+        @(initial_step) begin
+            code = 3;
+            $strobe("code=%d", code);
+            $display("code=%d", code);
+        end
+        V(out) <+ transition(code, 0.0, tr, tr);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            sim = Simulator()
+            sim.add_model(model)
+            sim.record("out")
+            return sim, model
+
+        ref, ref_model = build_sim()
+        ref_result = ref.run(
+            tstop=2e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            skip_source_error_control=True,
+        )
+
+        rust, rust_model = build_sim()
+        rust_result = rust.run(
+            tstop=2e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert list(rust_result.time) == pytest.approx(list(ref_result.time))
+        assert list(rust_result.signals["out"]) == pytest.approx(
+            list(ref_result.signals["out"])
+        )
+        assert rust_model.state["code"] == pytest.approx(ref_model.state["code"])
+        assert rust_model.state["code"] == pytest.approx(3.0)
+        assert rust._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_event_count"] == 1
+        assert rust._perf_stats["rust_sim_program_transition_count"] == 1
+        assert rust._perf_stats["generic_executor_runs"] == 0
+
+    def test_rust_sim_program_bound_step_scaled_transition_and_direct_output(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module bound_scaled_transition(vdd, vss, out, mon);
+    input voltage vdd, vss;
+    output voltage out, mon;
+    parameter real tr = 100p;
+    real vh;
+    real vl;
+    real tnext = 0.0;
+    integer state = 0;
+    analog begin
+        vh = V(vdd);
+        vl = V(vss);
+        @(initial_step) begin
+            state = 0;
+            tnext = 0.5n;
+        end
+        @(timer(tnext)) begin
+            state = 1 - state;
+            $bound_step(50p);
+            tnext = tnext + 0.5n;
+        end
+        V(out) <+ vl + (vh - vl) * transition(state ? 1.0 : 0.0, 0.0, tr, tr);
+        V(mon) <+ vl + (vh - vl) * (state ? 0.75 : 0.25);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            sim = Simulator()
+            sim.add_source("vdd", dc(0.9))
+            sim.add_source("vss", dc(0.0))
+            sim.add_model(model)
+            sim.record("out")
+            sim.record("mon")
+            return sim, model
+
+        ref, ref_model = build_sim()
+        ref_result = ref.run(
+            tstop=1.5e-9,
+            tstep=250e-12,
+            record_step=50e-12,
+            skip_source_error_control=True,
+        )
+
+        rust, rust_model = build_sim()
+        rust_result = rust.run(
+            tstop=1.5e-9,
+            tstep=250e-12,
+            record_step=50e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert list(rust_result.time) == pytest.approx(list(ref_result.time))
+        assert list(rust_result.signals["out"]) == pytest.approx(
+            list(ref_result.signals["out"]),
+            abs=1.0e-9,
+        )
+        assert list(rust_result.signals["mon"]) == pytest.approx(
+            list(ref_result.signals["mon"]),
+            abs=1.0e-12,
+        )
+        assert rust_model.state["state"] == pytest.approx(ref_model.state["state"])
+        assert max(rust_result.signals["out"]) > 0.8
+        assert min(rust_result.signals["out"]) < 0.1
+        assert max(rust_result.signals["mon"]) == pytest.approx(0.675)
+        assert min(rust_result.signals["mon"]) == pytest.approx(0.225)
+        assert rust._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_transition_count"] == 1
+        assert rust._perf_stats["generic_executor_runs"] == 0
+
+    def test_rust_sim_program_nested_state_machine_guard_write_order(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module nested_state_machine(clk, cmp, out, rdy);
+    input voltage clk, cmp;
+    output voltage out, rdy;
+    parameter real vth = 0.5;
+    parameter real tr = 100p;
+    integer state = 0;
+    integer bit = 0;
+    real ready = 0.0;
+    analog begin
+        @(initial_step) begin
+            state = 0;
+            bit = 1;
+            ready = 0.0;
+        end
+        @(cross(V(clk) - vth, +1)) begin
+            if (state == 0) begin
+                if (V(cmp) < vth) bit = 0;
+                state = 1;
+                ready = 0.0;
+            end else if (state == 1) begin
+                bit = bit ? 0 : 1;
+                ready = 1.0;
+                state = 2;
+            end else begin
+                bit = 1;
+                ready = 0.0;
+                state = 0;
+            end
+        end
+        V(out) <+ transition(bit, 0.0, tr, tr);
+        V(rdy) <+ transition(ready, 0.0, tr, tr);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            model.node_map = {"clk": "CLK", "cmp": "CMP", "out": "OUT", "rdy": "RDY"}
+            sim = Simulator()
+            sim.add_source("CLK", pulse(0.0, 1.0, period=1e-9, width=0.5e-9))
+            sim.add_source("CMP", dc(0.0))
+            sim.add_model(model)
+            sim.record("OUT")
+            sim.record("RDY")
+            return sim, model
+
+        ref, ref_model = build_sim()
+        ref_result = ref.run(
+            tstop=4e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            skip_source_error_control=True,
+        )
+
+        rust, rust_model = build_sim()
+        rust_result = rust.run(
+            tstop=4e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert list(rust_result.time) == pytest.approx(list(ref_result.time))
+        assert list(rust_result.signals["OUT"]) == pytest.approx(
+            list(ref_result.signals["OUT"]),
+            abs=1.0e-3,
+        )
+        assert list(rust_result.signals["RDY"]) == pytest.approx(
+            list(ref_result.signals["RDY"]),
+            abs=1.0e-3,
+        )
+        assert rust_model.state["state"] == pytest.approx(ref_model.state["state"])
+        assert rust_model.state["bit"] == pytest.approx(ref_model.state["bit"])
+        assert rust_model.state["ready"] == pytest.approx(ref_model.state["ready"])
+        assert rust._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_event_count"] == 2
+        assert rust._perf_stats["rust_sim_program_transition_count"] == 2
+        assert rust._perf_stats["generic_executor_runs"] == 0
+
+    def test_rust_sim_program_state_owned_timer_rearms_with_abstime(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module state_owned_timer(out);
+    output voltage out;
+    parameter real period = 1n;
+    parameter real tr = 100p;
+    integer bit = 0;
+    real next_t = 0.0;
+    analog begin
+        @(initial_step) begin
+            bit = 0;
+            next_t = period;
+        end
+        @(timer(next_t)) begin
+            bit = bit ? 0 : 1;
+            next_t = $abstime + period;
+        end
+        V(out) <+ transition(bit, 0.0, tr, tr);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            model.node_map = {"out": "OUT"}
+            sim = Simulator()
+            sim.add_model(model)
+            sim.record("OUT")
+            return sim, model
+
+        ref, ref_model = build_sim()
+        ref_result = ref.run(
+            tstop=3e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            skip_source_error_control=True,
+        )
+
+        rust, rust_model = build_sim()
+        rust_result = rust.run(
+            tstop=3e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        time_deltas = [
+            abs(float(rust_t) - float(ref_t))
+            for ref_t, rust_t in zip(ref_result.time, rust_result.time)
+        ]
+        signal_deltas = [
+            abs(float(rust_v) - float(ref_v))
+            for ref_v, rust_v in zip(
+                ref_result.signals["OUT"],
+                rust_result.signals["OUT"],
+            )
+        ]
+        max_time_delta = max(time_deltas)
+        max_signal_delta = max(signal_deltas)
+        assert len(rust_result.time) == len(ref_result.time)
+        assert max_time_delta < 1.0e-13
+        assert max_signal_delta <= max_time_delta / 100e-12 + 1.0e-9
+        assert rust_model.state["bit"] == pytest.approx(ref_model.state["bit"])
+        assert rust_model.state["next_t"] == pytest.approx(ref_model.state["next_t"])
+        assert rust_model.state["next_t"] == pytest.approx(4e-9)
+        assert rust._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_event_count"] == 2
+        assert rust._perf_stats["rust_sim_program_transition_count"] == 1
+        assert rust._perf_stats["rust_sim_program_event_fires"] >= 4
+        assert rust._perf_stats["generic_executor_runs"] == 0
+
+    def test_rust_body_ir_production_matches_python_evaluate_and_counts_calls(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module body_ir_gain(vin, vout);
+    input voltage vin;
+    output voltage vout;
+    parameter real gain = 2.0;
+    real acc = 0.0;
+    integer code = 0;
+    analog begin
+        acc = gain * V(vin);
+        if (acc > 0.5) code = 1; else code = 0;
+        V(vout) <+ code ? acc : 0.0;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def run_model(rust_body_ir=False):
+            model = ModelCls()
+            model.node_map = {"vin": "VIN", "vout": "VOUT"}
+            sim = Simulator()
+            sim.add_source("VIN", dc(0.4))
+            sim.add_model(model)
+            sim.record("VOUT")
+            result = sim.run(
+                tstop=2e-9,
+                tstep=1e-9,
+                rust_body_ir=rust_body_ir,
+                rust_required=rust_body_ir,
+            )
+            return result, sim
+
+        default_result, default_sim = run_model(False)
+        rust_result, rust_sim = run_model(True)
+
+        assert rust_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert rust_result.signals["VOUT"].tolist() == pytest.approx(
+            default_result.signals["VOUT"].tolist()
+        )
+        assert rust_sim._perf_stats["rust_body_ir_requested"] == 1
+        assert rust_sim._perf_stats["rust_body_ir_available"] == 1
+        assert rust_sim._perf_stats["rust_body_ir_candidate_models"] == 1
+        assert rust_sim._perf_stats["rust_body_ir_models"] == 1
+        assert rust_sim._perf_stats["rust_body_ir_production_executed_total"] > 0
+        assert rust_sim._perf_stats["rust_body_ir_production_node_writes_total"] > 0
+        assert rust_sim._perf_stats["rust_body_ir_production_state_writes_total"] > 0
+        assert default_sim._perf_stats["rust_body_ir_requested"] == 0
 
     def test_indexed_state_fastpath_reads_state_slots_without_changing_waveform(self):
         src = """\
@@ -3495,6 +5164,7 @@ endmodule
             tstep=250e-12,
             record_step=250e-12,
             rust_full_model_fastpath=True,
+            rust_full_model_required=True,
             rust_required=True,
         )
 
@@ -3504,6 +5174,7 @@ endmodule
         )
         assert any(abs(time - 700e-12) < 1e-18 for time in rust_result.time)
         assert rust._perf_stats["rust_full_model_fastpath_enabled"] == 1
+        assert rust._perf_stats["rust_full_model_required_failures"] == 0
         assert rust._perf_stats["rust_full_model_timer_static_linear_enabled"] == 1
         assert rust._perf_stats["rust_full_model_timer_static_linear_rust_enabled"] == 1
         assert rust._perf_stats["rust_full_model_timer_static_linear_events"] == 6
@@ -5177,6 +6848,63 @@ endmodule
         result = sim.run(tstop=100e-9, tstep=1e-9)
 
         # File should exist and have lines
+        assert outfile.exists()
+        lines = outfile.read_text().strip().splitlines()
+        assert len(lines) == 5
+        assert lines[0].startswith("edge 1 at")
+        assert lines[4].startswith("edge 5 at")
+
+    def test_rust_sim_program_fopen_fstrobe_fclose(self, tmp_path):
+        _build_rust_core_or_skip()
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        outfile = tmp_path / "rust_test_output.txt"
+        outfile_s = str(outfile).replace("\\", "/")
+        src = f"""\
+`include "disciplines.vams"
+module rust_fileio_metric(clk, done);
+    input voltage clk;
+    output voltage done;
+    parameter string filename = "{outfile_s}";
+    parameter real tr = 100p;
+    integer fd;
+    integer count;
+    analog begin
+        @(initial_step) begin
+            fd = $fopen(filename, "w");
+            count = 0;
+        end
+        @(cross(V(clk) - 0.5, 1)) begin
+            count = count + 1;
+            $fwrite(fd, "edge %d at %e", count, $abstime);
+        end
+        V(done) <+ transition(count > 0, 0.0, tr, tr);
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_source("clk", pulse(v_lo=0.0, v_hi=1.0, period=20e-9,
+                                     rise=0.1e-9, fall=0.1e-9, duty=0.5))
+        sim.add_model(model)
+        sim.record("done")
+        sim.run(
+            tstop=100e-9,
+            tstep=1e-9,
+            record_step=1e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert sim._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert sim._perf_stats["rust_sim_program_side_effects"] == 6
         assert outfile.exists()
         lines = outfile.read_text().strip().splitlines()
         assert len(lines) == 5

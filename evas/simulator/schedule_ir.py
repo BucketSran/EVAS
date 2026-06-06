@@ -29,6 +29,7 @@ EVENT_DUE_INITIAL_STEP = "initial_step"
 EVENT_DUE_CROSS = "cross"
 EVENT_DUE_ABOVE = "above"
 EVENT_DUE_TIMER = "timer"
+EVENT_DUE_FINAL_STEP = "final_step"
 
 
 @dataclass(frozen=True)
@@ -124,8 +125,11 @@ def encode_event_due_program(
     - ``cross(expr, direction?, ttol?, vtol?)`` where ``expr`` can be evaluated
       by the 094e body expression ABI.
     - ``above(expr)`` using the same expression ABI.
-    - static ``timer(start)`` and ``timer(start, period)`` where timer
-      expressions do not read node or state values.
+    - ``timer(start)`` where ``start`` can be a typed body expression, including
+      state-owned absolute timer targets.
+    - static ``timer(start, period)`` where periodic timer expressions do not
+      read node or state values.
+    - ``final_step`` without arguments.
 
     The returned plan does not execute event bodies and does not decide global
     ordering.  It is the reusable data layout that later production schedulers
@@ -243,10 +247,12 @@ def _append_event_due_program(
         if len(event_ir.args) not in {1, 2}:
             return False
         start_ops = encode_body_expr_ops(event_ir.args[0], bindings, node_slots)
-        if start_ops is None or not _is_static_timer_expr(start_ops):
+        if start_ops is None:
             return False
         period_ops: Tuple[BodyExprOp, ...] = ()
         if len(event_ir.args) == 2:
+            if not _is_static_timer_expr(start_ops):
+                return False
             encoded_period = encode_body_expr_ops(event_ir.args[1], bindings, node_slots)
             if encoded_period is None or not _is_static_timer_expr(encoded_period):
                 return False
@@ -258,6 +264,12 @@ def _append_event_due_program(
                 timer_period_ops=period_ops,
             )
         )
+        return True
+
+    if event_type == "FINAL_STEP":
+        if event_ir.args or event_ir.time_tol is not None or event_ir.expr_tol is not None:
+            return False
+        triggers.append(EventDueTriggerProgram(kind=EVENT_DUE_FINAL_STEP))
         return True
 
     return False
