@@ -5,21 +5,13 @@
 [![Docs](https://img.shields.io/badge/docs-evas.tokenzhang.com-blue)](https://evas.tokenzhang.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A lightweight, pure-Python behavioral simulator for digital/mixed-signal Verilog-A models.
-Event-driven. No C compiler, no ngspice, no KCL/KVL solver.
+A lightweight behavioral simulator for digital/mixed-signal Verilog-A models.
+EVAS ships with a Python compatibility engine by default and an optional Rust-backed EVAS2 path for supported event-driven designs. No ngspice, no KCL/KVL solver.
 
 
 ---
 
-> **If you're a human** — see the full docs at 
-
-📖 **Docs:** [evas.tokenzhang.com](https://evas.tokenzhang.com)
-
-
-> **If you're an AI agent** — load `skills/evas-sim/SKILL.md` (or copy the `skills/evas-sim/`
-> folder into your skills directory). It contains the full compatibility table, CLI reference,
-> output format, and common failure modes — everything you need to write and debug EVAS
-> simulations without guessing.
+Docs: [evas.tokenzhang.com](https://evas.tokenzhang.com)
 
 ---
 
@@ -45,10 +37,16 @@ evas list        # verify install — prints bundled example groups
 
 If `evas` is not on PATH, use `python -m evas`.
 
+The packaged default uses the Python engine so examples and user netlists run
+from PyPI or a fresh source checkout. To request EVAS2 explicitly, build the
+Rust backend first and pass `--engine evas2`, set `EVAS_ENGINE=evas2`, or add
+`simulatorOptions options evas_engine=evas2` to the testbench.
+
 ## Simulating your own design
 
 ```bash
 evas simulate path/to/tb.scs -o output/mydesign
+evas simulate path/to/tb.scs -o output/mydesign --engine evas2
 ```
 
 Output in `-o` dir: `tran.csv` (waveforms), `strobe.txt` (log messages), `.png` plots.

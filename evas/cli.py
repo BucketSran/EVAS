@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -60,7 +61,17 @@ def cmd_list(_args: argparse.Namespace) -> int:
 
 def cmd_simulate(args: argparse.Namespace) -> int:
     from evas.netlist.runner import evas_simulate
-    ok = evas_simulate(args.input, log_path=args.log, output_dir=args.output)
+    previous_engine = os.environ.get("EVAS_ENGINE")
+    if args.engine:
+        os.environ["EVAS_ENGINE"] = args.engine
+    try:
+        ok = evas_simulate(args.input, log_path=args.log, output_dir=args.output)
+    finally:
+        if args.engine:
+            if previous_engine is None:
+                os.environ.pop("EVAS_ENGINE", None)
+            else:
+                os.environ["EVAS_ENGINE"] = previous_engine
     return 0 if ok else 1
 
 
@@ -97,7 +108,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(resolved, target)
 
-    # Simulate directly — no subprocess, no env vars
+    # Simulate directly. The packaged default engine is EVAS1/Python; callers
+    # can request EVAS2 explicitly when the Rust backend has been built.
     output_dir = Path.cwd() / "output" / name
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -106,7 +118,17 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
 
     print(f"Running example '{name}': {scs_file.name} → {output_dir}")
-    ok = evas_simulate(str(scs_file), output_dir=str(output_dir))
+    previous_engine = os.environ.get("EVAS_ENGINE")
+    if args.engine:
+        os.environ["EVAS_ENGINE"] = args.engine
+    try:
+        ok = evas_simulate(str(scs_file), output_dir=str(output_dir))
+    finally:
+        if args.engine:
+            if previous_engine is None:
+                os.environ.pop("EVAS_ENGINE", None)
+            else:
+                os.environ["EVAS_ENGINE"] = previous_engine
     if not ok:
         return 1
 
@@ -140,6 +162,11 @@ def main() -> None:
     p_sim.add_argument("-o", "--output", default="./output",
                        help="Output directory (default: ./output)")
     p_sim.add_argument("-log", help="Log file path")
+    p_sim.add_argument(
+        "--engine",
+        choices=["python", "evas2", "rust2"],
+        help="Engine override. The default is python; evas2/rust2 requires the Rust backend.",
+    )
     p_sim.set_defaults(func=cmd_simulate)
 
     # evas run
@@ -147,6 +174,11 @@ def main() -> None:
     p_run.add_argument("name", help="Example name (see 'evas list')")
     p_run.add_argument("--tb", metavar="FILE",
                        help="Testbench filename override (default: tb_<name>.scs)")
+    p_run.add_argument(
+        "--engine",
+        choices=["python", "evas2", "rust2"],
+        help="Engine override. The default is python; evas2/rust2 requires the Rust backend.",
+    )
     p_run.set_defaults(func=cmd_run)
 
     # evas list

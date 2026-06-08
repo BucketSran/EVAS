@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Fixed — Engine Selection
+- Restored the packaged default to the Python compatibility engine so `evas run`
+  and `evas simulate` work from PyPI or a fresh source checkout without a
+  pre-built Rust shared library.
+- Added CLI `--engine` overrides for explicit EVAS2/Rust runs and updated docs
+  to describe Rust backend build requirements.
+- Synchronized runtime/docs version reporting with the package version.
+
 ### Changed — Examples
 - Reduced the EVAS bundled example set to five smoke-test groups: `digital_basics`, `clk_div`, `comparator`, `adc_dac_ideal_4b`, and `noise_gen`.
 - Removed the larger workflow-oriented example groups from this simulator package; those assets are intended to live with `veriloga-skills/evas-sim`.

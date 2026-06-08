@@ -8,7 +8,12 @@ sys.path.insert(0, os.path.abspath(".."))
 project = "EVAS"
 author = "Zhishuai Zhang"
 copyright = "2026, Zhishuai Zhang"
-release = "0.1.0"
+try:
+    from importlib.metadata import version as _package_version
+
+    release = _package_version("evas-sim")
+except Exception:
+    release = "0.4.3"
 language = "en"
 
 extensions = [

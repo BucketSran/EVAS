@@ -18,13 +18,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from evas.netlist.spectre_parser import (
-    _extract_nodes,
-    _normalize_node_name,
-    _parse_suffix_number,
-    parse_spectre,
-)
 from evas.netlist.runner import (
+    SpectreSource,
     _add_spectre_source,
     _apply_evas_profile,
     _parse_required_trace_signals,
@@ -32,10 +27,14 @@ from evas.netlist.runner import (
     _trace_output_signals_for_request,
     _write_csv,
     evas_simulate,
-    SpectreSource,
+)
+from evas.netlist.spectre_parser import (
+    _extract_nodes,
+    _normalize_node_name,
+    _parse_suffix_number,
+    parse_spectre,
 )
 from evas.simulator.engine import SimResult, Simulator
-
 
 RUST_CORE = Path(__file__).resolve().parents[1] / "evas" / "rust_core"
 
@@ -263,7 +262,7 @@ class TestAhdlIncludePathFallback:
         va_file = tmp_path / "veriloga.va"
         va_file.write_text(self.VA_SRC)
 
-        scs_content = textwrap.dedent(f"""\
+        scs_content = textwrap.dedent("""\
             `include "disciplines.vams"
             V1 (out 0) vsource dc=0 type=dc
             I1 (out) dummy
@@ -1038,10 +1037,9 @@ class TestIndexedMigrationHarness:
         assert "rust_static_eval_errors = 0" in log
         assert (out_dir / "tran.csv").exists()
 
-    def test_evas_simulate_defaults_to_evas2_engine(self, tmp_path, monkeypatch):
-        _build_rust_core_or_skip()
+    def test_evas_simulate_defaults_to_python_engine(self, tmp_path, monkeypatch):
         monkeypatch.delenv("EVAS_ENGINE", raising=False)
-        scs = tmp_path / "tb_default_evas2_source.scs"
+        scs = tmp_path / "tb_default_python_source.scs"
         scs.write_text(textwrap.dedent("""\
             simulator lang=spectre
             VDD (vdd 0) vsource type=dc dc=1.8
@@ -1054,12 +1052,10 @@ class TestIndexedMigrationHarness:
         assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
 
         log = log_path.read_text(encoding="utf-8")
-        assert "evas_engine = evas2" in log
-        assert "evas_rust_full_model_fastpath = true" in log
-        assert "evas_rust_full_model_required = true" in log
-        assert "evas_rust_required = true" in log
-        assert "rust_sim_program_enabled = 1" in log
-        assert "rust_sim_program_source_record_enabled = 1" in log
+        assert "evas_engine = evas2" not in log
+        assert "evas_rust_full_model_fastpath = true" not in log
+        assert "evas_rust_full_model_required = true" not in log
+        assert "evas_rust_required = true" not in log
         assert (out_dir / "tran.csv").exists()
 
     def test_evas_simulate_evas2_option_requires_rust_full_model(self, tmp_path):

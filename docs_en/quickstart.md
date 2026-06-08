@@ -6,6 +6,7 @@ The fastest way to try EVAS is to run one of the included examples:
 
 ```bash
 evas run clk_div
+evas run clk_div --engine evas2   # requires a built Rust backend
 ```
 
 This will:
@@ -17,6 +18,7 @@ This will:
 
 ```bash
 evas simulate path/to/tb.scs -o output/mydesign
+evas simulate path/to/tb.scs -o output/mydesign --engine evas2
 ```
 
 Each simulation run produces:

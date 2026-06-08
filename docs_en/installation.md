@@ -3,7 +3,7 @@
 ## Requirements
 
 - Python 3.9 or later
-- NumPy, Matplotlib, Pandas (installed automatically)
+- NumPy and Matplotlib (installed automatically)
 
 ## From PyPI
 
@@ -26,3 +26,19 @@ evas list
 ```
 
 You should see the 5 bundled example groups printed.
+
+## Engine Selection
+
+The packaged default is the Python compatibility engine. It works from PyPI or
+a fresh source checkout without compiling native code.
+
+EVAS2 is the optional Rust-backed execution path for supported event-driven
+designs. To use it from source, build the Rust core first:
+
+```bash
+cargo build --manifest-path evas/rust_core/Cargo.toml --release
+evas simulate path/to/tb.scs --engine evas2
+```
+
+You can also select the engine with `EVAS_ENGINE=evas2` or
+`simulatorOptions options evas_engine=evas2`.

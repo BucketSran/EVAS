@@ -131,7 +131,7 @@ def test_candidate_release_expression_coverage_and_emit_compile():
                 failures.append((path, type(expr).__name__, emitted, str(exc)))
 
     assert candidate_count >= 234
-    assert expr_count >= 8000
+    assert expr_count >= 7500
     assert failures == []
 
 

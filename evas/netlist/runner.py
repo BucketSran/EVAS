@@ -31,8 +31,17 @@ from .spectre_parser import (
     parse_spectre,
 )
 
-VERSION = '0.1.0'
-DEFAULT_EVAS_ENGINE = "evas2"
+try:
+    from importlib.metadata import version as _package_version
+except ImportError:  # pragma: no cover - Python < 3.8 compatibility fallback
+    from importlib_metadata import version as _package_version
+
+try:
+    VERSION = _package_version("evas-sim")
+except Exception:
+    VERSION = "0.4.3"
+
+DEFAULT_EVAS_ENGINE = "python"
 
 _EVAS_PROFILE_PRESETS = {
     # Focus on runtime.
@@ -81,10 +90,9 @@ def _simopt_bool(simopt: Dict[str, object], key: str, default: bool = False) -> 
 def _configured_evas_engine(simopt: Dict[str, object]) -> str:
     """Resolve EVAS engine selection.
 
-    EVAS2 is now the default production engine.  Keep explicit simulatorOptions
-    and EVAS_ENGINE environment overrides so targeted compatibility/debug runs
-    can still request the legacy Python engine with ``evas_engine=python`` or
-    ``EVAS_ENGINE=python``.
+    The Python engine is the packaged default because it works from PyPI and a
+    fresh source checkout without building the optional Rust shared library.
+    EVAS2 remains available through explicit simulatorOptions or EVAS_ENGINE.
     """
 
     explicit = str(simopt.get("evas_engine", "")).strip().lower()
