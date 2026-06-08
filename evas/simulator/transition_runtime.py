@@ -13,10 +13,10 @@ from dataclasses import dataclass
 from typing import MutableSequence, Optional, Tuple
 
 from evas.simulator.expr_ir import (
+    BinaryExprIR,
     BindingTableIR,
     BodyExprOp,
     BranchAccessIR,
-    BinaryExprIR,
     FunctionCallIR,
     LiteralIR,
     UnaryExprIR,

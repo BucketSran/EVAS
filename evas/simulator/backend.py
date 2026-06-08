@@ -30,12 +30,12 @@ from evas.simulator.evaluate_ir import (
     TARGET_STATE,
     normalize_linear_ops,
 )
-from evas.simulator.expr_ir import build_state_binding_ir
 from evas.simulator.event_transition_plan import (
     EVENT_TRANSITION_PROFILE_SUPPORT,
     analyze_event_transition_segment_plan,
     summarize_event_transition_plans,
 )
+from evas.simulator.expr_ir import build_state_binding_ir
 from evas.simulator.rust_backend import BODY_TARGET_NODE, BODY_TARGET_STATE
 from evas.simulator.stmt_ir import (
     classify_body_stmt_ops_rejection,
@@ -923,7 +923,11 @@ class CompiledModel:
             return batches
 
         try:
-            from evas.simulator.rust_backend import LinearCondition, LinearOp, LinearTerm
+            from evas.simulator.rust_backend import (
+                LinearCondition,
+                LinearOp,
+                LinearTerm,
+            )
         except Exception:
             self._perf_stats["rust_event_linear_write_production_fallbacks"] += 1
             return batches
@@ -6185,18 +6189,24 @@ class _ModuleCompiler:
         transition_contribs = []
         for c in outside_contribs:
             has_trans = False
+
             def _scan(e):
                 nonlocal has_trans
                 if isinstance(e, FunctionCall) and e.name == "transition":
                     has_trans = True
                 elif isinstance(e, BinaryExpr):
-                    _scan(e.left); _scan(e.right)
+                    _scan(e.left)
+                    _scan(e.right)
                 elif isinstance(e, UnaryExpr):
                     _scan(e.operand)
                 elif isinstance(e, TernaryExpr):
-                    _scan(e.cond); _scan(e.true_expr); _scan(e.false_expr)
+                    _scan(e.cond)
+                    _scan(e.true_expr)
+                    _scan(e.false_expr)
                 elif isinstance(e, FunctionCall):
-                    for a in e.args: _scan(a)
+                    for a in e.args:
+                        _scan(a)
+
             _scan(c["stmt"].expr)
             if has_trans:
                 transition_contribs.append(c)
@@ -6206,6 +6216,7 @@ class _ModuleCompiler:
         # For / no While / no Case / no system task / no array-target Assignment
         # and no dynamic bus access.
         rejected = [False]
+
         def _body_visit(node):
             if rejected[0] or node is None:
                 return
@@ -6233,13 +6244,18 @@ class _ModuleCompiler:
                             rejected[0] = True
                             return
                     if isinstance(e, BinaryExpr):
-                        _expr_scan(e.left); _expr_scan(e.right)
+                        _expr_scan(e.left)
+                        _expr_scan(e.right)
                     elif isinstance(e, UnaryExpr):
                         _expr_scan(e.operand)
                     elif isinstance(e, TernaryExpr):
-                        _expr_scan(e.cond); _expr_scan(e.true_expr); _expr_scan(e.false_expr)
+                        _expr_scan(e.cond)
+                        _expr_scan(e.true_expr)
+                        _expr_scan(e.false_expr)
                     elif isinstance(e, FunctionCall):
-                        for a in e.args: _expr_scan(a)
+                        for a in e.args:
+                            _expr_scan(a)
+
                 _expr_scan(node.value)
                 return
             if isinstance(node, IfStatement):

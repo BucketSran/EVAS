@@ -29,7 +29,6 @@ from evas.simulator.stmt_ir import (
 )
 from evas.simulator.transition_runtime import encode_transition_contribution_program
 
-
 EVENT_TRANSITION_CORE_TAGS = frozenset(
     {
         "event_statement",

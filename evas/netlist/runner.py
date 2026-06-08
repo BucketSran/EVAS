@@ -18,7 +18,10 @@ from evas.compiler.parser import parse as parse_va
 from evas.compiler.preprocessor import preprocess
 from evas.simulator.backend import compile_module
 from evas.simulator.engine import SimResult, Simulator, dc, pulse, pwl, sine
-from evas.simulator.indexed import build_indexed_run_plan, check_indexed_trace_round_trip
+from evas.simulator.indexed import (
+    build_indexed_run_plan,
+    check_indexed_trace_round_trip,
+)
 
 from .spectre_parser import (
     SpectreNetlist,

@@ -19,10 +19,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from evas.simulator.indexed import (
-    IndexedVoltageArray,
-    IndexedVoltageSnapshotter,
-    build_indexed_model_io_plan,
+from evas.simulator.analog_block_runtime import (
+    try_build_event_then_transition_shadow_runtime,
 )
 from evas.simulator.evaluate_ir import (
     SOURCE_NODE,
@@ -33,8 +31,10 @@ from evas.simulator.evaluate_ir import (
     normalize_linear_ops,
     normalize_transition_target_ops,
 )
-from evas.simulator.analog_block_runtime import (
-    try_build_event_then_transition_shadow_runtime,
+from evas.simulator.indexed import (
+    IndexedVoltageArray,
+    IndexedVoltageSnapshotter,
+    build_indexed_model_io_plan,
 )
 from evas.simulator.rust_backend import (
     BODY_EXPR_CONST,
@@ -3176,7 +3176,6 @@ class Simulator:
             return None
 
         vcm = 0.5 * (vh + vl)
-        vth = vcm
 
         def clamp(value: float, lo: float, hi: float) -> float:
             return min(hi, max(lo, value))

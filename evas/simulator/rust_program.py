@@ -11,10 +11,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional, Tuple
 
+from evas.simulator.evaluate_ir import (
+    SOURCE_NODE,
+    SOURCE_STATE,
+    TARGET_NODE,
+    TARGET_STATE,
+    normalize_linear_ops,
+)
 from evas.simulator.expr_ir import (
+    SYMBOL_PORT,
+    SYMBOL_STATE_ARRAY,
+    SYMBOL_STATE_SCALAR,
+    ArrayAccessIR,
+    BinaryExprIR,
     BindingTableIR,
     BranchAccessIR,
-    BinaryExprIR,
     ExprIR,
     FunctionCallIR,
     IdentifierIR,
@@ -22,20 +33,8 @@ from evas.simulator.expr_ir import (
     StateBindingIR,
     TernaryExprIR,
     UnaryExprIR,
-    SYMBOL_PARAMETER,
-    SYMBOL_PORT,
-    SYMBOL_STATE_ARRAY,
-    SYMBOL_STATE_SCALAR,
-    ArrayAccessIR,
     build_state_binding_ir,
     static_node_ref_name,
-)
-from evas.simulator.evaluate_ir import (
-    SOURCE_NODE,
-    SOURCE_STATE,
-    TARGET_NODE,
-    TARGET_STATE,
-    normalize_linear_ops,
 )
 from evas.simulator.rust_backend import (
     BODY_EXPR_READ_NODE,
@@ -48,11 +47,9 @@ from evas.simulator.rust_backend import (
     BodyStmtOp,
 )
 from evas.simulator.schedule_ir import (
-    CombinedEventIR,
     EVENT_DUE_ABOVE,
     EVENT_DUE_CROSS,
-    EVENT_DUE_INITIAL_STEP,
-    EVENT_DUE_TIMER,
+    CombinedEventIR,
     EventIR,
     EventTriggerIR,
     encode_event_due_program,
@@ -73,7 +70,6 @@ from evas.simulator.stmt_ir import (
     unroll_static_for_statement,
 )
 from evas.simulator.transition_runtime import encode_transition_contribution_program
-
 
 SOURCE_DC = "dc"
 SOURCE_PULSE = "pulse"

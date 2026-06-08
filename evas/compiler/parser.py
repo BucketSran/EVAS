@@ -6,7 +6,6 @@ from typing import List, Optional, Tuple
 from .ast_nodes import *
 from .lexer import Token, TokenType, tokenize
 
-
 _SPECTRE_RESERVED_IDENTIFIERS = {
     # Spectre VACOMP treats these event names as keywords. They are legal only
     # in event controls such as @(initial_step), not as user identifiers.

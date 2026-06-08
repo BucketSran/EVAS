@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Dict, Tuple
 
-
 CANDIDATE_SCHEMA_VERSION = "evas-whole-segment-candidate-contract.v1"
 
 

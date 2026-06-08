@@ -24,7 +24,6 @@ from evas.simulator.rust_backend import (
     BodyExprOp,
 )
 
-
 EVENT_DUE_INITIAL_STEP = "initial_step"
 EVENT_DUE_CROSS = "cross"
 EVENT_DUE_ABOVE = "above"

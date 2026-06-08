@@ -86,7 +86,6 @@ from evas.simulator.rust_backend import (
     BodyExprOp,
 )
 
-
 PURE_MATH_FUNCTIONS = frozenset(
     {
         "abs",

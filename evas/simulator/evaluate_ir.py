@@ -15,7 +15,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Mapping, MutableSequence, Optional, Sequence, Tuple
 
-
 SOURCE_NODE = 0
 SOURCE_STATE = 1
 TARGET_NODE = 0
