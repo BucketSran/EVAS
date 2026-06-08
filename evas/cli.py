@@ -108,8 +108,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(resolved, target)
 
-    # Simulate directly. The packaged default engine is EVAS1/Python; callers
-    # can request EVAS2 explicitly when the Rust backend has been built.
+    # Simulate directly. The packaged default engine is Python; callers can
+    # request evas-rust explicitly when the Rust backend has been built.
     output_dir = Path.cwd() / "output" / name
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -164,8 +164,8 @@ def main() -> None:
     p_sim.add_argument("-log", help="Log file path")
     p_sim.add_argument(
         "--engine",
-        choices=["python", "evas2", "rust2"],
-        help="Engine override. The default is python; evas2/rust2 requires the Rust backend.",
+        choices=["python", "evas-rust", "evas2", "rust2"],
+        help="Engine override. The default is python; evas-rust requires the Rust backend.",
     )
     p_sim.set_defaults(func=cmd_simulate)
 
@@ -176,8 +176,8 @@ def main() -> None:
                        help="Testbench filename override (default: tb_<name>.scs)")
     p_run.add_argument(
         "--engine",
-        choices=["python", "evas2", "rust2"],
-        help="Engine override. The default is python; evas2/rust2 requires the Rust backend.",
+        choices=["python", "evas-rust", "evas2", "rust2"],
+        help="Engine override. The default is python; evas-rust requires the Rust backend.",
     )
     p_run.set_defaults(func=cmd_run)
 

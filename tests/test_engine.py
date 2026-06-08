@@ -1140,7 +1140,7 @@ endmodule
         sim.add_source("vin", ramp(0.0, 1.0, 0.0, 1e-9))
         sim.record("vin")
 
-        with pytest.raises(RuntimeError, match="EVAS2.0 Rust full-model path"):
+        with pytest.raises(RuntimeError, match="evas-rust full-model path"):
             sim.run(
                 tstop=1e-9,
                 tstep=1e-9,

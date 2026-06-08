@@ -42,6 +42,8 @@ except Exception:
     VERSION = "0.4.4"
 
 DEFAULT_EVAS_ENGINE = "python"
+RUST_EVAS_ENGINE = "evas-rust"
+_RUST_ENGINE_ALIASES = {"evas-rust", "evas2", "rust2"}
 
 _EVAS_PROFILE_PRESETS = {
     # Focus on runtime.
@@ -92,16 +94,24 @@ def _configured_evas_engine(simopt: Dict[str, object]) -> str:
 
     The Python engine is the packaged default because it works from PyPI and a
     fresh source checkout without building the optional Rust shared library.
-    EVAS2 remains available through explicit simulatorOptions or EVAS_ENGINE.
+    evas-rust remains available through explicit simulatorOptions or EVAS_ENGINE.
+    Legacy evas2/rust2 selectors are accepted as compatibility aliases.
     """
 
     explicit = str(simopt.get("evas_engine", "")).strip().lower()
     if explicit:
-        return explicit
+        return _normalize_evas_engine(explicit)
     env_engine = os.environ.get("EVAS_ENGINE", "").strip().lower()
     if env_engine:
-        return env_engine
+        return _normalize_evas_engine(env_engine)
     return DEFAULT_EVAS_ENGINE
+
+
+def _normalize_evas_engine(engine: str) -> str:
+    text = engine.strip().lower()
+    if text in _RUST_ENGINE_ALIASES:
+        return RUST_EVAS_ENGINE
+    return text
 
 
 def _first_param(params: Dict[str, object], *keys: str, default: object = None) -> object:
@@ -1214,8 +1224,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         "1", "true", "yes", "on", "enabled"
     }
     evas_engine = _configured_evas_engine(simopt)
-    evas2_engine = (
-        evas_engine in {"evas2", "rust2"}
+    evas_rust_engine = (
+        evas_engine == RUST_EVAS_ENGINE
         or _simopt_bool(simopt, "evas2", False)
     )
     rust_full_model_required = _simopt_bool(
@@ -1239,7 +1249,7 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     ) or os.environ.get("EVAS_RUST_REQUIRED", "").strip().lower() in {
         "1", "true", "yes", "on", "enabled"
     }
-    if evas2_engine:
+    if evas_rust_engine:
         rust_full_model_fastpath = True
         rust_full_model_required = True
         rust_required = True
@@ -1314,8 +1324,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write("    evas_rust_full_model_fastpath = true")
     if rust_full_model_required:
         log.write("    evas_rust_full_model_required = true")
-    if evas2_engine:
-        log.write("    evas_engine = evas2")
+    if evas_rust_engine:
+        log.write(f"    evas_engine = {RUST_EVAS_ENGINE}")
     if event_trace_audit:
         log.write("    evas_event_trace_audit = true")
     if rust_required:

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "evas-sim"
 version = "0.4.4"
-description = "Event-driven Verilog-A Simulator with a Python compatibility engine and optional Rust EVAS2 backend"
+description = "Event-driven Verilog-A Simulator with a Python compatibility engine and optional evas-rust backend"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"

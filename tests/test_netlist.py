@@ -22,6 +22,7 @@ from evas.netlist.runner import (
     SpectreSource,
     _add_spectre_source,
     _apply_evas_profile,
+    _configured_evas_engine,
     _parse_required_trace_signals,
     _trace_nodes_for_signals,
     _trace_output_signals_for_request,
@@ -43,6 +44,19 @@ def _build_rust_core_or_skip():
     if shutil.which("cargo") is None:
         pytest.skip("cargo is not available")
     subprocess.run(["cargo", "build", "--release"], cwd=RUST_CORE, check=True)
+
+
+def test_configured_evas_engine_normalizes_rust_aliases(monkeypatch):
+    monkeypatch.delenv("EVAS_ENGINE", raising=False)
+    assert _configured_evas_engine({}) == "python"
+    assert _configured_evas_engine({"evas_engine": "evas-rust"}) == "evas-rust"
+    assert _configured_evas_engine({"evas_engine": "evas2"}) == "evas-rust"
+    assert _configured_evas_engine({"evas_engine": "rust2"}) == "evas-rust"
+
+    monkeypatch.setenv("EVAS_ENGINE", "evas-rust")
+    assert _configured_evas_engine({}) == "evas-rust"
+    monkeypatch.setenv("EVAS_ENGINE", "evas2")
+    assert _configured_evas_engine({}) == "evas-rust"
 
 
 # ===========================================================================
@@ -1052,15 +1066,39 @@ class TestIndexedMigrationHarness:
         assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
 
         log = log_path.read_text(encoding="utf-8")
-        assert "evas_engine = evas2" not in log
+        assert "evas_engine = evas-rust" not in log
         assert "evas_rust_full_model_fastpath = true" not in log
         assert "evas_rust_full_model_required = true" not in log
         assert "evas_rust_required = true" not in log
         assert (out_dir / "tran.csv").exists()
 
-    def test_evas_simulate_evas2_option_requires_rust_full_model(self, tmp_path):
+    def test_evas_simulate_evas_rust_option_requires_rust_full_model(self, tmp_path):
         _build_rust_core_or_skip()
-        scs = tmp_path / "tb_evas2_source.scs"
+        scs = tmp_path / "tb_evas_rust_source.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            VDD (vdd 0) vsource type=dc dc=1.8
+            simulatorOptions options evas_engine=evas-rust evas_skip_source_error_control=true
+            tran tran stop=2n step=1n
+            save vdd:3f
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_engine = evas-rust" in log
+        assert "evas_rust_full_model_fastpath = true" in log
+        assert "evas_rust_full_model_required = true" in log
+        assert "evas_rust_required = true" in log
+        assert "rust_sim_program_enabled = 1" in log
+        assert "rust_sim_program_source_record_enabled = 1" in log
+        assert (out_dir / "tran.csv").exists()
+
+    def test_evas_simulate_evas2_alias_logs_evas_rust(self, tmp_path):
+        _build_rust_core_or_skip()
+        scs = tmp_path / "tb_evas2_alias_source.scs"
         scs.write_text(textwrap.dedent("""\
             simulator lang=spectre
             VDD (vdd 0) vsource type=dc dc=1.8
@@ -1074,12 +1112,10 @@ class TestIndexedMigrationHarness:
         assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
 
         log = log_path.read_text(encoding="utf-8")
-        assert "evas_engine = evas2" in log
-        assert "evas_rust_full_model_fastpath = true" in log
+        assert "evas_engine = evas-rust" in log
+        assert "evas_engine = evas2" not in log
         assert "evas_rust_full_model_required = true" in log
-        assert "evas_rust_required = true" in log
         assert "rust_sim_program_enabled = 1" in log
-        assert "rust_sim_program_source_record_enabled = 1" in log
         assert (out_dir / "tran.csv").exists()
 
     def test_evas_simulate_logs_rust_transition_shadow_when_opted_in(

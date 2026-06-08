@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A lightweight behavioral simulator for digital/mixed-signal Verilog-A models.
-EVAS ships with a Python compatibility engine by default and an optional Rust-backed EVAS2 path for supported event-driven designs. No ngspice, no KCL/KVL solver.
+EVAS ships with a Python compatibility engine by default and an optional evas-rust backend for supported event-driven designs. No ngspice, no KCL/KVL solver.
 
 
 ---
@@ -38,15 +38,16 @@ evas list        # verify install — prints bundled example groups
 If `evas` is not on PATH, use `python -m evas`.
 
 The packaged default uses the Python engine so examples and user netlists run
-from PyPI or a fresh source checkout. To request EVAS2 explicitly, build the
-Rust backend first and pass `--engine evas2`, set `EVAS_ENGINE=evas2`, or add
-`simulatorOptions options evas_engine=evas2` to the testbench.
+from PyPI or a fresh source checkout. To request evas-rust explicitly, build the
+Rust backend first and pass `--engine evas-rust`, set `EVAS_ENGINE=evas-rust`,
+or add `simulatorOptions options evas_engine=evas-rust` to the testbench.
+The legacy `evas2` and `rust2` selectors remain accepted as compatibility aliases.
 
 ## Simulating your own design
 
 ```bash
 evas simulate path/to/tb.scs -o output/mydesign
-evas simulate path/to/tb.scs -o output/mydesign --engine evas2
+evas simulate path/to/tb.scs -o output/mydesign --engine evas-rust
 ```
 
 Output in `-o` dir: `tran.csv` (waveforms), `strobe.txt` (log messages), `.png` plots.

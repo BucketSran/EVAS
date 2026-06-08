@@ -5019,9 +5019,9 @@ class Simulator:
                     "unknown",
                 )
                 raise RuntimeError(
-                    "EVAS2.0 Rust full-model path was required but no "
+                    "evas-rust full-model path was required but no "
                     "supported whole-segment Rust runtime matched this design. "
-                    "Use EVAS1.0 for Python fallback or extend the EVAS2.0 "
+                    "Use the python engine for fallback or extend the evas-rust "
                     "Rust lowering coverage. "
                     f"RustSimProgram rejection: {rejection}"
                 )
