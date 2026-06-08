@@ -47,6 +47,7 @@ target/
 output/
 evas-run/
 metric.out
+prototypes/
 
 # Test fixtures (local only)
 tests/tb/
