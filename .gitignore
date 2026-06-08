@@ -38,6 +38,7 @@ htmlcov/
 # Distribution / Packaging
 *.tar.gz
 *.zip
+target/
 
 # Linter cache
 .ruff_cache/
@@ -45,6 +46,8 @@ htmlcov/
 # Simulation output
 output/
 evas-run/
+metric.out
+prototypes/
 
 # Test fixtures (local only)
 tests/tb/

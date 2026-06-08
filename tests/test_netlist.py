@@ -9,18 +9,41 @@ Covers:
   - _add_spectre_source: degenerate pulse (no period, val0==val1),
       degenerate sine (no freq, ampl=0)
 """
+import csv
+import shutil
+import subprocess
 import textwrap
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from evas.netlist.spectre_parser import (
     _extract_nodes,
     _normalize_node_name,
+    _parse_suffix_number,
     parse_spectre,
 )
-from evas.netlist.runner import _add_spectre_source, _apply_evas_profile, SpectreSource
-from evas.simulator.engine import Simulator
+from evas.netlist.runner import (
+    _add_spectre_source,
+    _apply_evas_profile,
+    _parse_required_trace_signals,
+    _trace_nodes_for_signals,
+    _trace_output_signals_for_request,
+    _write_csv,
+    evas_simulate,
+    SpectreSource,
+)
+from evas.simulator.engine import SimResult, Simulator
+
+
+RUST_CORE = Path(__file__).resolve().parents[1] / "evas" / "rust_core"
+
+
+def _build_rust_core_or_skip():
+    if shutil.which("cargo") is None:
+        pytest.skip("cargo is not available")
+    subprocess.run(["cargo", "build", "--release"], cwd=RUST_CORE, check=True)
 
 
 # ===========================================================================
@@ -45,6 +68,24 @@ class TestNormalizeNodeName:
 
     def test_no_brackets(self):
         assert _normalize_node_name("clk_i") == "clk_i"
+
+
+class TestRequiredTraceHelpers:
+
+    def test_required_trace_parses_env_style_signal_list(self, monkeypatch):
+        monkeypatch.setenv("EVAS_REQUIRED_TRACE_SIGNALS", "time,V(OUT_P), vinp;vinn OUT_P")
+
+        assert _parse_required_trace_signals({}) == ["OUT_P", "vinp", "vinn"]
+
+    def test_required_trace_selects_actual_nodes_case_insensitively(self):
+        nodes = _trace_nodes_for_signals(["out_p", "vinp"], {"OUT_P", "vinp", "extra"})
+
+        assert nodes == ["OUT_P", "vinp"]
+
+    def test_required_trace_output_uses_actual_signal_names(self):
+        selected = _trace_output_signals_for_request(["out_p", "vinp"], {"OUT_P", "vinp", "extra"})
+
+        assert selected == ["OUT_P", "vinp"]
 
 
 # ===========================================================================
@@ -136,6 +177,26 @@ class TestParseSpectreRealNetlist:
     def test_sources_parsed(self, netlist):
         names = {s.name for s in netlist.sources}
         assert names == {"V0", "V1", "V2", "V3"}
+
+    def test_spectre_suffix_parser_keeps_m_and_M_distinct(self):
+        assert _parse_suffix_number("900m") == pytest.approx(0.9)
+        assert _parse_suffix_number("100M") == pytest.approx(100e6)
+        assert _parse_suffix_number("100Meg") == pytest.approx(100e6)
+
+    def test_spectre_star_comments_are_ignored(self, tmp_path):
+        scs = tmp_path / "tb_star_comment.scs"
+        scs.write_text(textwrap.dedent("""\
+            * Divide ratio code = 5
+            simulator lang=spectre
+            global 0
+            * Another SPICE-style comment with (parentheses)
+            V1 (out 0) vsource dc=1 type=dc
+            tran tran stop=1n
+            save out
+        """))
+        parsed = parse_spectre(str(scs))
+        assert [src.name for src in parsed.sources] == ["V1"]
+        assert parsed.tran is not None
 
     def test_vdd_dc_voltage(self, netlist):
         v1 = next(s for s in netlist.sources if s.name == "V1")
@@ -236,6 +297,63 @@ class TestAhdlIncludePathFallback:
 
 
 # ===========================================================================
+# EVAS/Spectre startup conformance
+# ===========================================================================
+
+class TestInitialTimerTransitionConformance:
+
+    VA_SRC = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module timer0_transition_probe(vctrl, phase);
+        input vctrl;
+        output phase;
+        electrical vctrl, phase;
+        real ph;
+        parameter real tr = 200p;
+
+        analog begin
+            @(initial_step) ph = 0.0;
+            @(timer(0, 1n)) ph = ph + 0.03 + 0.09 * V(vctrl);
+            V(phase) <+ transition(ph, 0, tr, tr);
+        end
+        endmodule
+    """)
+
+    SCS_SRC = textwrap.dedent("""\
+        simulator lang=spectre
+        global 0
+        Vctrl (vctrl 0) vsource type=dc dc=0.1
+        I0 (vctrl phase) timer0_transition_probe
+        tran tran stop=2n maxstep=500p
+        save vctrl phase
+        ahdl_include "timer0_transition_probe.va"
+    """)
+
+    def test_timer_zero_sets_initial_transition_target(self, tmp_path):
+        va_file = tmp_path / "timer0_transition_probe.va"
+        va_file.write_text(self.VA_SRC)
+        scs_file = tmp_path / "tb_timer0_transition_probe.scs"
+        scs_file.write_text(self.SCS_SRC)
+
+        from evas.netlist.runner import evas_simulate
+        ok = evas_simulate(str(scs_file), output_dir=str(tmp_path / "out"))
+        assert ok
+
+        csv_file = tmp_path / "out" / "tran.csv"
+        rows = list(csv.DictReader(csv_file.open()))
+        points = [(float(row["time"]), float(row["phase"])) for row in rows]
+
+        # Spectre treats the timer(0, ...) event as part of the initial solve,
+        # so the first saved point is the settled target, not a ramp from 0.
+        assert points[0][0] == pytest.approx(0.0)
+        assert points[0][1] == pytest.approx(0.039, abs=1e-12)
+
+        before_second_timer = [v for t, v in points if t < 1e-9 - 1e-18]
+        assert before_second_timer
+        assert all(v == pytest.approx(0.039, abs=1e-12) for v in before_second_timer)
+
+
+# ===========================================================================
 # _add_spectre_source — degenerate cases
 # ===========================================================================
 
@@ -258,8 +376,8 @@ class TestAddSpectreSourceDegenerateCases:
     def _sim(self):
         return Simulator()
 
-    def test_pulse_no_period_warns_and_becomes_dc(self):
-        """val0=0, val1=0, period not set → DC 0V + warning."""
+    def test_constant_pulse_warns_and_becomes_dc(self):
+        """val0=0, val1=0 -> DC 0V + warning."""
         src = _make_pulse("V2", val0=0.0, val1=0.0, period=0.0)
         sim = self._sim()
         warns = _add_spectre_source(sim, src, "0")
@@ -277,12 +395,33 @@ class TestAddSpectreSourceDegenerateCases:
         assert "val0 == val1" in warns[0]
 
     def test_pulse_missing_period_but_different_vals_warns(self):
-        """val0≠val1 but period=0 → DC at val1 + warning."""
-        src = _make_pulse("Vclk", val0=0.0, val1=1.8, period=0.0)
+        """val0!=val1 but period=0 -> Spectre-style one-shot + warning."""
+        src = _make_pulse("Vclk", val0=0.0, val1=1.8, period=0.0,
+                          delay=2e-9, rise=50e-12)
         sim = self._sim()
         warns = _add_spectre_source(sim, src, "0")
         assert len(warns) == 1
         assert "period not set" in warns[0]
+        waveform = sim.sources[-1].waveform
+        assert waveform(1.9e-9) == pytest.approx(0.0)
+        assert waveform(2.025e-9) == pytest.approx(0.9)
+        assert waveform(2.05e-9) == pytest.approx(1.8)
+        assert waveform(20e-9) == pytest.approx(1.8)
+
+    def test_nonperiodic_pulse_width_falls_once(self):
+        """A no-period pulse with width falls once and remains at val0."""
+        src = _make_pulse("Vrst", val0=0.0, val1=0.9, period=0.0,
+                          delay=1e-9, rise=50e-12, fall=50e-12,
+                          width=2e-9)
+        sim = self._sim()
+        warns = _add_spectre_source(sim, src, "0")
+        assert len(warns) == 1
+        waveform = sim.sources[-1].waveform
+        assert waveform(0.5e-9) == pytest.approx(0.0)
+        assert waveform(1.05e-9) == pytest.approx(0.9)
+        assert waveform(3.05e-9) == pytest.approx(0.9)
+        assert waveform(3.1e-9) == pytest.approx(0.0)
+        assert waveform(10e-9) == pytest.approx(0.0)
 
     def test_pulse_valid_no_warnings(self):
         """Well-formed pulse → no warnings."""
@@ -291,6 +430,23 @@ class TestAddSpectreSourceDegenerateCases:
         sim = self._sim()
         warns = _add_spectre_source(sim, src, "0")
         assert warns == []
+
+    def test_pulse_width_matches_spectre_plateau_semantics(self):
+        """Spectre pulse width is the high plateau after the rise ramp."""
+        src = _make_pulse(
+            "Vclk", val0=0.0, val1=0.9, period=1e-9,
+            delay=100e-12, rise=20e-12, fall=20e-12, width=500e-12,
+        )
+        sim = self._sim()
+        warns = _add_spectre_source(sim, src, "0")
+
+        assert warns == []
+        waveform = sim.sources[-1].waveform
+        assert waveform(110e-12) == pytest.approx(0.45)
+        assert waveform(120e-12) == pytest.approx(0.9)
+        assert waveform(620e-12) == pytest.approx(0.9)
+        assert waveform(630e-12) == pytest.approx(0.45)
+        assert waveform(640e-12) == pytest.approx(0.0)
 
     def test_sine_no_freq_warns_and_becomes_dc(self):
         """sine with freq=0 → DC + warning."""
@@ -330,20 +486,71 @@ class TestAddSpectreSourceDegenerateCases:
         assert sim.sources[-1].waveform(0.0) == pytest.approx(0.45)
         assert sim.sources[-1].waveform(0.25 / 73e6) == pytest.approx(0.85)
 
-    def test_sine_offset_param_is_not_waveform_dc(self):
-        """`offset=` is not Spectre's sine waveform DC; use `sinedc=` instead."""
+    def test_sine_offset_amplitude_frequency_are_not_transient_aliases(self):
+        """Spectre ignores these names for transient sine; EVAS must too."""
         src = SpectreSource(
             name="Vin",
             node_pos="vin",
             node_neg="0",
             source_type="sine",
-            params={"type": "sine", "freq": 100e6, "ampl": 0.2, "offset": 0.45},
+            params={
+                "type": "sine",
+                "freq": 100e6,
+                "amplitude": 0.2,
+                "offset": 0.45,
+            },
         )
         sim = self._sim()
         warns = _add_spectre_source(sim, src, "0")
         assert warns == []
         assert sim.sources[-1].waveform(0.0) == pytest.approx(0.0)
-        assert sim.sources[-1].waveform(0.25 / 100e6) == pytest.approx(0.2)
+        assert sim.sources[-1].waveform(0.25 / 100e6) == pytest.approx(1.0)
+
+    def test_sine_vo_va_are_not_transient_aliases(self):
+        src = SpectreSource(
+            name="Vin",
+            node_pos="vin",
+            node_neg="0",
+            source_type="sine",
+            params={"type": "sine", "freq": 50e6, "vo": 0.45, "va": 0.15},
+        )
+        sim = self._sim()
+        warns = _add_spectre_source(sim, src, "0")
+        assert warns == []
+        assert sim.sources[-1].waveform(0.0) == pytest.approx(0.0)
+        assert sim.sources[-1].waveform(0.25 / 50e6) == pytest.approx(1.0)
+
+    def test_sine_noncanonical_names_are_ignored_but_uppercase_M_frequency_is_preserved(self, tmp_path):
+        scs = tmp_path / "tb_sine_aliases.scs"
+        scs.write_text(textwrap.dedent("""\
+            Vvin (vin 0) vsource type=sine amplitude=0.1 offset=0.45 freq=100M
+            tran tran stop=10n
+            save vin
+        """))
+
+        netlist = parse_spectre(str(scs))
+        sim = self._sim()
+        warns = _add_spectre_source(sim, netlist.sources[0], "0")
+
+        assert warns == []
+        assert sim.sources[-1].waveform(0.0) == pytest.approx(0.0)
+        assert sim.sources[-1].waveform(2.5e-9) == pytest.approx(1.0)
+
+    def test_sine_canonical_sinedc_ampl_preserves_uppercase_M_frequency(self, tmp_path):
+        scs = tmp_path / "tb_sine_canonical.scs"
+        scs.write_text(textwrap.dedent("""\
+            Vvin (vin 0) vsource type=sine sinedc=0.45 ampl=0.1 freq=100M
+            tran tran stop=10n
+            save vin
+        """))
+
+        netlist = parse_spectre(str(scs))
+        sim = self._sim()
+        warns = _add_spectre_source(sim, netlist.sources[0], "0")
+
+        assert warns == []
+        assert sim.sources[-1].waveform(0.0) == pytest.approx(0.45)
+        assert sim.sources[-1].waveform(2.5e-9) == pytest.approx(0.55)
 
     def test_pwl_duplicate_times_are_rejected_like_spectre(self):
         src = SpectreSource(
@@ -379,12 +586,70 @@ class TestNetlistRegressions:
         ]
         assert netlist.save_formats["vin_i"] == "3f"
 
-    def test_multiline_pwl_wave_is_joined_and_parsed(self, tmp_path):
+    def test_implicit_multiline_pwl_wave_is_rejected(self, tmp_path):
         scs = tmp_path / "tb_multiline_pwl.scs"
         scs.write_text(textwrap.dedent("""\
             VIN (vin_i 0) vsource type=pwl wave=[
                 0      0.0
                 20.48u 1.0
+            ]
+        """))
+
+        with pytest.raises(ValueError, match="multiline wave=\\[\\.\\.\\.\\] requires backslash"):
+            parse_spectre(str(scs))
+
+
+class TestCsvWriter:
+
+    def test_write_csv_preserves_formats_and_rounds_integer_columns(self, tmp_path):
+        result = SimResult(
+            time=np.array([0.0, 1e-9]),
+            signals={
+                "vin": np.array([0.1254, 0.3756]),
+                "code_code": np.array([0.49, 1.51]),
+                "fine": np.array([1.23456789, 2.3456789]),
+            },
+            step_sizes=np.array([0.0, 1e-9]),
+        )
+        csv_path = tmp_path / "tran.csv"
+
+        _write_csv(
+            csv_path,
+            result,
+            ["vin", "code_code", "fine"],
+            {"vin": "3f", "code_code": "d", "fine": "4e"},
+        )
+
+        assert csv_path.read_text(encoding="utf-8").splitlines() == [
+            "time,vin,code_code,fine",
+            "0.000000000000e+00,0.125,0,1.2346e+00",
+            "1.000000000000e-09,0.376,2,2.3457e+00",
+        ]
+
+    def test_write_csv_python_fallback_matches_numpy_writer(self, tmp_path, monkeypatch):
+        result = SimResult(
+            time=np.array([0.0, 2e-9]),
+            signals={"out": np.array([0.1, 0.2]), "state_code": np.array([1.4, 2.6])},
+            step_sizes=np.array([0.0, 2e-9]),
+        )
+        fast_path = tmp_path / "fast.csv"
+        fallback_path = tmp_path / "fallback.csv"
+
+        _write_csv(fast_path, result, ["out", "state_code"], {"state_code": "d"})
+        monkeypatch.setenv("EVAS_CSV_WRITER", "python")
+        _write_csv(fallback_path, result, ["out", "state_code"], {"state_code": "d"})
+
+        assert fast_path.read_text(encoding="utf-8") == fallback_path.read_text(encoding="utf-8")
+
+
+class TestPwlParserRegressions:
+
+    def test_backslash_continued_pwl_wave_is_parsed(self, tmp_path):
+        scs = tmp_path / "tb_continued_pwl.scs"
+        scs.write_text(textwrap.dedent("""\
+            VIN (vin_i 0) vsource type=pwl wave=[ \\
+                0      0.0 \\
+                20.48u 1.0 \\
             ]
         """))
 
@@ -406,6 +671,26 @@ class TestNetlistRegressions:
         assert source.source_type == "pwl"
         assert source.params["wave"] == pytest.approx([0.0, 0.0, 10e-9, 1.0, 20e-9, 0.0])
 
+    def test_inline_arithmetic_in_pwl_wave_is_rejected_like_spectre(self, tmp_path):
+        scs = tmp_path / "tb_expr_pwl.scs"
+        scs.write_text(textwrap.dedent("""\
+            VIN (vin_i 0) vsource type=pwl wave=[0n 0.0 10n+100p 1.0]
+        """))
+
+        with pytest.raises(ValueError, match="inline arithmetic inside wave"):
+            parse_spectre(str(scs))
+
+    def test_parenthesized_pulse_parameter_list_is_rejected_like_spectre(self, tmp_path):
+        scs = tmp_path / "tb_bad_pulse.scs"
+        scs.write_text(textwrap.dedent("""\
+            V0 (b0 0) vsource type=pulse (0 0.9 5n 0.1n 0.1n 5n 10n)
+            tran tran stop=80n
+            save b0
+        """))
+
+        with pytest.raises(ValueError, match="parenthesized vsource parameter list"):
+            parse_spectre(str(scs))
+
     def test_invalid_two_name_instance_syntax_is_rejected(self, tmp_path):
         scs = tmp_path / "tb_bad_instance.scs"
         scs.write_text(textwrap.dedent("""\
@@ -426,6 +711,676 @@ class TestNetlistRegressions:
 
         with pytest.raises(ValueError):
             parse_spectre(str(scs))
+
+
+class TestIndexedMigrationHarness:
+    @pytest.fixture(autouse=True)
+    def _legacy_python_engine_for_instrumentation_tests(self, monkeypatch):
+        monkeypatch.setenv("EVAS_ENGINE", "python")
+
+    def test_evas_simulate_runs_indexed_parity_when_opted_in(self, tmp_path, monkeypatch):
+        va = tmp_path / "pass_through.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module pass_through(vin, vout);
+                input vin;
+                output vout;
+                electrical vin, vout;
+
+                analog begin
+                    V(vout) <+ V(vin);
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_pass_through.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (vin 0) vsource type=dc dc=0.75
+            I0 (vin vout) pass_through
+            tran tran stop=2n step=1n
+            save vin:3f vout:3f
+            ahdl_include "pass_through.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_INDEXED_PARITY", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_indexed_parity = true" in log
+        assert "Indexed parity check:" in log
+        assert "passed: checked_signals=2" in log
+        assert (out_dir / "tran.csv").exists()
+
+    def test_evas_simulate_logs_indexed_snapshot_profile_when_opted_in(self, tmp_path, monkeypatch):
+        va = tmp_path / "pass_through.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module pass_through(vin, vout);
+                input vin;
+                output vout;
+                electrical vin, vout;
+
+                analog begin
+                    V(vout) <+ V(vin);
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_pass_through.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (vin 0) vsource type=dc dc=0.75
+            I0 (vin vout) pass_through
+            tran tran stop=2n step=1n
+            save vin:3f vout:3f
+            ahdl_include "pass_through.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_INDEXED_SNAPSHOT_PROFILE", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_indexed_snapshot_profile = true" in log
+        assert "dict_prev_snapshot_s" in log
+        assert "indexed_prev_snapshot_s" in log
+        assert "Indexed snapshot profile:" in log
+        assert "max_abs_diff = 0.0" in log
+
+    def test_evas_simulate_logs_indexed_arrays_when_opted_in(self, tmp_path, monkeypatch):
+        va = tmp_path / "pass_through.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module pass_through(vin, vout);
+                input vin;
+                output vout;
+                electrical vin, vout;
+
+                analog begin
+                    V(vout) <+ V(vin);
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_pass_through.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (vin 0) vsource type=dc dc=0.75
+            I0 (vin vout) pass_through
+            tran tran stop=2n step=1n
+            save vin:3f vout:3f
+            ahdl_include "pass_through.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_INDEXED_ARRAYS", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_indexed_arrays = true" in log
+        assert "indexed_array_err_ratio_reads" in log
+        assert "Indexed array profile:" in log
+        assert "Indexed model IO plan:" in log
+        assert "mapped_port_count = 2" in log
+        assert "output_count = 1" in log
+        assert "scalar_state_count = 0" in log
+        assert "integer_state_count = 0" in log
+        assert "state_array_count = 0" in log
+        assert "state_array_slot_count = 0" in log
+        assert "static_voltage_read_count = 1" in log
+        assert "static_output_write_count = 1" in log
+        assert "event_body_voltage_read_count = 0" in log
+        assert "event_trigger_voltage_count = 0" in log
+        assert "event_voltage_read_count = 0" in log
+        assert "dynamic_branch_access_count = 0" in log
+        assert "dynamic_voltage_read_count = 0" in log
+        assert "dynamic_output_write_count = 0" in log
+        assert "output_write_throughs =" in log
+        assert "post_model_sync_repairs = 0" in log
+        assert "Indexed voltage read probe:" in log
+        assert "Indexed voltage array reads:" in log
+        assert "fallbacks = 0" in log
+        assert "reads =" in log
+        assert "mismatches = 0" in log
+        assert "missing_nodes = 0" in log
+        assert "max_abs_diff = 0.0" in log
+
+    def test_evas_simulate_logs_indexed_state_storage_when_opted_in(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        va = tmp_path / "stateful.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module stateful(vout);
+                output vout;
+                electrical vout;
+                real x = 0.0;
+                integer code = 0;
+                real accum[0:1];
+
+                analog begin
+                    x = x + 0.25;
+                    code = code + 1;
+                    accum[1] = x + code;
+                    V(vout) <+ accum[1];
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_stateful.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            I0 (vout) stateful
+            tran tran stop=2n step=1n
+            save vout:3f
+            ahdl_include "stateful.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_INDEXED_STATE_STORAGE", "1")
+        monkeypatch.setenv("EVAS_STATE_LOCAL_FASTPATH", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_indexed_state_storage = true" in log
+        assert "evas_state_local_fastpath = true" in log
+        assert "indexed_state_storage_enabled = 1" in log
+        assert "indexed_state_storage_models = 1" in log
+        assert "indexed_state_storage_scalar_slots = 2" in log
+        assert "indexed_state_storage_integer_slots = 1" in log
+        assert "indexed_state_storage_array_slots = 2" in log
+        assert "indexed_state_scalar_reads_total =" in log
+        assert "indexed_state_scalar_writes_total =" in log
+        assert "indexed_state_array_reads_total =" in log
+        assert "indexed_state_array_writes_total =" in log
+        assert "indexed_state_array_oob_writes_total = 0" in log
+
+    def test_evas_simulate_logs_static_branch_fastpath_when_opted_in(self, tmp_path, monkeypatch):
+        va = tmp_path / "pass_through.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module pass_through(vin, vout);
+                input vin;
+                output vout;
+                electrical vin, vout;
+
+                analog begin
+                    V(vout) <+ V(vin);
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_pass_through.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (vin 0) vsource type=dc dc=0.75
+            I0 (vin vout) pass_through
+            tran tran stop=2n step=1n
+            save vin:3f vout:3f
+            ahdl_include "pass_through.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_STATIC_BRANCH_FASTPATH", "1")
+        monkeypatch.setenv("EVAS_INDEXED_ARRAYS", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_static_branch_fastpath = true" in log
+        assert "evas_indexed_arrays = true" in log
+        assert "static_branch_direct_array_models = 1" in log
+        assert "static_branch_direct_array_read_nodes = 1" in log
+        assert "static_branch_direct_array_write_nodes = 1" in log
+        assert "static_branch_fastpath_codegen_models = 1" in log
+        assert "static_branch_fastpath_static_read_nodes = 1" in log
+        assert "static_branch_fastpath_static_write_nodes = 1" in log
+        assert "static_branch_fastpath_fallbacks_total = 0" in log
+        assert (out_dir / "tran.csv").exists()
+
+    def test_evas_simulate_logs_model_eval_profile_when_opted_in(self, tmp_path, monkeypatch):
+        va = tmp_path / "pass_through.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module pass_through(vin, vout);
+                input vin;
+                output vout;
+                electrical vin, vout;
+
+                analog begin
+                    V(vout) <+ V(vin);
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_pass_through.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (vin 0) vsource type=dc dc=0.75
+            I0 (vin vout) pass_through
+            tran tran stop=2n step=1n
+            save vin:3f vout:3f
+            ahdl_include "pass_through.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+        default_log = log_path.read_text(encoding="utf-8")
+        assert "Model timing counters:" not in default_log
+
+        monkeypatch.setenv("EVAS_PROFILE_MODEL_EVAL", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_profile_model_eval = true" in log
+        assert "Model timing counters:" in log
+        assert "evaluate_calls =" in log
+        assert "evaluate_s =" in log
+        assert "post_update_s =" in log
+        assert "prepare_step_s =" in log
+
+    def test_evas_simulate_logs_rust_static_eval_when_opted_in(self, tmp_path, monkeypatch):
+        _build_rust_core_or_skip()
+        va = tmp_path / "gain.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module gain(vin, vout);
+                input vin;
+                output vout;
+                electrical vin, vout;
+
+                analog begin
+                    V(vout) <+ 2.0 * V(vin) + 0.125;
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_gain.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (vin 0) vsource type=dc dc=0.75
+            I0 (vin vout) gain
+            tran tran stop=2n step=1n
+            save vin:3f vout:3f
+            ahdl_include "gain.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_RUST_STATIC_EVAL", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_rust_static_eval = true" in log
+        assert "evas_indexed_arrays = true" in log
+        assert "rust_static_eval_available = 1" in log
+        assert "rust_static_eval_candidate_models = 1" in log
+        assert "rust_static_eval_models = 1" in log
+        assert "rust_static_eval_ops = 1" in log
+        assert "rust_static_eval_segments = 1" in log
+        assert "rust_static_eval_max_segment_models = 1" in log
+        assert "rust_static_eval_node_voltage_syncs =" in log
+        assert "rust_static_eval_deferred_output_syncs =" in log
+        assert "rust_static_eval_lifecycle_model_skips =" in log
+        assert "rust_static_eval_runtime_param_ops = 0" in log
+        assert "rust_static_eval_coeff_eval_fallbacks = 0" in log
+        assert "indexed_array_dirty_validation_enabled = 1" in log
+        assert "indexed_array_dirty_syncs =" in log
+        assert "rust_static_eval_errors = 0" in log
+        assert (out_dir / "tran.csv").exists()
+
+    def test_evas_simulate_defaults_to_evas2_engine(self, tmp_path, monkeypatch):
+        _build_rust_core_or_skip()
+        monkeypatch.delenv("EVAS_ENGINE", raising=False)
+        scs = tmp_path / "tb_default_evas2_source.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            VDD (vdd 0) vsource type=dc dc=1.8
+            tran tran stop=2n step=1n
+            save vdd:3f
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_engine = evas2" in log
+        assert "evas_rust_full_model_fastpath = true" in log
+        assert "evas_rust_full_model_required = true" in log
+        assert "evas_rust_required = true" in log
+        assert "rust_sim_program_enabled = 1" in log
+        assert "rust_sim_program_source_record_enabled = 1" in log
+        assert (out_dir / "tran.csv").exists()
+
+    def test_evas_simulate_evas2_option_requires_rust_full_model(self, tmp_path):
+        _build_rust_core_or_skip()
+        scs = tmp_path / "tb_evas2_source.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            VDD (vdd 0) vsource type=dc dc=1.8
+            simulatorOptions options evas_engine=evas2 evas_skip_source_error_control=true
+            tran tran stop=2n step=1n
+            save vdd:3f
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_engine = evas2" in log
+        assert "evas_rust_full_model_fastpath = true" in log
+        assert "evas_rust_full_model_required = true" in log
+        assert "evas_rust_required = true" in log
+        assert "rust_sim_program_enabled = 1" in log
+        assert "rust_sim_program_source_record_enabled = 1" in log
+        assert (out_dir / "tran.csv").exists()
+
+    def test_evas_simulate_logs_rust_transition_shadow_when_opted_in(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _build_rust_core_or_skip()
+        va = tmp_path / "trans_target_shadow.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module trans_target_shadow(inp, out);
+                input inp;
+                output out;
+                electrical inp, out;
+                integer q = 0;
+
+                analog begin
+                    q = V(inp) > 0.45 ? 1 : 0;
+                    V(out) <+ transition(q ? 1.0 : 0.0, 0.0, 1n, 2n);
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_trans_target_shadow.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (inp 0) vsource type=pulse val0=0 val1=1 period=2n width=1n rise=1p fall=1p
+            I0 (inp out) trans_target_shadow
+            tran tran stop=3n step=1n
+            save inp:3f out:3f
+            ahdl_include "trans_target_shadow.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_RUST_TRANSITION_SHADOW", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_rust_transition_shadow = true" in log
+        assert "evas_indexed_arrays = true" in log
+        assert "rust_transition_shadow_requested = 1" in log
+        assert "rust_transition_shadow_available = 1" in log
+        assert "rust_transition_shadow_candidate_models = 1" in log
+        assert "rust_transition_shadow_models = 1" in log
+        assert "rust_transition_shadow_static_ops = 1" in log
+        assert "rust_transition_shadow_target_ops = 1" in log
+        assert "rust_transition_shadow_segments = 1" in log
+        assert "rust_transition_shadow_mismatches = 0" in log
+        assert "rust_transition_shadow_errors = 0" in log
+        assert (out_dir / "tran.csv").exists()
+
+    def test_evas_simulate_logs_rust_event_due_shadow_when_opted_in(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _build_rust_core_or_skip()
+        va = tmp_path / "event_due_shadow.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module event_due_shadow(inp, out);
+                input inp;
+                output out;
+                electrical inp, out;
+                integer count = 0;
+
+                analog begin
+                    @(cross(V(inp) - 0.5, +1)) count = count + 1;
+                    @(above(V(inp) - 0.5)) count = count + 1;
+                    @(timer(0, 1n)) count = count + 1;
+                    @(timer(2n)) count = count + 1;
+                    V(out) <+ count;
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_event_due_shadow.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (inp 0) vsource type=pulse val0=0 val1=1 period=2n width=1n rise=1p fall=1p
+            I0 (inp out) event_due_shadow
+            tran tran stop=3n step=1n
+            save inp:3f out:3f
+            ahdl_include "event_due_shadow.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_RUST_EVENT_DUE_SHADOW", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_rust_event_due_shadow = true" in log
+        assert "evas_indexed_arrays = true" not in log
+        assert "rust_event_due_shadow_requested = 1" in log
+        assert "rust_event_due_shadow_available = 1" in log
+        assert "rust_event_due_shadow_enabled = 1" in log
+        assert "rust_event_due_shadow_cross_checks_total =" in log
+        assert "rust_event_due_shadow_above_checks_total =" in log
+        assert "rust_event_due_shadow_timer_periodic_checks_total =" in log
+        assert "rust_event_due_shadow_timer_absolute_checks_total =" in log
+        assert "rust_event_due_shadow_mismatches_total = 0" in log
+        assert "rust_event_due_shadow_errors_total = 0" in log
+        assert (out_dir / "tran.csv").exists()
+
+    def test_evas_simulate_logs_event_trace_audit_when_opted_in(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        va = tmp_path / "event_trace_audit.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module event_trace_audit(inp, out);
+                input inp;
+                output out;
+                electrical inp, out;
+                real x = 0.0;
+                real acc[0:1];
+
+                analog begin
+                    @(initial_step) begin
+                        x = 1.0;
+                        acc[0] = x;
+                    end
+                    @(cross(V(inp) - 0.5, +1)) begin
+                        x = x + 1.0;
+                        acc[1] = x;
+                    end
+                    @(timer(2n)) x = x + 1.0;
+                    @(final_step) x = x + 1.0;
+                    V(out) <+ x;
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_event_trace_audit.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (inp 0) vsource type=pulse val0=0 val1=1 period=2n width=1n rise=1p fall=1p
+            I0 (inp out) event_trace_audit
+            tran tran stop=3n step=1n
+            save inp:3f out:3f
+            ahdl_include "event_trace_audit.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_EVENT_TRACE_AUDIT", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_event_trace_audit = true" in log
+        assert "event_trace_audit_requested = 1" in log
+        assert "event_trace_audit_enabled = 1" in log
+        assert "event_trace_audit_events_total =" in log
+        assert "event_trace_audit_state_writes_total =" in log
+        assert "event_trace_audit_array_writes_total =" in log
+        assert "event_trace_audit_output_writes_total =" in log
+        assert "event_trace_audit_records_dropped_total = 0" in log
+        assert (out_dir / "tran.csv").exists()
+
+    def test_evas_simulate_logs_rust_static_fast_sync_when_opted_in(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _build_rust_core_or_skip()
+        va = tmp_path / "gain.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module gain(vin, vout);
+                input vin;
+                output vout;
+                electrical vin, vout;
+
+                analog begin
+                    V(vout) <+ 2.0 * V(vin) + 0.125;
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_gain.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (vin 0) vsource type=dc dc=0.75
+            I0 (vin vout) gain
+            tran tran stop=2n step=1n
+            save vin:3f vout:3f
+            ahdl_include "gain.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_RUST_STATIC_FAST_SYNC", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_rust_static_eval = true" in log
+        assert "evas_rust_static_fast_sync = true" in log
+        assert "rust_static_fast_sync_requested = 1" in log
+        assert "rust_static_fast_sync_enabled = 1" in log
+        assert "rust_static_fast_sync_node_voltage_sync_skips =" in log
+        assert "rust_static_fast_sync_validation_skips =" in log
+        assert "indexed_array_dirty_validation_enabled = 0" in log
+        assert "indexed_array_syncs = 0" in log
+        assert "rust_static_eval_errors = 0" in log
+        assert (out_dir / "tran.csv").exists()
+
+    def test_evas_simulate_rust_static_eval_uses_instance_parameter_overrides(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _build_rust_core_or_skip()
+        va = tmp_path / "gain_param.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module gain_param(vin, vout);
+                input vin;
+                output vout;
+                electrical vin, vout;
+                parameter real gain = 2.0;
+                parameter real offset = 0.125;
+
+                analog begin
+                    V(vout) <+ gain * V(vin) + offset;
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_gain_param.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (vin 0) vsource type=dc dc=0.75
+            I0 (vin vout) gain_param gain=3 offset=250m
+            tran tran stop=2n step=1n
+            save vin:3f vout:3f
+            ahdl_include "gain_param.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        monkeypatch.setenv("EVAS_RUST_STATIC_EVAL", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "rust_static_eval_runtime_param_ops = 1" in log
+        assert "rust_static_eval_coeff_eval_fallbacks = 0" in log
+        assert "rust_static_eval_models = 1" in log
+        rows = list(csv.DictReader((out_dir / "tran.csv").open()))
+        assert float(rows[-1]["vout"]) == pytest.approx(2.5)
+
+    def test_evas_simulate_logs_model_io_profile_when_opted_in(self, tmp_path, monkeypatch):
+        va = tmp_path / "pass_through.va"
+        va.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+
+            module pass_through(vin, vout);
+                input vin;
+                output vout;
+                electrical vin, vout;
+
+                analog begin
+                    V(vout) <+ V(vin);
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_pass_through.scs"
+        scs.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            V0 (vin 0) vsource type=dc dc=0.75
+            I0 (vin vout) pass_through
+            tran tran stop=2n step=1n
+            save vin:3f vout:3f
+            ahdl_include "pass_through.va"
+        """))
+        out_dir = tmp_path / "out"
+        log_path = tmp_path / "evas.log"
+
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+        default_log = log_path.read_text(encoding="utf-8")
+        assert "Model IO counters:" not in default_log
+
+        monkeypatch.setenv("EVAS_PROFILE_MODEL_IO", "1")
+        assert evas_simulate(str(scs), log_path=str(log_path), output_dir=str(out_dir))
+
+        log = log_path.read_text(encoding="utf-8")
+        assert "evas_profile_model_io = true" in log
+        assert "Model IO counters:" in log
+        assert "voltage_reads =" in log
+        assert "voltage_read_local_nodes =" in log
+        assert "voltage_read_external_nodes =" in log
+        assert "output_writes =" in log
+        assert "output_write_nodes =" in log
 
 
 class TestEvasProfileMapping:
@@ -462,10 +1417,81 @@ class TestEvasProfileMapping:
             output_dir=str(tmp_path / "out"),
         )
         assert ok is False
-        assert "ERROR: Invalid source VIN" in log_path.read_text()
+        assert "ERROR: Failed to parse" in log_path.read_text()
+        assert "multiline wave=[...] requires backslash" in log_path.read_text()
 
 
 class TestSpectreCompatibilityPreflight:
+
+    def test_initial_step_contribution_is_allowed(self, tmp_path):
+        va_file = tmp_path / "initial_contribution.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module initial_contribution(out);
+                output out;
+                electrical out;
+                real target;
+                analog begin
+                    @(initial_step) begin
+                        target = 1.0;
+                        V(out) <+ target;
+                    end
+                    V(out) <+ target;
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_initial_contribution.scs"
+        log_path = tmp_path / "evas.log"
+        scs.write_text(textwrap.dedent("""\
+            I1 (out) initial_contribution
+            tran tran stop=1n maxstep=100p
+            ahdl_include "initial_contribution.va"
+            save out
+        """))
+
+        from evas.netlist.runner import evas_simulate
+
+        ok = evas_simulate(
+            str(scs),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+        assert ok is True
+
+    def test_event_body_contribution_fails(self, tmp_path):
+        va_file = tmp_path / "event_contribution.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module event_contribution(clk, out);
+                input clk;
+                output out;
+                electrical clk, out;
+                analog begin
+                    @(cross(V(clk) - 0.5, +1)) begin
+                        V(out) <+ transition(1.0, 0, 1p, 1p);
+                    end
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_event_contribution.scs"
+        log_path = tmp_path / "evas.log"
+        scs.write_text(textwrap.dedent("""\
+            Vclk (clk 0) vsource type=pulse val0=0 val1=1 period=1n width=500p rise=1p fall=1p
+            I1 (clk out) event_contribution
+            tran tran stop=2n
+            ahdl_include "event_contribution.va"
+            save out
+        """))
+
+        from evas.netlist.runner import evas_simulate
+
+        ok = evas_simulate(
+            str(scs),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+        assert ok is False
+        assert "contribution statement" in log_path.read_text()
 
     def test_transition_in_runtime_case_block_fails(self, tmp_path):
         va_file = tmp_path / "bad_transition.va"
@@ -505,6 +1531,141 @@ class TestSpectreCompatibilityPreflight:
         assert ok is False
         assert "transition()" in log_path.read_text()
 
+    def test_transition_in_if_branch_fails(self, tmp_path):
+        va_file = tmp_path / "bad_transition_if.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module bad_transition_if(inp, out);
+                input inp;
+                output out;
+                electrical inp, out;
+                analog begin
+                    if (V(inp) > 0.5)
+                        V(out) <+ transition(1.0, 0, 1n, 1n);
+                    else
+                        V(out) <+ transition(0.0, 0, 1n, 1n);
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_bad_transition_if.scs"
+        log_path = tmp_path / "evas.log"
+        scs.write_text(textwrap.dedent("""\
+            Vin (inp 0) vsource dc=1 type=dc
+            I1 (inp out) bad_transition_if
+            tran tran stop=1n
+            ahdl_include "bad_transition_if.va"
+            save out
+        """))
+
+        from evas.netlist.runner import evas_simulate
+
+        ok = evas_simulate(
+            str(scs),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+        assert ok is False
+        assert "transition()" in log_path.read_text()
+
+    def test_standalone_wait_call_fails(self, tmp_path):
+        va_file = tmp_path / "bad_wait.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module bad_wait(out);
+                output out;
+                electrical out;
+                analog begin
+                    wait(1n);
+                    V(out) <+ 1.0;
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_bad_wait.scs"
+        log_path = tmp_path / "evas.log"
+        scs.write_text(textwrap.dedent("""\
+            I1 (out) bad_wait
+            tran tran stop=1n
+            ahdl_include "bad_wait.va"
+            save out
+        """))
+
+        from evas.netlist.runner import evas_simulate
+
+        ok = evas_simulate(
+            str(scs),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+        assert ok is False
+        assert "wait()" in log_path.read_text()
+
+    def test_unknown_dollar_function_fails(self, tmp_path):
+        va_file = tmp_path / "bad_itor.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module bad_itor(out);
+                output out;
+                electrical out;
+                integer code;
+                real val;
+                analog begin
+                    code = 3;
+                    val = $itor(code);
+                    V(out) <+ val;
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_bad_itor.scs"
+        log_path = tmp_path / "evas.log"
+        scs.write_text(textwrap.dedent("""\
+            I1 (out) bad_itor
+            tran tran stop=1n
+            ahdl_include "bad_itor.va"
+            save out
+        """))
+
+        from evas.netlist.runner import evas_simulate
+
+        ok = evas_simulate(
+            str(scs),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+        assert ok is False
+        assert "$itor()" in log_path.read_text()
+
+    def test_tanh_math_function_is_supported(self, tmp_path):
+        va_file = tmp_path / "tanh_probe.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module tanh_probe(inp, out);
+                input inp;
+                output out;
+                electrical inp, out;
+                analog begin
+                    V(out) <+ tanh(V(inp));
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_tanh_probe.scs"
+        log_path = tmp_path / "evas.log"
+        scs.write_text(textwrap.dedent("""\
+            Vin (inp 0) vsource dc=0.5 type=dc
+            I1 (inp out) tanh_probe
+            tran tran stop=1n
+            ahdl_include "tanh_probe.va"
+            save out
+        """))
+
+        from evas.netlist.runner import evas_simulate
+
+        ok = evas_simulate(
+            str(scs),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+        assert ok is True
+
     def test_supply_port_hard_drive_conflict_fails(self, tmp_path):
         va_file = tmp_path / "supply_driver.va"
         va_file.write_text(textwrap.dedent("""\
@@ -539,3 +1700,101 @@ class TestSpectreCompatibilityPreflight:
         assert ok is False
         log_text = log_path.read_text()
         assert "drives supply port" in log_text
+
+    def test_parameter_port_name_collision_fails(self, tmp_path):
+        va_file = tmp_path / "param_port_collision.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module param_port_collision(vdd, out);
+                input vdd;
+                output out;
+                electrical vdd, out;
+                parameter real vdd = 0.9;
+                analog begin
+                    V(out) <+ V(vdd);
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_param_port_collision.scs"
+        log_path = tmp_path / "evas.log"
+        scs.write_text(textwrap.dedent("""\
+            VDD (vdd 0) vsource dc=0.9 type=dc
+            I1 (vdd out) param_port_collision
+            tran tran stop=1n
+            ahdl_include "param_port_collision.va"
+            save out
+        """))
+
+        from evas.netlist.runner import evas_simulate
+
+        ok = evas_simulate(
+            str(scs),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+        assert ok is False
+        log_text = log_path.read_text()
+        assert "parameter name" in log_text
+        assert "collides with module port" in log_text
+
+    def test_case_distinct_parameter_and_port_names_are_allowed(self, tmp_path):
+        va_file = tmp_path / "case_distinct_supply.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module case_distinct_supply(VDD, out);
+                input VDD;
+                output out;
+                electrical VDD, out;
+                parameter real vdd = 0.9;
+                analog begin
+                    V(out) <+ V(VDD) + 0.0 * vdd;
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_case_distinct_supply.scs"
+        scs.write_text(textwrap.dedent("""\
+            VDD (vdd 0) vsource dc=0.9 type=dc
+            I1 (vdd out) case_distinct_supply
+            tran tran stop=1n
+            ahdl_include "case_distinct_supply.va"
+            save out
+        """))
+
+        from evas.netlist.runner import evas_simulate
+
+        ok = evas_simulate(str(scs), output_dir=str(tmp_path / "out"))
+        assert ok
+
+    def test_instance_terminal_count_mismatch_fails(self, tmp_path):
+        va_file = tmp_path / "two_port.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module two_port(inp, out);
+                input inp;
+                output out;
+                electrical inp, out;
+                analog begin
+                    V(out) <+ V(inp);
+                end
+            endmodule
+        """))
+        scs = tmp_path / "tb_short_instance.scs"
+        log_path = tmp_path / "evas.log"
+        scs.write_text(textwrap.dedent("""\
+            Vin (inp 0) vsource dc=0.5 type=dc
+            I1 (inp) two_port
+            tran tran stop=1n
+            ahdl_include "two_port.va"
+            save out
+        """))
+
+        from evas.netlist.runner import evas_simulate
+
+        ok = evas_simulate(
+            str(scs),
+            log_path=str(log_path),
+            output_dir=str(tmp_path / "out"),
+        )
+        assert ok is False
+        log_text = log_path.read_text()
+        assert "terminal count mismatch" in log_text

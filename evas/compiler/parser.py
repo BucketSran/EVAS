@@ -6,6 +6,20 @@ from typing import List, Optional, Tuple
 from .ast_nodes import *
 from .lexer import Token, TokenType, tokenize
 
+_SPECTRE_RESERVED_IDENTIFIERS = {
+    # Spectre VACOMP treats these event names as keywords. They are legal only
+    # in event controls such as @(initial_step), not as user identifiers.
+    'initial_step',
+    'final_step',
+}
+
+_UNSUPPORTED_DIGITAL_PROCEDURAL_BLOCKS = {
+    # Digital Verilog procedural blocks are outside the supported Verilog-A
+    # subset and Spectre rejects them in AHDL compilation.
+    'initial',
+    'always',
+}
+
 
 class ParseError(Exception):
     def __init__(self, msg, token=None):
@@ -46,6 +60,65 @@ class Parser:
 
     def at(self, *types) -> bool:
         return self.peek().type in types
+
+    def _reject_reserved_identifier(self, token: Token, context: str) -> None:
+        if token.value in _SPECTRE_RESERVED_IDENTIFIERS:
+            raise ParseError(
+                f"Spectre-incompatible {context}: {token.value!r} is a "
+                "Verilog-A event keyword and cannot be used as an identifier",
+                token,
+            )
+        if token.value in _UNSUPPORTED_DIGITAL_PROCEDURAL_BLOCKS:
+            raise ParseError(
+                f"Spectre-incompatible {context}: {token.value!r} is a "
+                "digital Verilog procedural keyword, not a Verilog-A identifier",
+                token,
+            )
+
+    def _expect_identifier_name(self, context: str) -> str:
+        token = self.expect(TokenType.IDENT)
+        self._reject_reserved_identifier(token, context)
+        return token.value
+
+    def _validate_assignment_target(self, target: Expr, token: Token) -> None:
+        if isinstance(target, Identifier):
+            if target.name in _SPECTRE_RESERVED_IDENTIFIERS:
+                raise ParseError(
+                    f"Spectre-incompatible assignment target: {target.name!r} "
+                    "is a Verilog-A event keyword",
+                    token,
+                )
+            return
+        if isinstance(target, ArrayAccess):
+            if target.name in _SPECTRE_RESERVED_IDENTIFIERS:
+                raise ParseError(
+                    f"Spectre-incompatible assignment target: {target.name!r} "
+                    "is a Verilog-A event keyword",
+                    token,
+                )
+            return
+        raise ParseError(
+            "Spectre-incompatible assignment target: left side of '=' must be "
+            "a variable name or array element, not an expression",
+            token,
+        )
+
+    def _reject_unsupported_procedural_block_if_present(self, context: str) -> None:
+        token = self.peek()
+        if token.type != TokenType.IDENT:
+            return
+        if token.value in _UNSUPPORTED_DIGITAL_PROCEDURAL_BLOCKS:
+            raise ParseError(
+                f"Spectre-incompatible {context}: digital Verilog "
+                f"'{token.value}' block is not supported in Verilog-A",
+                token,
+            )
+        if token.value in _SPECTRE_RESERVED_IDENTIFIERS and self.peek_n(1).type == TokenType.BEGIN:
+            raise ParseError(
+                f"Spectre-incompatible {context}: use '@({token.value}) begin ... end' "
+                f"inside an analog block, not bare '{token.value} begin ... end'",
+                token,
+            )
 
     # ─── Module ───
 
@@ -103,12 +176,12 @@ class Parser:
         # Non-ANSI: just identifier list
         while True:
             if self.at(TokenType.IDENT):
-                ports.append(self.advance().value)
+                ports.append(self._expect_identifier_name("port name"))
             elif self.at(TokenType.LBRACKET):
                 # array port in header like [7:0] FRAME - skip for now
                 self._skip_range()
                 if self.at(TokenType.IDENT):
-                    ports.append(self.advance().value)
+                    ports.append(self._expect_identifier_name("port name"))
             if not self.match(TokenType.COMMA):
                 break
         return ports
@@ -147,7 +220,7 @@ class Parser:
             if self.at(TokenType.LBRACKET):
                 array_hi, array_lo = self._parse_range()
 
-            name = self.expect(TokenType.IDENT).value
+            name = self._expect_identifier_name("ANSI port name")
 
             if direction:
                 pd = PortDecl(name=name, direction=direction, discipline=discipline)
@@ -226,6 +299,7 @@ class Parser:
     def _parse_module_item(self, module: Module):
         """Parse one module-level item."""
         tok = self.peek()
+        self._reject_unsupported_procedural_block_if_present("module item")
 
         # Direction declarations: input, output, inout
         if tok.type in (TokenType.INPUT, TokenType.OUTPUT, TokenType.INOUT):
@@ -325,7 +399,7 @@ class Parser:
                 if self.at(TokenType.LBRACKET) and array_hi is None:
                     array_hi, array_lo = self._parse_range()
             if self.at(TokenType.IDENT):
-                name = self.advance().value
+                name = self._expect_identifier_name("port declaration")
                 pd = PortDecl(name=name, direction=direction, discipline=discipline)
                 if array_hi is not None:
                     pd.is_array = True
@@ -362,7 +436,7 @@ class Parser:
 
         while True:
             if self.at(TokenType.IDENT):
-                name = self.advance().value
+                name = self._expect_identifier_name("discipline declaration")
                 # Optional outer dimension range after the name (2-D array)
                 if self.at(TokenType.LBRACKET):
                     self._skip_range()  # consume [hi:lo] — recorded in array_hi/lo already
@@ -402,7 +476,7 @@ class Parser:
             self.advance()
             param_type = ParamType.STRING
 
-        name = self.expect(TokenType.IDENT).value
+        name = self._expect_identifier_name("parameter declaration")
 
         default_val = NumberLiteral(0)
         if self.match(TokenType.ASSIGN):
@@ -446,7 +520,7 @@ class Parser:
         is_genvar = type_tok.type == TokenType.GENVAR
 
         while True:
-            name = self.expect(TokenType.IDENT).value
+            name = self._expect_identifier_name("variable declaration")
             is_array = False
             array_hi, array_lo = None, None
             init_values = None
@@ -497,6 +571,34 @@ class Parser:
     def _parse_statement(self) -> Statement:
         """Parse a single statement."""
         tok = self.peek()
+        self._reject_unsupported_procedural_block_if_present("analog statement")
+
+        if tok.type == TokenType.IDENT and tok.value in _SPECTRE_RESERVED_IDENTIFIERS:
+            raise ParseError(
+                f"Spectre-incompatible analog statement: {tok.value!r} is an "
+                "event keyword and must appear only inside an event control, "
+                f"for example '@({tok.value})'",
+                tok,
+            )
+
+        # Module-scope declarations are parsed before the analog block.  If a
+        # declaration keyword reaches statement parsing, it is a local
+        # procedural declaration.  Spectre rejects the common generated pattern
+        # `@(cross(...)) begin real x = ...; ... end` unless the block is a
+        # supported labeled block, which EVAS does not model.  Reject it
+        # instead of silently swallowing the type keyword and simulating the
+        # trailing assignment.
+        if tok.type in (
+            TokenType.REAL, TokenType.INTEGER, TokenType.GENVAR,
+            TokenType.ELECTRICAL, TokenType.VOLTAGE, TokenType.CURRENT,
+            TokenType.PARAMETER, TokenType.INPUT, TokenType.OUTPUT,
+            TokenType.INOUT,
+        ):
+            raise ParseError(
+                "Spectre-incompatible local declaration inside analog/procedural "
+                "statement; move declarations to module scope",
+                tok,
+            )
 
         # begin/end block
         if tok.type == TokenType.BEGIN:
@@ -576,14 +678,14 @@ class Parser:
                 expr_tol_expr = None
                 if self.match(TokenType.COMMA):
                     dir_expr = self._parse_expression()
-                    direction = self._eval_const(dir_expr)
+                    direction = self._coerce_event_direction(dir_expr)
                     if self.match(TokenType.COMMA):
                         time_tol_expr = self._parse_expression()
                         if self.match(TokenType.COMMA):
                             expr_tol_expr = self._parse_expression()
                 self.expect(TokenType.RPAREN)
                 return EventExpr(EventType.CROSS, [expr],
-                                 direction=int(direction) if direction else None,
+                                 direction=direction,
                                  time_tol_expr=time_tol_expr,
                                  expr_tol_expr=expr_tol_expr)
 
@@ -594,10 +696,10 @@ class Parser:
                 direction = None
                 if self.match(TokenType.COMMA):
                     dir_expr = self._parse_expression()
-                    direction = self._eval_const(dir_expr)
+                    direction = self._coerce_event_direction(dir_expr)
                 self.expect(TokenType.RPAREN)
                 return EventExpr(EventType.ABOVE, [expr],
-                                 direction=int(direction) if direction else None)
+                                 direction=direction)
 
             elif tok.value == 'initial_step':
                 self.advance()
@@ -680,7 +782,8 @@ class Parser:
     def _parse_simple_assignment(self) -> Assignment:
         """Parse: target = expr"""
         target = self._parse_expression()
-        self.expect(TokenType.ASSIGN)
+        assign_tok = self.expect(TokenType.ASSIGN)
+        self._validate_assignment_target(target, assign_tok)
         value = self._parse_expression()
         return Assignment(target=target, value=value)
 
@@ -709,14 +812,31 @@ class Parser:
             raise ParseError("Left side of <+ must be a branch access (V/I)")
 
         # Assignment: ident = expr
-        if self.match(TokenType.ASSIGN):
+        assign_tok = self.match(TokenType.ASSIGN)
+        if assign_tok:
+            self._validate_assignment_target(expr, assign_tok)
             rhs = self._parse_expression()
             self.match(TokenType.SEMI)
             return Assignment(target=expr, value=rhs)
 
-        self.match(TokenType.SEMI)
-        # Expression statement (rare but possible)
-        return Assignment(target=expr, value=NumberLiteral(0))
+        if self.match(TokenType.SEMI):
+            if isinstance(expr, FunctionCall):
+                raise ParseError(
+                    "Spectre-incompatible expression statement: standalone "
+                    f"{expr.name}() call is not supported; use an assignment, "
+                    "contribution, event control, or system task",
+                    self.peek(),
+                )
+            raise ParseError(
+                "Spectre-incompatible expression statement: use an assignment, "
+                "contribution, event control, or system task",
+                self.peek(),
+            )
+
+        raise ParseError(
+            "Expected assignment '=', contribution '<+', or ';' after expression",
+            self.peek(),
+        )
 
     # ─── Expressions (precedence climbing) ───
 
@@ -896,6 +1016,12 @@ class Parser:
         # Identifier (variable, parameter, function call)
         if tok.type == TokenType.IDENT:
             name = self.advance().value
+            if name in _SPECTRE_RESERVED_IDENTIFIERS:
+                raise ParseError(
+                    f"Spectre-incompatible expression: {name!r} is a "
+                    "Verilog-A event keyword and cannot be used as an identifier",
+                    tok,
+                )
 
             # Method call: name.method(args)
             if self.at(TokenType.DOT):
@@ -970,6 +1096,15 @@ class Parser:
         if isinstance(expr, UnaryExpr) and expr.op == '-':
             return -self._eval_const(expr.operand)
         return 0
+
+    def _coerce_event_direction(self, expr: Expr) -> int:
+        value = self._eval_const(expr)
+        if value in (-1, 0, 1):
+            return int(value)
+        raise ParseError(
+            "Event direction must be a constant -1, 0, or +1",
+            self.peek(),
+        )
 
 
 def parse(source: str) -> Module:

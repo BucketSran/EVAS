@@ -517,6 +517,22 @@ class TestParserAssignments:
         assert isinstance(stmt.target, ArrayAccess)
         assert stmt.target.name == "arr"
 
+    def test_expression_assignment_lhs_is_rejected(self):
+        src = """
+        module m();
+        real state, integ;
+        analog begin
+            if (state + integ > 0.9) state + integ = 0.9;
+        end
+        endmodule
+        """
+        with pytest.raises(ParseError, match="assignment target"):
+            _parse(src)
+
+    def test_standalone_expression_statement_is_rejected(self):
+        with pytest.raises(ParseError, match="expression statement"):
+            _stmts("foo;")
+
 
 class TestParserIfStatement:
 
@@ -603,6 +619,12 @@ class TestParserEventStatements:
         assert stmt.event.time_tol_expr is not None
         assert stmt.event.expr_tol_expr is not None
 
+    def test_cross_event_direction_zero_float_is_preserved(self):
+        stmts = _stmts("@(cross(V(a) - 0.45, 0.0, 1p)) x = 1;")
+        stmt = stmts[0]
+        assert stmt.event.direction == 0
+        assert stmt.event.time_tol_expr is not None
+
     def test_above_event(self):
         stmts = _stmts("@(above(V(a) - 0.45)) x = 1;")
         stmt = stmts[0]
@@ -614,6 +636,67 @@ class TestParserEventStatements:
         stmt = stmts[0]
         assert isinstance(stmt.event, EventExpr)
         assert stmt.event.event_type == EventType.INITIAL_STEP
+
+    def test_bare_initial_step_block_is_rejected(self):
+        src = """
+        module m(out);
+        electrical out;
+        real x;
+        analog begin
+            initial_step begin
+                x = 0;
+            end
+            V(out) <+ x;
+        end
+        endmodule
+        """
+        with pytest.raises(ParseError, match="bare 'initial_step begin"):
+            _parse(src)
+
+    def test_module_scope_bare_initial_step_block_is_rejected(self):
+        src = """
+        module m(out);
+        electrical out;
+        real x;
+        initial_step begin
+            x = 0;
+        end
+        analog begin
+            V(out) <+ x;
+        end
+        endmodule
+        """
+        with pytest.raises(ParseError, match="bare 'initial_step begin"):
+            _parse(src)
+
+    def test_digital_initial_block_is_rejected(self):
+        src = """
+        module m(out);
+        electrical out;
+        real x;
+        initial begin
+            x = 0;
+        end
+        analog begin
+            V(out) <+ x;
+        end
+        endmodule
+        """
+        with pytest.raises(ParseError, match="digital Verilog 'initial' block"):
+            _parse(src)
+
+    def test_initial_step_parameter_name_is_rejected(self):
+        src = """
+        module m(out);
+        electrical out;
+        parameter real initial_step = 0.45;
+        analog begin
+            V(out) <+ initial_step;
+        end
+        endmodule
+        """
+        with pytest.raises(ParseError, match="event keyword"):
+            _parse(src)
 
     def test_combined_event_cross_or_initial_step(self):
         stmts = _stmts("@(cross(V(a) - 0.45) or initial_step) x = 1;")
@@ -632,6 +715,41 @@ class TestParserEventStatements:
         stmts = _stmts("@(cross(V(a))) begin x = 1; y = 2; end")
         stmt = stmts[0]
         assert isinstance(stmt.body, Block)
+
+    def test_local_declaration_in_event_block_is_rejected(self):
+        src = """
+        module m(clk, vin, out);
+        electrical clk, vin, out;
+        real sampled;
+        analog begin
+            @(cross(V(clk) - 0.45, +1)) begin
+                real v_in = V(vin);
+                sampled = v_in;
+                V(out) <+ sampled;
+            end
+        end
+        endmodule
+        """
+        with pytest.raises(ParseError, match="Spectre-incompatible local declaration"):
+            _parse(src)
+
+    def test_module_scope_declaration_before_event_block_is_allowed(self):
+        src = """
+        module m(clk, vin, out);
+        electrical clk, vin, out;
+        real v_in;
+        real sampled;
+        analog begin
+            @(cross(V(clk) - 0.45, +1)) begin
+                v_in = V(vin);
+                sampled = v_in;
+                V(out) <+ sampled;
+            end
+        end
+        endmodule
+        """
+        m = _parse(src)
+        assert [v.name for v in m.variables] == ["v_in", "sampled"]
 
     def test_timer_event(self):
         stmts = _stmts("@(timer(10e-9)) x = 1;")

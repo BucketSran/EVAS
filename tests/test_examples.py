@@ -7,6 +7,7 @@ import importlib.util
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from evas.cli import _list_examples
 from evas.netlist.runner import evas_simulate
@@ -19,6 +20,12 @@ EXPECTED_EXAMPLES = [
     "digital_basics",
     "noise_gen",
 ]
+
+
+@pytest.fixture(autouse=True)
+def _use_legacy_python_engine(monkeypatch):
+    """Bundled examples exercise the EVAS1.0 compatibility suite."""
+    monkeypatch.setenv("EVAS_ENGINE", "python")
 
 
 # ---------------------------------------------------------------------------
