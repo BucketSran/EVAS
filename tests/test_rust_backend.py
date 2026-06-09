@@ -348,10 +348,10 @@ def test_rust_backend_generates_cppll_reacquire_trace_from_events():
     assert len(values) == len(times) * signal_count
     assert values[0] == pytest.approx(0.9)
     assert values[1] == pytest.approx(0.0)
-    assert values[3 * signal_count + 2] == pytest.approx(0.225)
+    assert values[3 * signal_count + 2] == pytest.approx(0.45)
     assert values[3 * signal_count + 3] == pytest.approx(0.9)
     assert values[3 * signal_count + 5] == pytest.approx(0.55)
-    assert values[4 * signal_count + 6] == pytest.approx(0.675)
+    assert values[4 * signal_count + 6] == pytest.approx(0.9)
 
 
 def test_compiler_emits_scalar_lfsr_transition_whole_segment_candidate():

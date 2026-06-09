@@ -61,7 +61,7 @@ class TestTransitionState:
     def test_rising_ramp_midpoint(self):
         ts = TransitionState(current_val=0.0)
         ts.set_target(time=0.0, target=1.0, rise=10e-9)
-        assert ts.evaluate(5e-9) == pytest.approx(0.25)
+        assert ts.evaluate(5e-9) == pytest.approx(0.5)
 
     def test_rising_ramp_start(self):
         ts = TransitionState(current_val=0.0)
@@ -71,21 +71,21 @@ class TestTransitionState:
     def test_rising_ramp_end_deactivates(self):
         ts = TransitionState(current_val=0.0)
         ts.set_target(time=0.0, target=1.0, rise=10e-9)
-        result = ts.evaluate(12.5e-9)
+        result = ts.evaluate(10e-9)
         assert result == pytest.approx(1.0)
         assert not ts.active
 
     def test_rising_ramp_beyond_end(self):
         ts = TransitionState(current_val=0.0)
         ts.set_target(time=0.0, target=1.0, rise=10e-9)
-        ts.evaluate(12.5e-9)           # deactivate
+        ts.evaluate(10e-9)           # deactivate
         assert ts.evaluate(20e-9) == pytest.approx(1.0)
 
     def test_falling_ramp_uses_fall_time(self):
         ts = TransitionState(current_val=1.0)
         ts.set_target(time=0.0, target=0.0, fall=20e-9)
-        assert ts.evaluate(10e-9) == pytest.approx(0.75)
-        assert ts.evaluate(25e-9) == pytest.approx(0.0)
+        assert ts.evaluate(10e-9) == pytest.approx(0.5)
+        assert ts.evaluate(20e-9) == pytest.approx(0.0)
         assert not ts.active
 
     def test_delay_holds_start_val_during_delay(self):
@@ -98,9 +98,9 @@ class TestTransitionState:
     def test_delay_ramp_begins_after_delay(self):
         ts = TransitionState(current_val=0.0)
         ts.set_target(time=0.0, target=1.0, delay=5e-9, rise=10e-9)
-        # Spectre-style ramp origin is offset by 0.25*rise after the explicit delay.
-        assert ts.evaluate(10e-9) == pytest.approx(0.25)
-        assert ts.evaluate(17.5e-9) == pytest.approx(1.0)
+        # Ramp runs from t=5ns to t=15ns
+        assert ts.evaluate(10e-9) == pytest.approx(0.5)
+        assert ts.evaluate(15e-9) == pytest.approx(1.0)
 
     def test_set_target_same_as_current_noop(self):
         ts = TransitionState(current_val=0.7)
@@ -112,8 +112,8 @@ class TestTransitionState:
         ts = TransitionState(current_val=0.0)
         ts.set_target(time=0.0, target=1.0, rise=0.0, default_transition=5e-9)
         # rise_time should be default_transition=5ns
-        assert ts.evaluate(2.5e-9) == pytest.approx(0.25)
-        assert ts.evaluate(6.25e-9) == pytest.approx(1.0)
+        assert ts.evaluate(2.5e-9) == pytest.approx(0.5)
+        assert ts.evaluate(5e-9) == pytest.approx(1.0)
 
     # next_breakpoint ---
 
@@ -125,7 +125,7 @@ class TestTransitionState:
         ts = TransitionState(current_val=0.0)
         ts.set_target(time=0.0, target=1.0, delay=5e-9, rise=5e-9)
         bp = ts.next_breakpoint(0.0)
-        assert bp == pytest.approx(6.25e-9)
+        assert bp == pytest.approx(5e-9)
 
     def test_next_breakpoint_during_ramp_returns_inner_point_first(self):
         # Long transition() ramps expose interior points so cross() events and
@@ -140,19 +140,20 @@ class TestTransitionState:
         ts = TransitionState(current_val=0.0)
         ts.set_target(time=0.0, target=1.0, rise=10e-12)
         bp = ts.next_breakpoint(0.0, min_ramp_time=20e-12)
-        assert bp == pytest.approx(2.5e-12)
+        assert bp == pytest.approx(10e-12)
 
     def test_next_breakpoint_after_ramp_is_none(self):
         ts = TransitionState(current_val=0.0)
         ts.set_target(time=0.0, target=1.0, rise=10e-9)
-        ts.evaluate(12.5e-9)   # finish ramp -> inactive
-        assert ts.next_breakpoint(12.5e-9) is None
+        ts.evaluate(10e-9)   # finish ramp → inactive
+        assert ts.next_breakpoint(10e-9) is None
 
     def test_non_zero_start_time(self):
         ts = TransitionState(current_val=0.0)
         ts.set_target(time=5e-9, target=1.0, rise=10e-9)
-        assert ts.evaluate(10e-9) == pytest.approx(0.25)
-        assert ts.evaluate(17.5e-9) == pytest.approx(1.0)
+        # ramp from 5ns to 15ns
+        assert ts.evaluate(10e-9) == pytest.approx(0.5)
+        assert ts.evaluate(15e-9) == pytest.approx(1.0)
 
     def test_repeated_falling_interruptions_readjust_original_transition(self):
         ts = TransitionState(current_val=0.8317)
@@ -170,9 +171,9 @@ class TestTransitionState:
             (64.55e-9, 0.5379),
         ]
         samples = {
-            54.5e-9: 0.728256,
-            60.0e-9: 0.5924750000000003,
-            64.0e-9: 0.5242,
+            54.5e-9: 0.715881,
+            60.0e-9: 0.580100,
+            64.0e-9: 0.5203865,
         }
 
         sample_items = iter(sorted(samples.items()))
@@ -1688,7 +1689,7 @@ endmodule
         max_time_delta = max(time_deltas)
         max_signal_delta = max(signal_deltas)
         assert len(rust_result.time) == len(ref_result.time)
-        assert max_time_delta < 2.0e-13
+        assert max_time_delta < 1.0e-13
         # The strict Rust path owns its scheduler, so it can differ from the
         # Python adaptive scheduler by tens of femtoseconds. For this fixture
         # the transition slope is 1 / 1ns, so the observed output delta must be
@@ -1839,13 +1840,13 @@ endmodule
         assert sim._perf_stats["rust_sim_program_transition_breakpoints"] >= 1
         assert sim._perf_stats["generic_executor_runs"] == 0
         assert observer.state["seen"] == pytest.approx(1.0)
-        assert observer.state["seen_t"] == pytest.approx(512.5e-12, abs=1.0e-15)
+        assert observer.state["seen_t"] == pytest.approx(510e-12, abs=1.0e-15)
         assert all(
             float(right) + 1.0e-18 >= float(left)
             for left, right in zip(result.time, result.time[1:])
         )
-        assert result.signals["OUT"][-1] == pytest.approx(1.0)
-        assert result.signals["SEEN_T"][-1] == pytest.approx(512.5e-12, abs=1.0e-15)
+        assert result.signals["OUT"][2] == pytest.approx(1.0)
+        assert result.signals["SEEN_T"][2] == pytest.approx(510e-12, abs=1.0e-15)
 
     def test_rust_sim_program_transition_uses_model_default_transition(self):
         _build_rust_core_or_skip()
@@ -1902,7 +1903,7 @@ endmodule
             list(ref_result.signals["OUT"]), abs=5e-4
         )
         assert any(
-            math.isclose(float(t), 537.5e-12, abs_tol=1.0e-15)
+            math.isclose(float(t), 530e-12, abs_tol=1.0e-15)
             and math.isclose(float(v), 1.0, abs_tol=1.0e-12)
             for t, v in zip(rust_result.time, rust_result.signals["OUT"])
         )
@@ -2026,7 +2027,7 @@ endmodule
             abs=1.0e-15,
         )
         assert rust_result.signals["DELAY_PS"][-1] == pytest.approx(
-            42.5,
+            35.0,
             abs=1.0e-6,
         )
 
@@ -2281,7 +2282,7 @@ endmodule
         assert rust._perf_stats["rust_sim_program_transition_count"] == 1
         assert out_39p500 == pytest.approx(0.18, abs=1.0e-9)
         assert out_39p875 < 0.225
-        assert out_40p250 == pytest.approx(0.225, abs=1.0e-6)
+        assert out_40p250 == pytest.approx(0.24, abs=1.0e-6)
 
     def test_rust_sim_program_static_state_array_transition_target(self):
         _build_rust_core_or_skip()
@@ -4520,7 +4521,7 @@ endmodule
 
         result = sim.run(tstop=2e-9, tstep=1e-9, rust_static_eval=True)
 
-        assert result.signals["VOUT"][-1] == pytest.approx(0.75)
+        assert result.signals["VOUT"][-1] == pytest.approx(1.0)
         assert sim._perf_stats["rust_static_eval_requested"] == 1
         assert sim._perf_stats["rust_static_eval_candidate_models"] == 0
         assert sim._perf_stats["rust_static_eval_no_candidate_models"] == 1
@@ -5229,13 +5230,13 @@ endmodule
         fastpath_before = self.model._perf_stats["transition_unchanged_target_fastpath"]
         val_mid = self.model._transition("tf", time=5e-9, target=1.0, rise=10e-9, fall=10e-9)
 
-        assert val_mid == pytest.approx(0.25)
+        assert val_mid == pytest.approx(0.5)
         assert self.model._perf_stats["transition_unchanged_target_fastpath"] == fastpath_before + 1
         assert self.model.transitions["tf"].active is True
 
         val_interrupted = self.model._transition("tf", time=6e-9, target=0.0, rise=10e-9, fall=10e-9)
 
-        assert val_interrupted == pytest.approx(0.35)
+        assert val_interrupted == pytest.approx(0.6)
         assert self.model.transitions["tf"].target_val == pytest.approx(0.0)
         assert self.model.transitions["tf"].active is True
         assert self.model._perf_stats["transition_unchanged_target_fastpath"] == fastpath_before + 1
@@ -5247,7 +5248,7 @@ endmodule
 
         val_mid = model._transition("tf_off", time=5e-9, target=1.0, rise=10e-9, fall=10e-9)
 
-        assert val_mid == pytest.approx(0.25)
+        assert val_mid == pytest.approx(0.5)
         assert model._perf_stats["transition_unchanged_target_fastpath"] == 0
 
     def test_transition_initial_state_records_target_and_parameters_for_fastpath(self):
@@ -5290,7 +5291,7 @@ endmodule
             fall=10e-9,
         )
 
-        assert val_mid == pytest.approx(0.25)
+        assert val_mid == pytest.approx(0.5)
         assert self.model._perf_stats["transition_unchanged_target_fastpath"] == fastpath_before
 
         val_same_params = self.model._transition(
@@ -5301,7 +5302,7 @@ endmodule
             fall=10e-9,
         )
 
-        assert val_same_params == pytest.approx(0.35)
+        assert val_same_params == pytest.approx(0.6)
         assert self.model._perf_stats["transition_unchanged_target_fastpath"] == fastpath_before + 1
 
     def test_check_cross_first_call_false(self):
@@ -6845,7 +6846,7 @@ endmodule
         result = sim.run(tstop=15e-9, tstep=1e-9)
 
         seen = result.signals["seen"][-1]
-        assert seen == pytest.approx(11.5e-9, abs=1e-12)
+        assert seen == pytest.approx(11e-9, abs=1e-12)
 
     VA_SRC_VAR_PERIOD = """\
 `include "disciplines.vams"

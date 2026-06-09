@@ -29,12 +29,12 @@ class ExampleParityCase:
 
 SUPPORTED_RUST_EXAMPLES = [
     ExampleParityCase("adc_dac_ideal_4b/tb_adc_dac_ideal_4b_ramp.scs", 5e-2),
-    ExampleParityCase("adc_dac_ideal_4b/tb_adc_dac_ideal_4b_sine.scs", 3e-1),
+    ExampleParityCase("adc_dac_ideal_4b/tb_adc_dac_ideal_4b_sine.scs", 1e-1),
     ExampleParityCase("adc_dac_ideal_4b/tb_adc_dac_ideal_4b_sine1000.scs", 4e-2),
     ExampleParityCase("clk_div/tb_clk_div.scs", 1e-9),
     ExampleParityCase("clk_div/tb_clk_div_div2.scs", 1e-9),
     ExampleParityCase("clk_div/tb_clk_div_div8.scs", 1e-9),
-    ExampleParityCase("comparator/tb_cmp_delay.scs", 2e-3),
+    ExampleParityCase("comparator/tb_cmp_delay.scs", 1e-3),
     ExampleParityCase("comparator/tb_cmp_ideal.scs", 1e-3),
     ExampleParityCase("comparator/tb_cmp_offset_search.scs", 5e-3),
     ExampleParityCase("comparator/tb_cmp_strongarm.scs", 1e-3),

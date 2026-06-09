@@ -124,7 +124,7 @@ def test_pipeline_stage_event_then_transition_runtime_updates_state_and_outputs(
         param_values=param_values,
     )
     assert result.fired_event_statements == ()
-    assert result.transition_outputs == pytest.approx((0.5175, 0.675, 0.0))
-    assert node_values[node_slots["VRES"]] == pytest.approx(0.5175)
-    assert node_values[node_slots["D1"]] == pytest.approx(0.675)
+    assert result.transition_outputs == pytest.approx((0.54, 0.9, 0.0))
+    assert node_values[node_slots["VRES"]] == pytest.approx(0.54)
+    assert node_values[node_slots["D1"]] == pytest.approx(0.9)
     assert node_values[node_slots["D0"]] == pytest.approx(0.0)

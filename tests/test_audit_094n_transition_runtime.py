@@ -94,9 +94,9 @@ def test_pipeline_stage_transition_contribution_runtime_updates_output_nodes():
         state_values=state_values,
         param_values=param_values,
     )
-    assert node_values[node_slots["VRES"]] == pytest.approx(0.4725)
-    assert node_values[node_slots["D1"]] == pytest.approx(0.225)
-    assert node_values[node_slots["D0"]] == pytest.approx(0.675)
+    assert node_values[node_slots["VRES"]] == pytest.approx(0.45)
+    assert node_values[node_slots["D1"]] == pytest.approx(0.0)
+    assert node_values[node_slots["D0"]] == pytest.approx(0.9)
 
 
 def test_pipeline_stage_transition_runtime_exposes_next_breakpoint():
@@ -134,7 +134,7 @@ def test_pipeline_stage_transition_runtime_exposes_next_breakpoint():
     bp4 = runtime.next_breakpoint(bp3)
     assert bp4 == pytest.approx(1.2e-9)
     assert runtime.next_breakpoint(1.0e-9, min_ramp_time=200e-12) == pytest.approx(
-        1.05e-9
+        1.2e-9
     )
 
 
