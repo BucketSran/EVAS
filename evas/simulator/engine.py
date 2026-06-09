@@ -96,14 +96,18 @@ class TransitionState:
     fall_time: float = 1e-12
     active: bool = False
 
+    @staticmethod
+    def _spectre_ramp_origin_offset(ramp_time: float) -> float:
+        return 0.25 * ramp_time if ramp_time > 0.0 else 0.0
+
     def evaluate(self, time: float) -> float:
         """Compute the transition output at the given time."""
         if not self.active:
             return self.current_val
 
-        t_begin = self.start_time + self.delay
         going_up = self.target_val > self.start_val
         ramp_time = self.rise_time if going_up else self.fall_time
+        t_begin = self.start_time + self.delay + self._spectre_ramp_origin_offset(ramp_time)
 
         if time < t_begin:
             return self.start_val
@@ -130,9 +134,15 @@ class TransitionState:
 
         changed = abs(target - self.target_val) > 1e-15
         if changed and self.active:
-            t_begin = self.start_time + self.delay
             going_up = self.target_val > self.start_val
             ramp_time = self.rise_time if going_up else self.fall_time
+            t_begin = self.start_time + self.delay + self._spectre_ramp_origin_offset(ramp_time)
+            if time < t_begin:
+                self.target_val = target
+                self.delay = delay
+                self.rise_time = rise
+                self.fall_time = fall
+                return
             in_active_region = time >= t_begin and time < t_begin + ramp_time
             if in_active_region:
                 vi = self.current_val
@@ -149,7 +159,11 @@ class TransitionState:
                     # transition line; it does not restart a full rise/fall
                     # interval from the instantaneous output value.
                     self.start_val = basis
-                    self.start_time = time - (vi - basis) / slope
+                    self.start_time = (
+                        time
+                        - self._spectre_ramp_origin_offset(readjust_time)
+                        - (vi - basis) / slope
+                    )
                     self.delay = 0.0
                     self.target_val = target
                     self.rise_time = rise
@@ -176,9 +190,9 @@ class TransitionState:
         """Return next important time for this transition, or None."""
         if not self.active:
             return None
-        t_begin = self.start_time + self.delay
         going_up = self.target_val > self.start_val
         ramp_time = self.rise_time if going_up else self.fall_time
+        t_begin = self.start_time + self.delay + self._spectre_ramp_origin_offset(ramp_time)
         t_end = t_begin + ramp_time
 
         best: Optional[float] = None

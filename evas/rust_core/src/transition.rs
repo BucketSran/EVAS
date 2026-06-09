@@ -28,13 +28,13 @@ pub fn next_transition_breakpoint_for_arrays(
         if active_flags[idx] == 0 {
             continue;
         }
-        let t_begin = start_times[idx] + delays[idx];
         let going_up = target_values[idx] > start_values[idx];
         let ramp_time = if going_up {
             rise_times[idx]
         } else {
             fall_times[idx]
         };
+        let t_begin = start_times[idx] + delays[idx] + spectre_ramp_origin_offset(ramp_time);
         let t_end = t_begin + ramp_time;
         let mut candidate: Option<f64> = None;
 
@@ -61,6 +61,15 @@ pub fn next_transition_breakpoint_for_arrays(
         }
     }
     Ok(best)
+}
+
+#[inline]
+fn spectre_ramp_origin_offset(ramp_time: f64) -> f64 {
+    if ramp_time > 0.0 {
+        0.25 * ramp_time
+    } else {
+        0.0
+    }
 }
 
 pub fn transition_state_step_for_arrays(
@@ -184,9 +193,9 @@ pub(crate) fn transition_evaluate_one(
         return *current_value;
     }
 
-    let t_begin = start_time + delay;
     let going_up = target_value > start_value;
     let ramp_time = if going_up { rise_time } else { fall_time };
+    let t_begin = start_time + delay + spectre_ramp_origin_offset(ramp_time);
 
     if time < t_begin {
         start_value
@@ -224,9 +233,16 @@ pub(crate) fn transition_set_target_one(
 ) {
     let changed = (target - *target_value).abs() > 1.0e-15;
     if changed && *active_flag != 0 {
-        let t_begin = *start_time + *delay_value;
         let going_up = *target_value > *start_value;
         let ramp_time = if going_up { *rise_time } else { *fall_time };
+        let t_begin = *start_time + *delay_value + spectre_ramp_origin_offset(ramp_time);
+        if time < t_begin {
+            *target_value = target;
+            *delay_value = delay;
+            *rise_time = rise;
+            *fall_time = fall;
+            return;
+        }
         let in_active_region = time >= t_begin && time < t_begin + ramp_time;
         if in_active_region {
             let vi = *current_value;
@@ -248,7 +264,7 @@ pub(crate) fn transition_set_target_one(
             };
             if slope.abs() > 1.0e-30 {
                 *start_value = basis;
-                *start_time = time - (vi - basis) / slope;
+                *start_time = time - spectre_ramp_origin_offset(readjust_time) - (vi - basis) / slope;
                 *delay_value = 0.0;
                 *target_value = target;
                 *rise_time = rise;

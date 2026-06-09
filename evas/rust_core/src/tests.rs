@@ -241,7 +241,7 @@ fn transition_state_step_matches_interrupted_transition_shape() {
         false,
     )
     .unwrap();
-    assert!((output[0] - 0.5).abs() < 1.0e-12);
+    assert!((output[0] - 0.25).abs() < 1.0e-12);
 
     transition_state_step_for_arrays(
         &mut current,
@@ -263,10 +263,10 @@ fn transition_state_step_matches_interrupted_transition_shape() {
         false,
     )
     .unwrap();
-    assert!((output[0] - 0.5).abs() < 1.0e-12);
+    assert!((output[0] - 0.25).abs() < 1.0e-12);
     assert_eq!(active[0], 1);
     assert!((start_value[0] - 1.0).abs() < 1.0e-12);
-    assert!(start_time[0].abs() < 1.0e-18);
+    assert!((start_time[0] + 5.0e-9).abs() < 1.0e-18);
 
     transition_state_step_for_arrays(
         &mut current,
@@ -288,7 +288,7 @@ fn transition_state_step_matches_interrupted_transition_shape() {
         false,
     )
     .unwrap();
-    assert!((output[0] - 0.25).abs() < 1.0e-12);
+    assert!(output[0].abs() < 1.0e-12);
 }
 
 #[test]
@@ -1920,7 +1920,7 @@ fn cmp_delay_trace_measures_interpolated_cross_times() {
     let tedge = 30.0e-12_f64;
     let clk_cross = 60.0e-12_f64;
     let td = (td0 + tau * (vdd / vdiff).ln()).min(td_max).max(td_min);
-    let out_cross = clk_cross + td + 0.5 * tedge;
+    let out_cross = clk_cross + td + 0.75 * tedge;
     let times = vec![
         0.0,
         120.0e-12,
@@ -1952,7 +1952,7 @@ fn cmp_delay_trace_measures_interpolated_cross_times() {
     )
     .unwrap();
 
-    let expected_delay_ps = (td + 0.5 * tedge) * 1.0e12;
+    let expected_delay_ps = (td + 0.75 * tedge) * 1.0e12;
     let final_delay_ps = values[(times.len() - 1) * signal_count + 5];
     assert_eq!(events, 1);
     assert!((final_delay_ps - expected_delay_ps).abs() < 1.0e-6);
