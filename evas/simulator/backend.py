@@ -4452,9 +4452,49 @@ class CompiledModel:
             self._rng_streams[sid] = random.Random(sid)
         return self._rng_streams[sid]
 
-    def _rand_normal(self, seed: Optional[float], mean: float, std: float) -> float:
-        rng = self._seed_to_stream(seed)
-        return rng.gauss(float(mean), float(std))
+    @staticmethod
+    def _float_to_u64_bits(value: float) -> int:
+        import struct
+
+        return struct.unpack(">Q", struct.pack(">d", float(value)))[0]
+
+    @staticmethod
+    def _rotl64(value: int, shift: int) -> int:
+        mask = (1 << 64) - 1
+        value &= mask
+        return ((value << shift) & mask) | (value >> (64 - shift))
+
+    @staticmethod
+    def _splitmix64(value: int) -> int:
+        mask = (1 << 64) - 1
+        value = (int(value) + 0x9E3779B97F4A7C15) & mask
+        mixed = value
+        mixed = ((mixed ^ (mixed >> 30)) * 0xBF58476D1CE4E5B9) & mask
+        mixed = ((mixed ^ (mixed >> 27)) * 0x94D049BB133111EB) & mask
+        return (mixed ^ (mixed >> 31)) & mask
+
+    @staticmethod
+    def _uniform01_from_u64(value: int) -> float:
+        mantissa = int(value) >> 11
+        scale = 1.0 / float(1 << 53)
+        return min(max(float(mantissa) * scale, 1.0e-12), 1.0 - 1.0e-12)
+
+    def _rand_normal(
+        self,
+        seed: Optional[float],
+        mean: float,
+        std: float,
+        time: float = 0.0,
+    ) -> float:
+        seed_value = 0.0 if seed is None else float(seed)
+        seed_bits = self._float_to_u64_bits(seed_value)
+        time_bits = self._float_to_u64_bits(float(time))
+        stream = seed_bits ^ self._rotl64(time_bits, 17) ^ 0xD1B54A32D192ED03
+        u1 = self._uniform01_from_u64(self._splitmix64(stream))
+        u2 = self._uniform01_from_u64(self._splitmix64(stream ^ 0xA0761D6478BD642F))
+        radius = math.sqrt(-2.0 * math.log(u1))
+        angle = 2.0 * math.pi * u2
+        return float(mean) + float(std) * radius * math.cos(angle)
 
     def _rand_uniform(self, seed: Optional[float], lo: float, hi: float) -> float:
         rng = self._seed_to_stream(seed)
@@ -4532,6 +4572,7 @@ class _ModuleCompiler:
         self._event_timer_static_linear_ir_ops: Dict[str, tuple] = {}
         self._state_owned_timer_targets: Dict[str, str] = {}
         self._rust_output_hold_state_names: set[str] = set()
+        self._random_state_names_cache: Optional[set[str]] = None
 
     def compile(self) -> type:
         """Generate and return a compiled model class."""
@@ -10040,6 +10081,66 @@ class _ModuleCompiler:
     def _expr_has_function_call(self, expr: Expr, names: set[str]) -> bool:
         return any(call.name in names for call in self._iter_function_calls_in_expr(expr))
 
+    def _transition_target_uses_random_state(self, expr: Expr) -> bool:
+        if self._expr_has_function_call(expr, {"$rdist_normal"}):
+            return True
+        return self._expr_references_nodes(expr, self._random_state_names())
+
+    def _random_state_names(self) -> set[str]:
+        if self._random_state_names_cache is not None:
+            return self._random_state_names_cache
+        body = getattr(getattr(self.module, "analog_block", None), "body", None)
+        if body is None:
+            self._random_state_names_cache = set()
+            return self._random_state_names_cache
+
+        assignments = list(self._iter_assignments_in_stmt(body))
+        random_names: set[str] = set()
+        changed = True
+        while changed:
+            changed = False
+            for stmt in assignments:
+                if not isinstance(stmt.target, Identifier):
+                    continue
+                name = stmt.target.name
+                value = stmt.value
+                if (
+                    self._expr_has_function_call(value, {"$rdist_normal"})
+                    or self._expr_references_nodes(value, random_names)
+                ) and name not in random_names:
+                    random_names.add(name)
+                    changed = True
+        self._random_state_names_cache = random_names
+        return random_names
+
+    def _iter_assignments_in_stmt(self, stmt):
+        if isinstance(stmt, Assignment):
+            yield stmt
+            return
+        if isinstance(stmt, Block):
+            for child in stmt.statements:
+                yield from self._iter_assignments_in_stmt(child)
+            return
+        if isinstance(stmt, IfStatement):
+            yield from self._iter_assignments_in_stmt(stmt.then_body)
+            if stmt.else_body is not None:
+                yield from self._iter_assignments_in_stmt(stmt.else_body)
+            return
+        if isinstance(stmt, EventStatement):
+            yield from self._iter_assignments_in_stmt(stmt.body)
+            return
+        if isinstance(stmt, ForStatement):
+            yield from self._iter_assignments_in_stmt(stmt.init)
+            yield from self._iter_assignments_in_stmt(stmt.body)
+            yield from self._iter_assignments_in_stmt(stmt.update)
+            return
+        if isinstance(stmt, WhileStatement):
+            yield from self._iter_assignments_in_stmt(stmt.body)
+            return
+        if isinstance(stmt, CaseStatement):
+            for item in stmt.items:
+                yield from self._iter_assignments_in_stmt(item.body)
+
     def _expr_references_nodes(self, expr: Expr, nodes: set[str]) -> bool:
         if not nodes:
             return False
@@ -11932,6 +12033,26 @@ class _ModuleCompiler:
             transition_affine = self._transition_affine_expr(stmt.expr)
         if transition_affine is not None:
             transition_call, offset_expr, scale_expr = transition_affine
+            target_expr = (
+                transition_call.args[0]
+                if transition_call.args
+                else NumberLiteral(0.0)
+            )
+            if self._transition_target_uses_random_state(target_expr):
+                target = self._compile_expr(target_expr)
+                offset = self._compile_expr(offset_expr)
+                scale = self._compile_expr(scale_expr)
+                if branch.node2 is not None:
+                    base = self._compile_node_voltage(
+                        branch.node2,
+                        branch.node2_index,
+                        branch.node2_index2,
+                    )
+                else:
+                    base = "0.0"
+                expr = f"(({base}) + ({offset}) + ({scale}) * ({target}))"
+                return [f"{prefix}self._set_output({node!r}, {expr}, nv)"]
+
             key_expr, target, delay, rise, fall = self._compile_transition_call_parts(
                 transition_call
             )
@@ -13044,7 +13165,7 @@ class _ModuleCompiler:
                 seed, mean, std = "None", args[0], "1.0"
             else:
                 seed, mean, std = "None", "0.0", "1.0"
-            return f"self._rand_normal({seed}, {mean}, {std})"
+            return f"self._rand_normal({seed}, {mean}, {std}, time)"
         if name == '$random':
             seed = args[0] if len(args) > 0 else "None"
             return f"self._rand_int32({seed})"

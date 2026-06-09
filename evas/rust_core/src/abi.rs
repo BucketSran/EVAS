@@ -123,6 +123,7 @@ pub(crate) const BODY_STMT_IF: u8 = 250;
 pub(crate) const BODY_STMT_ELSE: u8 = 251;
 pub(crate) const BODY_STMT_ENDIF: u8 = 252;
 pub(crate) const BODY_STMT_BOUND_STEP: u8 = 253;
+pub(crate) const BODY_STMT_STROBE: u8 = 254;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -6572,7 +6572,11 @@ class Simulator:
                     self._perf_stats["output_step_clamps"] += 1
 
             if dt < min_step:
-                dt = min_step
+                remaining = tstop - time
+                if remaining > 0.0 and remaining < min_step:
+                    dt = remaining
+                else:
+                    dt = min_step
                 self._perf_stats["min_step_clamps"] += 1
 
             prev_time = time
@@ -7023,7 +7027,7 @@ class Simulator:
                 should_record = (
                     force_record_point
                     or time >= next_record_time - 1e-18
-                    or time >= tstop - 1e-18
+                    or time >= tstop
                 )
 
             if should_record:
@@ -7332,7 +7336,11 @@ class Simulator:
         rust_backend=None,
         rust_record_node_batch=None,
     ) -> int:
-        self.time_points.append(time)
+        replace_last = bool(
+            self.time_points and abs(time - self.time_points[-1]) <= 1.0e-18
+        )
+        if not replace_last:
+            self.time_points.append(time)
         reads = 0
         if indexed_voltages is not None and indexed_record_node_ids is not None:
             values = None
@@ -7352,7 +7360,10 @@ class Simulator:
             if values is None:
                 values = indexed_voltages.values_for_ids(indexed_record_node_ids, 0.0)
             for name, val in zip(self.recorded_signals, values):
-                self.recorded_signals[name].append(val)
+                if replace_last and self.recorded_signals[name]:
+                    self.recorded_signals[name][-1] = val
+                else:
+                    self.recorded_signals[name].append(val)
             return len(indexed_record_node_ids)
 
         for name in self.recorded_signals:
@@ -7361,7 +7372,10 @@ class Simulator:
                 reads += 1
             else:
                 val = self.node_voltages.get(name, 0.0)
-            self.recorded_signals[name].append(val)
+            if replace_last and self.recorded_signals[name]:
+                self.recorded_signals[name][-1] = val
+            else:
+                self.recorded_signals[name].append(val)
         return reads
 
 

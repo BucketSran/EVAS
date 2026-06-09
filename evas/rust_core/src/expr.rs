@@ -325,7 +325,7 @@ pub(crate) fn evaluate_body_ir_ops_at_time_impl(
                     log.push(BODY_STMT_FILE_OPEN, stmt.expr_start, time, &[])?;
                 }
             }
-            BODY_STMT_FILE_WRITE | BODY_STMT_FILE_CLOSE => {
+            BODY_STMT_FILE_WRITE | BODY_STMT_FILE_CLOSE | BODY_STMT_STROBE => {
                 if !branch_active_stack.iter().all(|flag| *flag != 0) {
                     pc += 1;
                     continue;

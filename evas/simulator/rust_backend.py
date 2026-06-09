@@ -209,6 +209,7 @@ BODY_STMT_IF = 250
 BODY_STMT_ELSE = 251
 BODY_STMT_ENDIF = 252
 BODY_STMT_BOUND_STEP = 253
+BODY_STMT_STROBE = 254
 
 RUST_SIM_SOURCE_DC = 0
 RUST_SIM_SOURCE_PULSE = 1
@@ -466,6 +467,26 @@ class RustSimSourceRecordProgram:
                     targets = handles.pop(handle_id, ())
                     for target in targets:
                         target.close()
+                    continue
+                if action == "strobe" and kind == BODY_STMT_STROBE:
+                    if abs(float(_time)) <= 1.0e-30:
+                        continue
+                    fmt = str(getattr(spec, "fmt", ""))
+                    args = tuple(float(value) for value in values)
+                    try:
+                        msg = (fmt % args) if args else fmt
+                    except Exception:
+                        coerced = tuple(
+                            int(round(value))
+                            if abs(value - round(value)) <= 1.0e-9
+                            else value
+                            for value in args
+                        )
+                        msg = (fmt % coerced) if coerced else fmt
+                    owner = getattr(spec, "owner", None)
+                    strobe_log = getattr(owner, "_strobe_log", None)
+                    if strobe_log is not None:
+                        strobe_log.append((_time, msg))
         finally:
             for targets in handles.values():
                 for target in targets:
@@ -2528,9 +2549,10 @@ class RustBackend:
         use_record_step = record_step is not None
         side_effect_capacity = max(
             16,
+            int(capacity) * max(1, len(program.side_effects)),
             int(program.event_count) * 8 + len(program.side_effects) * 8 + 8,
         )
-        side_effect_value_capacity = side_effect_capacity * 8
+        side_effect_value_capacity = side_effect_capacity * 16
         SideKindArray = ctypes.c_uint8 * side_effect_capacity
         SideIndexArray = ctypes.c_size_t * side_effect_capacity
         SideValueArray = ctypes.c_double * side_effect_value_capacity

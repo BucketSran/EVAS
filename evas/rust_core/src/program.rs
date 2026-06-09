@@ -1023,6 +1023,32 @@ fn rust_sim_transition_target_values_after_pre_always(
     Ok(values)
 }
 
+fn rust_sim_transition_targets_contain_rdist_normal(
+    transitions: &[EvasRustSimTransitionSpec],
+    body_expr_ops: &[EvasRustBodyExprOp],
+) -> Result<bool, i32> {
+    for transition in transitions {
+        let start = transition.target_expr_start;
+        let end = start.checked_add(transition.target_expr_count).ok_or(-976)?;
+        if end > body_expr_ops.len() {
+            return Err(-977);
+        }
+        if body_expr_ops[start..end]
+            .iter()
+            .any(|op| op.op_kind == BODY_EXPR_RDIST_NORMAL)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn rust_sim_body_contains_rdist_normal(body_expr_ops: &[EvasRustBodyExprOp]) -> bool {
+    body_expr_ops
+        .iter()
+        .any(|op| op.op_kind == BODY_EXPR_RDIST_NORMAL)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rust_sim_next_transition_target_change_breakpoint(
     sources: &[EvasRustSimSourceSpec],
@@ -1041,6 +1067,11 @@ pub(crate) fn rust_sim_next_transition_target_change_breakpoint(
     dt: f64,
 ) -> Result<Option<f64>, i32> {
     if transitions.is_empty() || dt <= 0.0 {
+        return Ok(None);
+    }
+    if rust_sim_body_contains_rdist_normal(body_expr_ops)
+        || rust_sim_transition_targets_contain_rdist_normal(transitions, body_expr_ops)?
+    {
         return Ok(None);
     }
     let horizon = time + dt;
@@ -1295,6 +1326,7 @@ pub(crate) fn rust_sim_apply_transitions(
     if count == 0 {
         return Ok(());
     }
+    let body_contains_rdist = rust_sim_body_contains_rdist_normal(body_expr_ops);
 
     let mut input_targets = vec![0.0_f64; count];
     let mut input_delays = vec![0.0_f64; count];
@@ -1353,6 +1385,18 @@ pub(crate) fn rust_sim_apply_transitions(
         }
         if input_falls[idx] <= 0.0 {
             input_falls[idx] = spec_default_transition;
+        }
+        if body_contains_rdist {
+            current_values[idx] = input_targets[idx];
+            target_values[idx] = input_targets[idx];
+            start_values[idx] = input_targets[idx];
+            start_times[idx] = time;
+            delays[idx] = input_delays[idx];
+            rise_times[idx] = input_rises[idx];
+            fall_times[idx] = input_falls[idx];
+            active_flags[idx] = 0;
+            initialized_flags[idx] = 1;
+            output_values[idx] = input_targets[idx];
         }
     }
 
@@ -1459,6 +1503,11 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
     min_ramp_time: f64,
     default_transition: f64,
 ) -> Result<usize, i32> {
+    if rust_sim_body_contains_rdist_normal(body_expr_ops)
+        || rust_sim_transition_targets_contain_rdist_normal(transitions, body_expr_ops)?
+    {
+        return Ok(0);
+    }
     let eps = 1.0e-18;
     let mut added = 0_usize;
     let mut guard = 0_usize;
@@ -1997,6 +2046,9 @@ pub fn rust_sim_event_transition_record_trace(
     let has_final_step_events = events
         .iter()
         .any(|event| event.kind == RUST_SIM_EVENT_FINAL_STEP);
+    let transition_targets_contain_rdist =
+        rust_sim_body_contains_rdist_normal(body_expr_ops)
+            || rust_sim_transition_targets_contain_rdist_normal(transitions, body_expr_ops)?;
     let mut source_breakpoints = 0_usize;
     let mut event_fires = 0_usize;
     let mut transition_breakpoints = 0_usize;
@@ -2244,21 +2296,23 @@ pub fn rust_sim_event_transition_record_trace(
                 source_breakpoints += 1;
             }
         }
-        if let Some(bp) = next_transition_breakpoint_for_arrays(
-            &transition_start_times,
-            &transition_start_values,
-            &transition_target_values,
-            &transition_delays,
-            &transition_rise_times,
-            &transition_fall_times,
-            &transition_active_flags,
-            time,
-            min_ramp_time,
-        )? {
-            if bp > time && bp < time + dt {
-                dt = bp - time;
-                force_record = true;
-                transition_breakpoints += 1;
+        if !transition_targets_contain_rdist {
+            if let Some(bp) = next_transition_breakpoint_for_arrays(
+                &transition_start_times,
+                &transition_start_values,
+                &transition_target_values,
+                &transition_delays,
+                &transition_rise_times,
+                &transition_fall_times,
+                &transition_active_flags,
+                time,
+                min_ramp_time,
+            )? {
+                if bp > time && bp < time + dt {
+                    dt = bp - time;
+                    force_record = true;
+                    transition_breakpoints += 1;
+                }
             }
         }
         if has_pre_timer_events {

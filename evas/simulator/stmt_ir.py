@@ -54,6 +54,7 @@ from evas.simulator.rust_backend import (
     BODY_STMT_FILE_OPEN,
     BODY_STMT_FILE_WRITE,
     BODY_STMT_IF,
+    BODY_STMT_STROBE,
     BODY_STMT_WHILE,
     BODY_TARGET_NODE,
     BODY_TARGET_STATE,
@@ -851,6 +852,15 @@ def _append_body_stmt_ops(
         )
 
     if isinstance(stmt_ir, SystemTaskIR):
+        if side_effects is not None and stmt_ir.name in {"$display", "$strobe"}:
+            return _append_strobe_stmt(
+                stmt_ir,
+                bindings,
+                node_slots,
+                stmt_ops,
+                expr_ops,
+                side_effects,
+            )
         if _is_noop_body_system_task(stmt_ir):
             return True
         if side_effects is not None and stmt_ir.name in {
@@ -980,6 +990,44 @@ def _append_file_close_stmt(
             target_id=spec_id,
             expr_start=expr_start,
             expr_count=len(encoded),
+            target_integer=False,
+        )
+    )
+    return True
+
+
+def _append_strobe_stmt(
+    stmt_ir: SystemTaskIR,
+    bindings: BindingTableIR,
+    node_slots: dict[str, int],
+    stmt_ops: list[BodyStmtOp],
+    expr_ops: list[BodyExprOp],
+    side_effects: object,
+) -> bool:
+    fmt = ""
+    numeric_args = tuple(stmt_ir.args)
+    if stmt_ir.args:
+        resolved_fmt = _resolve_side_effect_string(side_effects, stmt_ir.args[0])
+        if resolved_fmt is None:
+            return False
+        fmt = resolved_fmt
+        numeric_args = tuple(stmt_ir.args[1:])
+    add = getattr(side_effects, "add_strobe", None)
+    if add is None:
+        return False
+    spec_id = int(add(fmt))
+    expr_start = len(expr_ops)
+    for arg in numeric_args:
+        encoded = encode_body_expr_ops(arg, bindings, node_slots)
+        if encoded is None:
+            return False
+        expr_ops.extend(encoded)
+    stmt_ops.append(
+        BodyStmtOp(
+            target_kind=BODY_STMT_STROBE,
+            target_id=spec_id,
+            expr_start=expr_start,
+            expr_count=len(expr_ops) - expr_start,
             target_integer=False,
         )
     )

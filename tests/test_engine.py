@@ -1015,21 +1015,30 @@ module rustsim_noise_body(vin, out);
 endmodule
 """
         ModelCls = compile_module(parse(src))
-        model = ModelCls()
-        model.node_map = {"vin": "VIN", "out": "OUT"}
-        sim = Simulator()
-        sim.add_source("VIN", dc(1.0))
-        sim.add_model(model)
-        sim.record("VIN")
-        sim.record("OUT")
-        result = sim.run(
-            tstop=100e-9,
-            tstep=1e-9,
-            record_step=1e-9,
-            rust_full_model_fastpath=True,
-            rust_full_model_required=True,
-            rust_required=True,
-            skip_source_error_control=True,
+        def run_model(use_rust: bool):
+            model = ModelCls()
+            model.node_map = {"vin": "VIN", "out": "OUT"}
+            sim = Simulator()
+            sim.add_source("VIN", dc(1.0))
+            sim.add_model(model)
+            sim.record("VIN")
+            sim.record("OUT")
+            result = sim.run(
+                tstop=100e-9,
+                tstep=1e-9,
+                record_step=1e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            return result, sim
+
+        default_result, _default_sim = run_model(False)
+        result, sim = run_model(True)
+        assert result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert result.signals["VIN"].tolist() == pytest.approx(
+            default_result.signals["VIN"].tolist()
         )
 
         noises = result.signals["OUT"] - result.signals["VIN"]
@@ -2683,10 +2692,61 @@ endmodule
         )
         assert rust_model.state["code"] == pytest.approx(ref_model.state["code"])
         assert rust_model.state["code"] == pytest.approx(3.0)
+        assert rust_model._strobe_log == ref_model._strobe_log == []
         assert rust._perf_stats["rust_sim_program_enabled"] == 1
         assert rust._perf_stats["rust_sim_program_event_transition_enabled"] == 1
         assert rust._perf_stats["rust_sim_program_event_count"] == 1
         assert rust._perf_stats["rust_sim_program_transition_count"] == 1
+        assert rust._perf_stats["generic_executor_runs"] == 0
+
+    def test_rust_sim_program_timer_strobe_matches_python_side_effect(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module timer_strobe(out);
+    output voltage out;
+    integer code = 0;
+    analog begin
+        @(timer(1n)) begin
+            code = 5;
+            $strobe("code=%d", code);
+        end
+        V(out) <+ code;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def build_sim():
+            model = ModelCls()
+            sim = Simulator()
+            sim.add_model(model)
+            sim.record("out")
+            return sim, model
+
+        ref, ref_model = build_sim()
+        ref.run(
+            tstop=2e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            skip_source_error_control=True,
+        )
+
+        rust, rust_model = build_sim()
+        rust.run(
+            tstop=2e-9,
+            tstep=250e-12,
+            record_step=250e-12,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert rust_model._strobe_log == ref_model._strobe_log
+        assert rust_model._strobe_log == [(pytest.approx(1e-9), "code=5")]
+        assert rust._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust._perf_stats["rust_sim_program_side_effects"] == 1
         assert rust._perf_stats["generic_executor_runs"] == 0
 
     def test_rust_sim_program_bound_step_scaled_transition_and_direct_output(self):
@@ -5259,15 +5319,16 @@ endmodule
         assert self.model._check_cross("ct", 2e-9, -2e-2, direction=1, expr_tol=1e-3) is False
         assert self.model._check_cross("ct", 3e-9, 2e-2, direction=1, expr_tol=1e-3) is True
 
-    def test_seeded_random_streams_are_reproducible(self):
-        seq_a = [self.model._rand_normal(7, 0.0, 1.0) for _ in range(4)]
-        seq_b = [self.model._rand_normal(7, 0.0, 1.0) for _ in range(4)]
-        # Same seeded stream continues deterministically.
-        assert seq_a != seq_b
+    def test_seeded_normal_random_is_deterministic_by_seed_and_time(self):
+        seq_a = [self.model._rand_normal(7, 0.0, 1.0, t) for t in (0.0, 1e-9, 2e-9)]
+        seq_b = [self.model._rand_normal(7, 0.0, 1.0, t) for t in (0.0, 1e-9, 2e-9)]
+        assert seq_a == pytest.approx(seq_b)
+        assert seq_a == pytest.approx(
+            [0.01944347116215914, 0.22233872857786585, -2.5199440415763674]
+        )
 
         m2 = CompiledModel()
-        seq_c = [m2._rand_normal(7, 0.0, 1.0) for _ in range(4)]
-        # Fresh model with same seed reproduces the initial sequence.
+        seq_c = [m2._rand_normal(7, 0.0, 1.0, t) for t in (0.0, 1e-9, 2e-9)]
         assert seq_a == pytest.approx(seq_c)
 
     def test_unseeded_random_stream_is_deterministic_per_model(self):

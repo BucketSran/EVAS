@@ -40,7 +40,10 @@ from evas.simulator.rust_backend import (
     BODY_EXPR_READ_NODE,
     BODY_EXPR_READ_PARAM,
     BODY_EXPR_READ_STATE,
+    BODY_STMT_FILE_CLOSE,
     BODY_STMT_FILE_OPEN,
+    BODY_STMT_FILE_WRITE,
+    BODY_STMT_STROBE,
     BODY_TARGET_NODE,
     BODY_TARGET_STATE,
     BodyExprOp,
@@ -226,6 +229,7 @@ class RustSimSideEffect:
     filename: str = ""
     mode: str = "w"
     fmt: str = ""
+    owner: Any = None
 
 
 @dataclass(frozen=True)
@@ -577,6 +581,9 @@ class _RustSimSideEffectBuilder:
     def add_file_close(self) -> int:
         return self._append(RustSimSideEffect(kind="fclose"))
 
+    def add_strobe(self, fmt: str) -> int:
+        return self._append(RustSimSideEffect(kind="strobe", fmt=fmt, owner=self._model))
+
     def _append(self, effect: RustSimSideEffect) -> int:
         self.effects.append(effect)
         return len(self.effects) - 1
@@ -897,12 +904,13 @@ def _append_body_program(
     node_slot_to_global: Mapping[int, int],
     state_slot_to_global: Mapping[int, int],
     param_slot_to_global: Mapping[int, int],
+    side_effect_slot_offset: int = 0,
 ) -> tuple[int, int]:
     stmt_start = len(body_stmt_ops)
     for stmt in tuple(getattr(program, "stmt_ops", ()) or ()):
         target_id = int(stmt.target_id)
         if int(stmt.target_kind) == BODY_STMT_FILE_OPEN:
-            expr_start = int(stmt.expr_start)
+            expr_start = int(stmt.expr_start) + int(side_effect_slot_offset)
             expr_count = 0
             target_id = int(state_slot_to_global.get(target_id, target_id))
         else:
@@ -919,6 +927,12 @@ def _append_body_program(
             target_id = int(node_slot_to_global.get(target_id, target_id))
         elif stmt.target_kind == BODY_TARGET_STATE:
             target_id = int(state_slot_to_global.get(target_id, target_id))
+        elif int(stmt.target_kind) in {
+            BODY_STMT_FILE_WRITE,
+            BODY_STMT_FILE_CLOSE,
+            BODY_STMT_STROBE,
+        }:
+            target_id += int(side_effect_slot_offset)
         body_stmt_ops.append(
             BodyStmtOp(
                 target_kind=int(stmt.target_kind),
@@ -1101,6 +1115,33 @@ def _prefer_existing_timer_static_linear_path(model_cls: Any) -> bool:
     if tuple(getattr(model_cls, "_transition_target_ir_ops", ()) or ()):
         return False
     return True
+
+
+def _stmt_has_display_strobe(stmt_ir: object) -> bool:
+    if isinstance(stmt_ir, BlockIR):
+        return any(_stmt_has_display_strobe(child) for child in stmt_ir.statements)
+    if isinstance(stmt_ir, EventStatementIR):
+        return _stmt_has_display_strobe(stmt_ir.body)
+    if isinstance(stmt_ir, IfStatementIR):
+        return _stmt_has_display_strobe(stmt_ir.then_body) or (
+            stmt_ir.else_body is not None and _stmt_has_display_strobe(stmt_ir.else_body)
+        )
+    if isinstance(stmt_ir, ForStatementIR):
+        unrolled = unroll_static_for_statement(stmt_ir)
+        if unrolled is not None:
+            return _stmt_has_display_strobe(unrolled)
+        return (
+            _stmt_has_display_strobe(stmt_ir.init)
+            or _stmt_has_display_strobe(stmt_ir.update)
+            or _stmt_has_display_strobe(stmt_ir.body)
+        )
+    if isinstance(stmt_ir, WhileStatementIR):
+        return _stmt_has_display_strobe(stmt_ir.body)
+    if isinstance(stmt_ir, CaseStatementIR):
+        return any(_stmt_has_display_strobe(item.body) for item in stmt_ir.items)
+    if isinstance(stmt_ir, SystemTaskIR):
+        return stmt_ir.name in {"$display", "$strobe"}
+    return False
 
 
 def _stmt_has_rustsim_event_transition_candidate(stmt_ir: object) -> bool:
@@ -1360,13 +1401,15 @@ def _convert_event_transition_ops(
     module = getattr(model_cls, "_module_ast", None)
     if module is None:
         return (f"{prefix}:module_ast_unavailable",)
-    if _prefer_existing_timer_static_linear_path(model_cls):
-        return (f"{prefix}:timer_static_linear_specialized_path_preferred",)
     analog_block = getattr(module, "analog_block", None)
     body_ast = getattr(analog_block, "body", None)
     body_ir = lower_stmt(body_ast)
     if not isinstance(body_ir, BlockIR):
         return (f"{prefix}:stmt_lower_failed",)
+    if _prefer_existing_timer_static_linear_path(
+        model_cls
+    ) and not _stmt_has_display_strobe(body_ir):
+        return (f"{prefix}:timer_static_linear_specialized_path_preferred",)
     if getattr(model, "_child_models", None):
         return (f"{prefix}:child_models_not_lowered",)
     bindings = _extend_bindings_from_static_array_accesses(
@@ -1408,6 +1451,7 @@ def _convert_event_transition_ops(
     pending_continuous: list[object] = []
     seen_transition = False
     contributed_nodes = _collect_contributed_nodes(body_ir)
+    side_effect_slot_offset = len(side_effects)
     side_effect_builder = _RustSimSideEffectBuilder(model)
     phase_contributed_nodes = set(contributed_nodes)
     if global_contributed_nodes:
@@ -1437,6 +1481,7 @@ def _convert_event_transition_ops(
             node_slot_to_global=node_slot_to_global,
             state_slot_to_global=state_slot_to_global,
             param_slot_to_global=param_slot_to_global,
+            side_effect_slot_offset=side_effect_slot_offset,
         )
         if body_count <= 0:
             return
@@ -1492,6 +1537,7 @@ def _convert_event_transition_ops(
                 node_slot_to_global=node_slot_to_global,
                 state_slot_to_global=state_slot_to_global,
                 param_slot_to_global=param_slot_to_global,
+                side_effect_slot_offset=side_effect_slot_offset,
             )
             for trigger, trigger_phase in zip(due_program.triggers, trigger_phases):
                 expr_start, expr_count = _append_expr_segment(
@@ -1574,6 +1620,7 @@ def _convert_event_transition_ops(
                         node_slot_to_global=node_slot_to_global,
                         state_slot_to_global=state_slot_to_global,
                         param_slot_to_global=param_slot_to_global,
+                        side_effect_slot_offset=side_effect_slot_offset,
                     )
                     if body_count > 0:
                         events.append(

@@ -132,7 +132,8 @@ def _assert_logs_match_semantics(python_log: Path, rust_log: Path) -> None:
 def _assert_strobe_logs_match(python_out: Path, rust_out: Path) -> None:
     python_strobe = python_out / "strobe.txt"
     rust_strobe = rust_out / "strobe.txt"
-    if python_strobe.exists() and rust_strobe.exists():
+    assert rust_strobe.exists() == python_strobe.exists()
+    if python_strobe.exists():
         assert rust_strobe.read_text(encoding="utf-8") == python_strobe.read_text(
             encoding="utf-8"
         )
@@ -166,13 +167,26 @@ def test_bundled_example_python_vs_evas_rust_parity(
     _assert_strobe_logs_match(python_out, rust_out)
 
 
-@pytest.mark.xfail(
-    reason="noise_gen is a current evas-rust full-model coverage gap",
-    strict=True,
-)
-def test_noise_gen_is_tracked_as_current_evas_rust_coverage_gap(
+def test_noise_gen_python_vs_evas_rust_noise_parity(
     built_rust_core,
     tmp_path,
 ):
     scs = REPO_ROOT / "evas" / "examples" / "noise_gen" / "tb_noise_gen.scs"
-    _run_example(scs, "evas-rust", tmp_path / "noise_gen", tmp_path / "noise_gen.log")
+    python_out = tmp_path / "noise_gen_python"
+    rust_out = tmp_path / "noise_gen_evas_rust"
+    _run_example(scs, "python", python_out, tmp_path / "noise_gen_python.log")
+    _run_example(scs, "evas-rust", rust_out, tmp_path / "noise_gen_evas_rust.log")
+
+    python_header, python_data = _read_tran_csv(python_out / "tran.csv")
+    rust_header, rust_data = _read_tran_csv(rust_out / "tran.csv")
+    assert rust_header == python_header
+    assert rust_data.shape == python_data.shape
+    assert np.allclose(rust_data, python_data, rtol=0.0, atol=0.0)
+
+    vin = rust_data[:, rust_header.index("vin_i")]
+    vout = rust_data[:, rust_header.index("vout_o")]
+    noise = vout - vin
+    assert rust_data.shape[0] > 100
+    assert abs(float(np.mean(noise))) < 5e-2
+    assert 5e-2 < float(np.std(noise)) < 2e-1
+    assert float(np.max(np.abs(noise))) > 1e-1
