@@ -1830,3 +1830,82 @@ class TestSpectreCompatibilityPreflight:
         assert ok is False
         log_text = log_path.read_text()
         assert "terminal count mismatch" in log_text
+
+
+class TestStochasticTransitionRampConformance:
+    """Regression guard for the 06526fa stochastic-transition bypass.
+
+    transition() targets derived from $rdist_normal must still produce a real
+    ramp: the recorded row at the event timestamp keeps the pre-event value and
+    the output midpoint lands ~tedge/2 after the tick (Spectre convention).
+    The 06526fa bypass snapped the output instantaneously at the event row,
+    which moved digital edges by ~half a record interval and broke certified
+    EVAS/Spectre parity on the vaBench dither case (252 ps vs 1.19 ps).
+    """
+
+    VA_SRC = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module stochastic_transition_probe(out);
+        output out;
+        electrical out;
+        parameter real sigma = 0.01;
+        parameter real tedge = 200p;
+        real level;
+
+        analog begin
+            @(initial_step) level = 0.0;
+            @(timer(1n)) level = 1.0 + sigma * $rdist_normal(0, 0, 1);
+            V(out) <+ transition(level, 0, tedge, tedge);
+        end
+        endmodule
+    """)
+
+    SCS_SRC = textwrap.dedent("""\
+        simulator lang=spectre
+        global 0
+        I0 (out) stochastic_transition_probe
+        tran tran stop=3n maxstep=50p
+        save out
+        ahdl_include "stochastic_transition_probe.va"
+    """)
+
+    def test_rdist_transition_keeps_ramp_semantics(self, tmp_path):
+        va_file = tmp_path / "stochastic_transition_probe.va"
+        va_file.write_text(self.VA_SRC)
+        scs_file = tmp_path / "tb_stochastic_transition_probe.scs"
+        scs_file.write_text(self.SCS_SRC)
+
+        from evas.netlist.runner import evas_simulate
+        ok = evas_simulate(str(scs_file), output_dir=str(tmp_path / "out"))
+        assert ok
+
+        csv_file = tmp_path / "out" / "tran.csv"
+        rows = [
+            (float(r["time"]), float(r["out"]))
+            for r in csv.DictReader(csv_file.open())
+        ]
+        level = max(v for _, v in rows)
+        assert level > 0.9
+
+        # Pre-event sample preserved: the last row at t <= 1n is still low.
+        at_tick = [v for t, v in rows if t <= 1.0e-9 + 1.0e-15]
+        assert at_tick, "no rows at or before the timer tick"
+        assert at_tick[-1] < 0.1 * level, (
+            f"pre-event sample lost at the tick row: {at_tick[-1]!r}"
+        )
+
+        # Ramp midpoint lands ~tedge/2 after the tick (linear interpolation).
+        vth = 0.5 * level
+        t_cross = None
+        for (t0, v0), (t1, v1) in zip(rows, rows[1:]):
+            if (v0 - vth) <= 0.0 < (v1 - vth):
+                frac = (vth - v0) / (v1 - v0)
+                t_cross = t0 + frac * (t1 - t0)
+                break
+        assert t_cross is not None, "no rising edge found"
+        ideal = 1.0e-9 + 100.0e-12
+        assert abs(t_cross - ideal) < 30.0e-12, (
+            f"transition midpoint {t_cross} deviates from {ideal} by "
+            f"{abs(t_cross - ideal) * 1e12:.1f} ps — stochastic transition"
+            " bypass regression?"
+        )
