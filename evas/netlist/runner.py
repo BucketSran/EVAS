@@ -1088,6 +1088,7 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     elif errpreset == 'liberal':
         refine_factor = min(refine_factor, 8)
         refine_steps = min(refine_steps, 4)
+    cross_acceptance_slack_factor = 0.25 if errpreset == 'conservative' else 0.0
 
     evas_profile = str(simopt.get('evas_profile', '')).lower()
     refine_factor, refine_steps, reltol, applied_profile = _apply_evas_profile(
@@ -1330,6 +1331,8 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write("    evas_event_trace_audit = true")
     if rust_required:
         log.write("    evas_rust_required = true")
+    if cross_acceptance_slack_factor:
+        log.write(f"    evas_cross_acceptance_slack_factor = {cross_acceptance_slack_factor:g}")
     log.write("")
 
     t_sim_start = time.time()
@@ -1359,6 +1362,7 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
                      rust_full_model_fastpath=rust_full_model_fastpath,
                      rust_full_model_required=rust_full_model_required,
                      event_trace_audit=event_trace_audit,
+                     cross_acceptance_slack_factor=cross_acceptance_slack_factor,
                      rust_required=rust_required)
 
     for pct in range(10, 101, 10):

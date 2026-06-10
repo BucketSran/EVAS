@@ -1025,7 +1025,9 @@ fn collects_same_step_cross_events_by_interpolated_time() {
     assert_eq!(candidates.len(), 2);
     assert_eq!(candidates[0].event_idx, 1);
     assert_eq!(candidates[1].event_idx, 0);
+    assert!((candidates[0].trigger_time - 4.8e-9).abs() < 1.0e-21);
     assert!((candidates[0].event_time - 4.8e-9).abs() < 1.0e-21);
+    assert!((candidates[1].trigger_time - 5.0e-9).abs() < 1.0e-21);
     assert!((candidates[1].event_time - 5.0e-9).abs() < 1.0e-21);
 }
 

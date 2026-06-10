@@ -1848,6 +1848,120 @@ endmodule
         assert result.signals["OUT"][2] == pytest.approx(1.0)
         assert result.signals["SEEN_T"][2] == pytest.approx(510e-12, abs=1.0e-15)
 
+    def test_rust_sim_program_cross_acceptance_uses_accepted_event_time(self):
+        _build_rust_core_or_skip()
+        driver_src = """\
+`include "disciplines.vams"
+module accepted_cross_driver(clk, sig);
+    input voltage clk;
+    output voltage sig;
+    integer q;
+    analog begin
+        @(initial_step) q = 0;
+        @(cross(V(clk)-0.5, +1)) q = 1;
+        V(sig) <+ transition(q ? 1.0 : 0.0, 0.0, 10p, 10p);
+    end
+endmodule
+"""
+        observer_src = """\
+`include "disciplines.vams"
+module accepted_cross_observer(sig, seen_time);
+    input voltage sig;
+    output voltage seen_time;
+    real seen_t;
+    analog begin
+        @(initial_step) seen_t = -1.0;
+        @(cross(V(sig)-0.5, +1)) seen_t = $abstime;
+        V(seen_time) <+ seen_t;
+    end
+endmodule
+"""
+        DriverCls = compile_module(parse(driver_src))
+        ObserverCls = compile_module(parse(observer_src))
+
+        def run_with_factor(factor):
+            driver = DriverCls()
+            driver.node_map = {"clk": "CLK", "sig": "SIG"}
+            observer = ObserverCls()
+            observer.node_map = {"sig": "SIG", "seen_time": "SEEN_T"}
+            sim = Simulator()
+            sim.add_source("CLK", pwl([0.0, 1e-9], [0.0, 1.0]))
+            sim.add_model(driver)
+            sim.add_model(observer)
+            sim.record("SIG")
+            sim.record("SEEN_T")
+            result = sim.run(
+                tstop=1.2e-9,
+                tstep=1e-9,
+                record_step=1e-9,
+                max_step=1e-9,
+                rust_full_model_fastpath=True,
+                rust_full_model_required=True,
+                rust_required=True,
+                skip_source_error_control=True,
+                cross_acceptance_slack_factor=factor,
+            )
+            assert sim._perf_stats["rust_sim_program_enabled"] == 1
+            assert sim._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+            return result, observer
+
+        default_result, default_observer = run_with_factor(0.0)
+        accepted_result, accepted_observer = run_with_factor(0.25)
+
+        assert default_observer.state["seen_t"] == pytest.approx(510e-12, abs=1e-15)
+        assert default_result.signals["SEEN_T"][2] == pytest.approx(510e-12, abs=1e-15)
+        assert accepted_observer.state["seen_t"] == pytest.approx(512.5e-12, abs=1e-15)
+        assert accepted_result.signals["SEEN_T"][2] == pytest.approx(512.5e-12, abs=1e-15)
+        assert accepted_result.time[1] == pytest.approx(502.5e-12, abs=1e-15)
+
+    def test_rust_sim_program_rdist_event_body_preserves_transition_ramp(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module timer_noise_transition(vin, out);
+    input voltage vin;
+    output voltage out;
+    parameter real sigma = 0.0;
+    parameter real dt = 0.5n;
+    real noise, vout;
+    analog begin
+        @(initial_step) begin
+            noise = 0.0;
+            vout = 0.0;
+        end
+        @(timer(dt)) begin
+            noise = sigma * $rdist_normal(0, 0, 1);
+            vout = V(vin) + noise;
+        end
+        V(out) <+ transition(vout, 0, dt/10, dt/10);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        model.node_map = {"vin": "VIN", "out": "OUT"}
+        sim = Simulator()
+        sim.add_source("VIN", dc(1.0))
+        sim.add_model(model)
+        sim.record("OUT")
+
+        result = sim.run(
+            tstop=0.6e-9,
+            tstep=0.5e-9,
+            max_step=0.5e-9,
+            record_step=0.5e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert sim._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert list(result.time[:3]) == pytest.approx([0.0, 0.5e-9, 0.55e-9])
+        assert result.signals["OUT"][1] == pytest.approx(0.0)
+        assert result.signals["OUT"][2] == pytest.approx(1.0)
+
     def test_rust_sim_program_transition_uses_model_default_transition(self):
         _build_rust_core_or_skip()
         src = """\

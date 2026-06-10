@@ -612,6 +612,7 @@ class Simulator:
         record_step: Optional[float],
         tstep: float,
         max_step: float,
+        cross_acceptance_slack_factor: float = 0.0,
     ) -> Optional[SimResult]:
         fastpath_t0 = _wall_time.perf_counter()
         self._perf_stats["rust_sim_program_requested"] = 1
@@ -707,6 +708,7 @@ class Simulator:
                     tstep=tstep,
                     max_step=max_step,
                     record_step=record_step,
+                    cross_acceptance_slack_factor=cross_acceptance_slack_factor,
                 )
                 runtime_succeeded = True
                 break
@@ -3656,6 +3658,7 @@ class Simulator:
             rust_full_model_fastpath: bool = False,
             rust_full_model_required: bool = False,
             event_trace_audit: bool = False,
+            cross_acceptance_slack_factor: float = 0.0,
             rust_required: bool = False) -> SimResult:
         """Run transient simulation with adaptive step control near cross events."""
         if tstep is None:
@@ -4997,6 +5000,7 @@ class Simulator:
                 record_step=record_step,
                 tstep=tstep,
                 max_step=max_step,
+                cross_acceptance_slack_factor=cross_acceptance_slack_factor,
             )
             if sim_program_result is not None:
                 return sim_program_result

@@ -1764,6 +1764,7 @@ class RustBackend:
                 ctypes.c_double,
                 ctypes.c_uint8,
                 ctypes.c_double,
+                ctypes.c_double,
                 ctypes.POINTER(ctypes.c_size_t),
                 ctypes.POINTER(ctypes.c_size_t),
                 ctypes.POINTER(ctypes.c_size_t),
@@ -2496,6 +2497,7 @@ class RustBackend:
         tstep: float,
         max_step: float,
         record_step: Optional[float],
+        cross_acceptance_slack_factor: float = 0.0,
     ) -> tuple[array, dict[str, array], array, array, array, dict[str, int]]:
         use_event_transition_abi = (
             program.event_count > 0
@@ -2616,6 +2618,7 @@ class RustBackend:
                 float(record_step if record_step is not None else 0.0),
                 1 if use_record_step else 0,
                 0.15 * float(tstep),
+                float(cross_acceptance_slack_factor),
                 ctypes.byref(source_breakpoints),
                 ctypes.byref(event_fires),
                 ctypes.byref(transition_breakpoints),

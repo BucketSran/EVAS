@@ -593,6 +593,47 @@ pub(crate) fn rust_sim_execute_event_body(
 pub(crate) struct RustSimCrossCandidate {
     pub(crate) event_idx: usize,
     pub(crate) event_time: f64,
+    pub(crate) trigger_time: f64,
+}
+
+fn rust_sim_min_transition_ramp_at_time(
+    transitions: &[EvasRustSimTransitionSpec],
+    body_expr_ops: &[EvasRustBodyExprOp],
+    node_values: &[f64],
+    state_values: &[f64],
+    param_values: &[f64],
+    time: f64,
+    default_transition: f64,
+) -> Result<f64, i32> {
+    let mut best = f64::INFINITY;
+    for spec in transitions {
+        let rise = rust_sim_eval_expr_segment(
+            body_expr_ops,
+            spec.rise_expr_start,
+            spec.rise_expr_count,
+            node_values,
+            state_values,
+            param_values,
+            time,
+            default_transition,
+        )?;
+        let fall = rust_sim_eval_expr_segment(
+            body_expr_ops,
+            spec.fall_expr_start,
+            spec.fall_expr_count,
+            node_values,
+            state_values,
+            param_values,
+            time,
+            rise,
+        )?;
+        for candidate in [rise, fall] {
+            if candidate.is_finite() && candidate > 0.0 && candidate < best {
+                best = candidate;
+            }
+        }
+    }
+    Ok(best)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -611,6 +652,7 @@ pub(crate) fn rust_sim_collect_cross_events_into(
     time: f64,
     initial_condition_mode: bool,
     phase: u8,
+    use_accepted_event_time: bool,
     candidates: &mut Vec<RustSimCrossCandidate>,
 ) -> Result<(), i32> {
     if cross_prev_values.len() != events.len()
@@ -685,17 +727,142 @@ pub(crate) fn rust_sim_collect_cross_events_into(
         if !initial_condition_mode && triggered[0] != 0 && cross_times[0].is_finite() {
             candidates.push(RustSimCrossCandidate {
                 event_idx,
-                event_time: cross_times[0],
+                event_time: if use_accepted_event_time {
+                    time
+                } else {
+                    cross_times[0]
+                },
+                trigger_time: cross_times[0],
             });
         }
     }
     candidates.sort_by(|left, right| {
-        left.event_time
-            .partial_cmp(&right.event_time)
+        left.trigger_time
+            .partial_cmp(&right.trigger_time)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| left.event_idx.cmp(&right.event_idx))
     });
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rust_sim_next_cross_event_acceptance_breakpoint(
+    sources: &[EvasRustSimSourceSpec],
+    source_data: &[f64],
+    linear_ops: &[EvasRustLinearOp],
+    linear_terms: &[EvasRustLinearTerm],
+    linear_conditions: &[EvasRustLinearCondition],
+    body_expr_ops: &[EvasRustBodyExprOp],
+    events: &[EvasRustSimEventSpec],
+    transitions: &[EvasRustSimTransitionSpec],
+    param_values: &[f64],
+    node_values: &[f64],
+    state_values: &[f64],
+    cross_prev_values: &[f64],
+    cross_prev_times: &[f64],
+    cross_initialized: &[u8],
+    time: f64,
+    dt: f64,
+    phase: u8,
+    default_transition: f64,
+    cross_acceptance_slack_factor: f64,
+) -> Result<Option<f64>, i32> {
+    if dt <= 0.0 || cross_acceptance_slack_factor <= 0.0 {
+        return Ok(None);
+    }
+    let horizon = time + dt;
+    if !horizon.is_finite() || horizon <= time {
+        return Ok(None);
+    }
+    if cross_prev_values.len() != events.len()
+        || cross_prev_times.len() != events.len()
+        || cross_initialized.len() != events.len()
+    {
+        return Err(-955);
+    }
+
+    let mut scratch_nodes = node_values.to_vec();
+    let mut scratch_states = state_values.to_vec();
+    rust_sim_write_sources(sources, source_data, &mut scratch_nodes, horizon)?;
+    evaluate_static_linear_ops(
+        linear_ops,
+        linear_terms,
+        linear_conditions,
+        &mut scratch_nodes,
+        &mut scratch_states,
+    )?;
+
+    let mut best: Option<f64> = None;
+    for event_idx in 0..events.len() {
+        let event = events[event_idx];
+        if event.phase != phase
+            || event.kind != RUST_SIM_EVENT_CROSS
+            || cross_initialized[event_idx] == 0
+        {
+            continue;
+        }
+        let previous_value = cross_prev_values[event_idx];
+        let previous_time = cross_prev_times[event_idx];
+        if previous_time >= horizon {
+            continue;
+        }
+        let current_value = rust_sim_eval_expr_segment(
+            body_expr_ops,
+            event.expr_start,
+            event.expr_count,
+            &scratch_nodes,
+            &scratch_states,
+            param_values,
+            horizon,
+            0.0,
+        )?;
+        let expr_tol = rust_sim_eval_expr_segment(
+            body_expr_ops,
+            event.expr_tol_start,
+            event.expr_tol_count,
+            &scratch_nodes,
+            &scratch_states,
+            param_values,
+            horizon,
+            1.0e-12,
+        )?
+        .abs();
+        let direction = event.direction;
+        let rising = direction >= 0 && previous_value < -expr_tol && current_value >= -expr_tol;
+        let falling = direction <= 0 && previous_value > expr_tol && current_value <= expr_tol;
+        if !rising && !falling {
+            continue;
+        }
+        let delta = current_value - previous_value;
+        let frac = if delta.abs() > 1.0e-30 {
+            (-previous_value / delta).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let root = previous_time + frac * (horizon - previous_time);
+        if root <= time || root > horizon + 1.0e-18 {
+            continue;
+        }
+        let ramp = rust_sim_min_transition_ramp_at_time(
+            transitions,
+            body_expr_ops,
+            &scratch_nodes,
+            &scratch_states,
+            param_values,
+            root,
+            default_transition,
+        )?;
+        let slack = if ramp.is_finite() && ramp > 0.0 {
+            cross_acceptance_slack_factor * ramp
+        } else {
+            1.0e-18_f64.max(dt.abs() * 1.0e-12)
+        };
+        let accepted = root + slack;
+        if accepted > time && best.map_or(true, |old| accepted < old) {
+            best = Some(accepted);
+        }
+    }
+    Ok(best)
 }
 
 #[cfg(test)]
@@ -732,6 +899,7 @@ pub(crate) fn rust_sim_collect_cross_events(
         time,
         initial_condition_mode,
         phase,
+        false,
         &mut candidates,
     )?;
     Ok(candidates)
@@ -1043,10 +1211,47 @@ fn rust_sim_transition_targets_contain_rdist_normal(
     Ok(false)
 }
 
-fn rust_sim_body_contains_rdist_normal(body_expr_ops: &[EvasRustBodyExprOp]) -> bool {
-    body_expr_ops
+fn rust_sim_expr_segment_contains_rdist_normal(
+    body_expr_ops: &[EvasRustBodyExprOp],
+    start: usize,
+    count: usize,
+) -> Result<bool, i32> {
+    let end = start.checked_add(count).ok_or(-978)?;
+    if end > body_expr_ops.len() {
+        return Err(-979);
+    }
+    Ok(body_expr_ops[start..end]
         .iter()
-        .any(|op| op.op_kind == BODY_EXPR_RDIST_NORMAL)
+        .any(|op| op.op_kind == BODY_EXPR_RDIST_NORMAL))
+}
+
+fn rust_sim_always_event_body_contains_rdist_normal(
+    events: &[EvasRustSimEventSpec],
+    body_stmt_ops: &[EvasRustBodyStmtOp],
+    body_expr_ops: &[EvasRustBodyExprOp],
+) -> Result<bool, i32> {
+    for event in events {
+        if event.kind != RUST_SIM_EVENT_ALWAYS {
+            continue;
+        }
+        let body_end = event
+            .body_stmt_start
+            .checked_add(event.body_stmt_count)
+            .ok_or(-980)?;
+        if body_end > body_stmt_ops.len() {
+            return Err(-981);
+        }
+        for stmt in &body_stmt_ops[event.body_stmt_start..body_end] {
+            if rust_sim_expr_segment_contains_rdist_normal(
+                body_expr_ops,
+                stmt.expr_start,
+                stmt.expr_count,
+            )? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1069,8 +1274,8 @@ pub(crate) fn rust_sim_next_transition_target_change_breakpoint(
     if transitions.is_empty() || dt <= 0.0 {
         return Ok(None);
     }
-    if rust_sim_body_contains_rdist_normal(body_expr_ops)
-        || rust_sim_transition_targets_contain_rdist_normal(transitions, body_expr_ops)?
+    if rust_sim_transition_targets_contain_rdist_normal(transitions, body_expr_ops)?
+        || rust_sim_always_event_body_contains_rdist_normal(events, body_stmt_ops, body_expr_ops)?
     {
         return Ok(None);
     }
@@ -1308,6 +1513,7 @@ pub(crate) fn rust_sim_apply_transitions(
     time: f64,
     default_transition: f64,
     initial_condition_mode: bool,
+    force_immediate_random_target: bool,
 ) -> Result<(), i32> {
     let count = transitions.len();
     if current_values.len() != count
@@ -1326,8 +1532,6 @@ pub(crate) fn rust_sim_apply_transitions(
     if count == 0 {
         return Ok(());
     }
-    let body_contains_rdist = rust_sim_body_contains_rdist_normal(body_expr_ops);
-
     let mut input_targets = vec![0.0_f64; count];
     let mut input_delays = vec![0.0_f64; count];
     let mut input_rises = vec![0.0_f64; count];
@@ -1386,7 +1590,7 @@ pub(crate) fn rust_sim_apply_transitions(
         if input_falls[idx] <= 0.0 {
             input_falls[idx] = spec_default_transition;
         }
-        if body_contains_rdist {
+        if force_immediate_random_target {
             current_values[idx] = input_targets[idx];
             target_values[idx] = input_targets[idx];
             start_values[idx] = input_targets[idx];
@@ -1502,9 +1706,10 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
     horizon: f64,
     min_ramp_time: f64,
     default_transition: f64,
+    force_immediate_random_target: bool,
 ) -> Result<usize, i32> {
-    if rust_sim_body_contains_rdist_normal(body_expr_ops)
-        || rust_sim_transition_targets_contain_rdist_normal(transitions, body_expr_ops)?
+    if rust_sim_transition_targets_contain_rdist_normal(transitions, body_expr_ops)?
+        || rust_sim_always_event_body_contains_rdist_normal(events, body_stmt_ops, body_expr_ops)?
     {
         return Ok(0);
     }
@@ -1557,6 +1762,7 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
             bp,
             default_transition,
             false,
+            force_immediate_random_target,
         )?;
         if drain_post_cross_events {
             rust_sim_collect_cross_events_into(
@@ -1574,6 +1780,7 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
                 bp,
                 false,
                 RUST_SIM_EVENT_PHASE_POST,
+                false,
                 &mut post_cross_candidates,
             )?;
             for candidate in &post_cross_candidates {
@@ -1611,6 +1818,7 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
                     event_time,
                     default_transition,
                     false,
+                    force_immediate_random_target,
                 )?;
                 rust_sim_execute_event_body(
                     &events[candidate.event_idx],
@@ -1649,6 +1857,7 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
                     event_time,
                     default_transition,
                     false,
+                    force_immediate_random_target,
                 )?;
                 rust_sim_record_point_dedup(
                     time_values,
@@ -1689,6 +1898,7 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
                 bp,
                 default_transition,
                 false,
+                force_immediate_random_target,
             )?;
         }
         rust_sim_record_point_dedup(
@@ -1746,6 +1956,7 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
     min_ramp_time: f64,
     default_transition: f64,
     drain_transition_post_cross_events: bool,
+    force_immediate_random_target: bool,
     bound_step_limit: &mut f64,
     side_effect_log: &mut RustSideEffectLog<'_>,
     cross_prev_values: &mut [f64],
@@ -1820,6 +2031,7 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
             event_time,
             min_ramp_time,
             default_transition,
+            force_immediate_random_target,
         )?;
         if *count > 0 {
             let last_recorded_time = time_values[*count - 1];
@@ -1855,6 +2067,7 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
             event_time,
             default_transition,
             false,
+            force_immediate_random_target,
         )?;
         rust_sim_execute_event_body(
             &events[candidate.event_idx],
@@ -1893,6 +2106,7 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
             event_time,
             default_transition,
             false,
+            force_immediate_random_target,
         )?;
         rust_sim_record_point_dedup(
             time_values,
@@ -1950,6 +2164,7 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
         step_end_time,
         min_ramp_time,
         default_transition,
+        force_immediate_random_target,
     )?;
 
     Ok((fired, transition_breakpoints))
@@ -1988,6 +2203,7 @@ pub fn rust_sim_event_transition_record_trace(
     use_record_step: bool,
     min_ramp_time: f64,
     default_transition: f64,
+    cross_acceptance_slack_factor: f64,
 ) -> Result<(usize, usize, usize, usize), i32> {
     if !tstop.is_finite() || !tstep.is_finite() || !max_step.is_finite() {
         return Err(-981);
@@ -2010,6 +2226,14 @@ pub fn rust_sim_event_transition_record_trace(
     }
 
     let eps = 1.0e-18;
+    let use_cross_accepted_event_time = cross_acceptance_slack_factor > 0.0;
+    let force_immediate_random_target =
+        rust_sim_transition_targets_contain_rdist_normal(transitions, body_expr_ops)?
+            || rust_sim_always_event_body_contains_rdist_normal(
+                events,
+                body_stmt_ops,
+                body_expr_ops,
+            )?;
     let event_count = events.len();
     let transition_count = transitions.len();
     let has_pre_cross_events = events
@@ -2047,8 +2271,7 @@ pub fn rust_sim_event_transition_record_trace(
         .iter()
         .any(|event| event.kind == RUST_SIM_EVENT_FINAL_STEP);
     let transition_targets_contain_rdist =
-        rust_sim_body_contains_rdist_normal(body_expr_ops)
-            || rust_sim_transition_targets_contain_rdist_normal(transitions, body_expr_ops)?;
+        rust_sim_transition_targets_contain_rdist_normal(transitions, body_expr_ops)?;
     let mut source_breakpoints = 0_usize;
     let mut event_fires = 0_usize;
     let mut transition_breakpoints = 0_usize;
@@ -2149,6 +2372,7 @@ pub fn rust_sim_event_transition_record_trace(
             0.0,
             true,
             RUST_SIM_EVENT_PHASE_PRE,
+            false,
             &mut pre_cross_candidates,
         )?;
     }
@@ -2178,6 +2402,7 @@ pub fn rust_sim_event_transition_record_trace(
         0.0,
         default_transition,
         true,
+        force_immediate_random_target,
     )?;
     if has_post_cross_events {
         rust_sim_collect_cross_events_into(
@@ -2195,6 +2420,7 @@ pub fn rust_sim_event_transition_record_trace(
             0.0,
             false,
             RUST_SIM_EVENT_PHASE_POST,
+            false,
             &mut post_cross_candidates,
         )?;
     }
@@ -2258,6 +2484,7 @@ pub fn rust_sim_event_transition_record_trace(
             0.0,
             default_transition,
             false,
+            force_immediate_random_target,
         )?;
     }
     rust_sim_record_point(
@@ -2359,6 +2586,32 @@ pub fn rust_sim_event_transition_record_trace(
             dt = next_record_time - time;
             force_record = true;
         }
+        if has_pre_cross_events {
+            if let Some(bp) = rust_sim_next_cross_event_acceptance_breakpoint(
+                sources,
+                source_data,
+                linear_ops,
+                linear_terms,
+                linear_conditions,
+                body_expr_ops,
+                events,
+                transitions,
+                param_values,
+                node_values,
+                state_values,
+                &cross_prev_values,
+                &cross_prev_times,
+                &cross_initialized,
+                time,
+                dt,
+                RUST_SIM_EVENT_PHASE_PRE,
+                default_transition,
+                cross_acceptance_slack_factor,
+            )? {
+                dt = bp - time;
+                force_record = true;
+            }
+        }
         if dt <= 0.0 {
             dt = eps;
         }
@@ -2386,6 +2639,7 @@ pub fn rust_sim_event_transition_record_trace(
                 time,
                 false,
                 RUST_SIM_EVENT_PHASE_PRE,
+                use_cross_accepted_event_time,
                 &mut pre_cross_candidates,
             )?;
             let (pre_cross_fires, pre_cross_transition_bps) =
@@ -2423,6 +2677,7 @@ pub fn rust_sim_event_transition_record_trace(
                     min_ramp_time,
                     default_transition,
                     false,
+                    force_immediate_random_target,
                     &mut bound_step_limit,
                     &mut side_effect_log,
                     &mut cross_prev_values,
@@ -2495,6 +2750,7 @@ pub fn rust_sim_event_transition_record_trace(
             time,
             default_transition,
             false,
+            force_immediate_random_target,
         )?;
         if has_post_cross_events {
             rust_sim_collect_cross_events_into(
@@ -2512,6 +2768,7 @@ pub fn rust_sim_event_transition_record_trace(
                 time,
                 false,
                 RUST_SIM_EVENT_PHASE_POST,
+                use_cross_accepted_event_time,
                 &mut post_cross_candidates,
             )?;
             let (post_cross_fires, post_cross_transition_bps) =
@@ -2549,6 +2806,7 @@ pub fn rust_sim_event_transition_record_trace(
                     min_ramp_time,
                     default_transition,
                     true,
+                    force_immediate_random_target,
                     &mut bound_step_limit,
                     &mut side_effect_log,
                     &mut cross_prev_values,
@@ -2589,6 +2847,7 @@ pub fn rust_sim_event_transition_record_trace(
                     time,
                     default_transition,
                     false,
+                    force_immediate_random_target,
                 )?;
             }
         }
@@ -2653,6 +2912,7 @@ pub fn rust_sim_event_transition_record_trace(
                 time,
                 default_transition,
                 false,
+                force_immediate_random_target,
             )?;
         }
 

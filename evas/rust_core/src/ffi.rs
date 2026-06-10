@@ -327,6 +327,7 @@ pub unsafe extern "C" fn evas_rust_run_event_transition_record_program(
     record_step: f64,
     use_record_step: u8,
     min_ramp_time: f64,
+    cross_acceptance_slack_factor: f64,
     out_source_breakpoints: *mut usize,
     out_event_fires: *mut usize,
     out_transition_breakpoints: *mut usize,
@@ -549,6 +550,7 @@ pub unsafe extern "C" fn evas_rust_run_event_transition_record_program(
         use_record_step != 0,
         min_ramp_time,
         1.0e-12,
+        cross_acceptance_slack_factor,
     ) {
         Ok((count, source_breakpoints, event_fires, transition_breakpoints)) => {
             *out_count = count;
