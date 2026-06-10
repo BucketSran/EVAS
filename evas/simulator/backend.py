@@ -12033,26 +12033,6 @@ class _ModuleCompiler:
             transition_affine = self._transition_affine_expr(stmt.expr)
         if transition_affine is not None:
             transition_call, offset_expr, scale_expr = transition_affine
-            target_expr = (
-                transition_call.args[0]
-                if transition_call.args
-                else NumberLiteral(0.0)
-            )
-            if self._transition_target_uses_random_state(target_expr):
-                target = self._compile_expr(target_expr)
-                offset = self._compile_expr(offset_expr)
-                scale = self._compile_expr(scale_expr)
-                if branch.node2 is not None:
-                    base = self._compile_node_voltage(
-                        branch.node2,
-                        branch.node2_index,
-                        branch.node2_index2,
-                    )
-                else:
-                    base = "0.0"
-                expr = f"(({base}) + ({offset}) + ({scale}) * ({target}))"
-                return [f"{prefix}self._set_output({node!r}, {expr}, nv)"]
-
             key_expr, target, delay, rise, fall = self._compile_transition_call_parts(
                 transition_call
             )
