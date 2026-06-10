@@ -1991,6 +1991,7 @@ pub fn rust_sim_event_transition_record_trace(
         return Err(-986);
     }
 
+    crate::util::reset_rdist_draw_indices();
     let eps = 1.0e-18;
     let event_count = events.len();
     let transition_count = transitions.len();

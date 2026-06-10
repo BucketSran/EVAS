@@ -4486,10 +4486,21 @@ class CompiledModel:
         std: float,
         time: float = 0.0,
     ) -> float:
+        # Stateless hash of (seed, draw index). Hashing the per-seed draw
+        # index instead of wall-clock time keeps the sequence identical across
+        # engines even when their event times differ at sub-ps level, and
+        # matches the LRM's sequential-stream semantics. `time` is accepted
+        # for call-site compatibility but no longer enters the hash.
+        del time
         seed_value = 0.0 if seed is None else float(seed)
         seed_bits = self._float_to_u64_bits(seed_value)
-        time_bits = self._float_to_u64_bits(float(time))
-        stream = seed_bits ^ self._rotl64(time_bits, 17) ^ 0xD1B54A32D192ED03
+        counters = getattr(self, "_rdist_draw_indices", None)
+        if counters is None:
+            counters = {}
+            self._rdist_draw_indices = counters
+        index = counters.get(seed_bits, 0)
+        counters[seed_bits] = index + 1
+        stream = seed_bits ^ self._rotl64(index, 17) ^ 0xD1B54A32D192ED03
         u1 = self._uniform01_from_u64(self._splitmix64(stream))
         u2 = self._uniform01_from_u64(self._splitmix64(stream ^ 0xA0761D6478BD642F))
         radius = math.sqrt(-2.0 * math.log(u1))
