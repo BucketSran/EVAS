@@ -56,10 +56,38 @@ fn uniform01_from_u64(value: u64) -> f64 {
     ((mantissa as f64) * scale).clamp(1.0e-12, 1.0 - 1.0e-12)
 }
 
-fn deterministic_normal(seed: f64, mean: f64, std: f64, time: f64) -> f64 {
+thread_local! {
+    // Per-seed draw counters for $rdist_normal. Hashing the draw index
+    // instead of wall-clock time keeps the sequence identical to the python
+    // engine even when event times differ at sub-ps level. Reset at the start
+    // of every full-program simulation so runs are reproducible.
+    static RDIST_DRAW_INDICES: std::cell::RefCell<Vec<(u64, u64)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn reset_rdist_draw_indices() {
+    RDIST_DRAW_INDICES.with(|cell| cell.borrow_mut().clear());
+}
+
+fn next_rdist_draw_index(seed_bits: u64) -> u64 {
+    RDIST_DRAW_INDICES.with(|cell| {
+        let mut counts = cell.borrow_mut();
+        for entry in counts.iter_mut() {
+            if entry.0 == seed_bits {
+                let index = entry.1;
+                entry.1 = entry.1.wrapping_add(1);
+                return index;
+            }
+        }
+        counts.push((seed_bits, 1));
+        0
+    })
+}
+
+fn deterministic_normal(seed: f64, mean: f64, std: f64) -> f64 {
     let seed_bits = seed.to_bits();
-    let time_bits = time.to_bits();
-    let stream = seed_bits ^ time_bits.rotate_left(17) ^ 0xd1b5_4a32_d192_ed03_u64;
+    let index = next_rdist_draw_index(seed_bits);
+    let stream = seed_bits ^ index.rotate_left(17) ^ 0xd1b5_4a32_d192_ed03_u64;
     let u1 = uniform01_from_u64(splitmix64(stream));
     let u2 = uniform01_from_u64(splitmix64(stream ^ 0xa076_1d64_78bd_642f_u64));
     let radius = (-2.0 * u1.ln()).sqrt();
@@ -249,7 +277,7 @@ pub(crate) fn evaluate_body_expr_segment(
             }
             BODY_EXPR_RDIST_NORMAL => {
                 let (seed, mean, std) = pop3(stack)?;
-                stack.push(deterministic_normal(seed, mean, std, time));
+                stack.push(deterministic_normal(seed, mean, std));
             }
             BODY_EXPR_FLOOR => {
                 let value = pop1(stack)?;

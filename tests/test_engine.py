@@ -5433,17 +5433,24 @@ endmodule
         assert self.model._check_cross("ct", 2e-9, -2e-2, direction=1, expr_tol=1e-3) is False
         assert self.model._check_cross("ct", 3e-9, 2e-2, direction=1, expr_tol=1e-3) is True
 
-    def test_seeded_normal_random_is_deterministic_by_seed_and_time(self):
+    def test_seeded_normal_random_is_a_deterministic_per_seed_stream(self):
+        # Sequential-stream semantics: draws are hashed on (seed, draw index),
+        # not wall-clock time, so the sequence is schedule-independent.
         seq_a = [self.model._rand_normal(7, 0.0, 1.0, t) for t in (0.0, 1e-9, 2e-9)]
         seq_b = [self.model._rand_normal(7, 0.0, 1.0, t) for t in (0.0, 1e-9, 2e-9)]
-        assert seq_a == pytest.approx(seq_b)
-        assert seq_a == pytest.approx(
-            [0.01944347116215914, 0.22233872857786585, -2.5199440415763674]
-        )
+        # Same instance keeps drawing from the stream: no repetition.
+        assert all(a != b for a, b in zip(seq_a, seq_b))
 
+        # A fresh instance with the same seed reproduces the sequence exactly,
+        # regardless of the times passed at the call sites.
         m2 = CompiledModel()
-        seq_c = [m2._rand_normal(7, 0.0, 1.0, t) for t in (0.0, 1e-9, 2e-9)]
+        seq_c = [m2._rand_normal(7, 0.0, 1.0, t) for t in (5e-9, 6e-9, 7e-9)]
         assert seq_a == pytest.approx(seq_c)
+
+        # Distinct seeds give independent streams.
+        m3 = CompiledModel()
+        seq_d = [m3._rand_normal(8, 0.0, 1.0, 0.0) for _ in range(3)]
+        assert all(c != d for c, d in zip(seq_c, seq_d))
 
     def test_unseeded_random_stream_is_deterministic_per_model(self):
         seq_a = [self.model._rand_uniform(None, -1.0, 1.0) for _ in range(3)]

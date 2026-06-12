@@ -1,43 +1,44 @@
-
-
 `include "constants.vams"
 `include "disciplines.vams"
 
-`default_transition 10p
+// noise_gen — Gaussian noise source, EVAS-compatible sample-and-hold form.
+//
+// Noise is resampled at each @(timer) tick and held between ticks, then
+// smoothed by transition(). This is the recommended pattern for stochastic
+// sources: draws happen in an event body, so the $rdist_normal draw count
+// (and therefore the draw sequence, which is hashed on the per-seed draw
+// index) marches in lockstep across the python and evas-rust engines.
+//
+// Drawing $rdist_normal in the continuous body instead would consume one
+// draw per body evaluation; engines step on slightly different schedules,
+// so such sequences are NOT bit-reproducible across engines (only their
+// statistics are).
 
 module noise_gen (
     input electrical  vin_i,
     output electrical vout_o
 );
 
-    // -------------------------------------------------------
-    // Parameters
-    // -------------------------------------------------------
-    parameter real sigma = 0.01;  // Noise standard deviation (in Volts)
+    parameter real sigma = 0.01;   // Noise std-dev (V)
+    parameter real dt    = 0.5n;   // Sampling interval (s)
 
-    // -------------------------------------------------------
-    // Internal variables
-    // -------------------------------------------------------
-    real vin, noise, vout;
+    real noise, vout;
 
-    // -------------------------------------------------------
-    // Analog behavior
-    // -------------------------------------------------------
     analog begin
-        @(initial_step)
-            $strobe("[noise_gen] INIT | sigma=%.5gV", sigma);
+        @(initial_step) begin
+            noise = 0.0;
+            vout  = 0.0;
+            $strobe("[noise_gen] INIT | sigma=%.5gV dt=%.3gns", sigma, dt*1e9);
+        end
 
-        // Read input voltage
-        vin = V(vin_i);
+        // Resample noise at each periodic timer tick (first fire at dt,
+        // period dt) — vout is piecewise-constant between ticks.
+        @(timer(dt, dt)) begin
+            noise = sigma * $rdist_normal(0, 0, 1);
+            vout  = V(vin_i) + noise;
+        end
 
-        // Generate Gaussian noise (zero-mean, bidirectional)
-        noise = sigma * $rdist_normal(0, 0, 1);
-
-        // Output = Input + Noise
-        vout = vin + noise;
-
-        // Write output voltage
-        V(vout_o) <+ transition(vout);
+        V(vout_o) <+ transition(vout, 0, dt/10, dt/10);
     end
 
 endmodule

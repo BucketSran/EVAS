@@ -1088,7 +1088,16 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     elif errpreset == 'liberal':
         refine_factor = min(refine_factor, 8)
         refine_steps = min(refine_steps, 4)
-    cross_acceptance_slack_factor = 0.25 if errpreset == 'conservative' else 0.0
+    # Spectre-compatible "accepted" cross event timing is an explicit opt-in
+    # experiment (2026-04 closure decision: exact/analytic stays the default
+    # and benchmark flows must not enable tolerance-compatible behavior).
+    # Example: simulatorOptions options evas_cross_acceptance_slack_factor=0.25
+    try:
+        cross_acceptance_slack_factor = max(
+            0.0, float(simopt.get('evas_cross_acceptance_slack_factor', 0.0) or 0.0)
+        )
+    except (TypeError, ValueError):
+        cross_acceptance_slack_factor = 0.0
 
     evas_profile = str(simopt.get('evas_profile', '')).lower()
     refine_factor, refine_steps, reltol, applied_profile = _apply_evas_profile(

@@ -1513,7 +1513,6 @@ pub(crate) fn rust_sim_apply_transitions(
     time: f64,
     default_transition: f64,
     initial_condition_mode: bool,
-    force_immediate_random_target: bool,
 ) -> Result<(), i32> {
     let count = transitions.len();
     if current_values.len() != count
@@ -1589,18 +1588,6 @@ pub(crate) fn rust_sim_apply_transitions(
         }
         if input_falls[idx] <= 0.0 {
             input_falls[idx] = spec_default_transition;
-        }
-        if force_immediate_random_target {
-            current_values[idx] = input_targets[idx];
-            target_values[idx] = input_targets[idx];
-            start_values[idx] = input_targets[idx];
-            start_times[idx] = time;
-            delays[idx] = input_delays[idx];
-            rise_times[idx] = input_rises[idx];
-            fall_times[idx] = input_falls[idx];
-            active_flags[idx] = 0;
-            initialized_flags[idx] = 1;
-            output_values[idx] = input_targets[idx];
         }
     }
 
@@ -1706,13 +1693,7 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
     horizon: f64,
     min_ramp_time: f64,
     default_transition: f64,
-    force_immediate_random_target: bool,
 ) -> Result<usize, i32> {
-    if rust_sim_transition_targets_contain_rdist_normal(transitions, body_expr_ops)?
-        || rust_sim_always_event_body_contains_rdist_normal(events, body_stmt_ops, body_expr_ops)?
-    {
-        return Ok(0);
-    }
     let eps = 1.0e-18;
     let mut added = 0_usize;
     let mut guard = 0_usize;
@@ -1762,7 +1743,6 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
             bp,
             default_transition,
             false,
-            force_immediate_random_target,
         )?;
         if drain_post_cross_events {
             rust_sim_collect_cross_events_into(
@@ -1818,7 +1798,6 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
                     event_time,
                     default_transition,
                     false,
-                    force_immediate_random_target,
                 )?;
                 rust_sim_execute_event_body(
                     &events[candidate.event_idx],
@@ -1857,7 +1836,6 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
                     event_time,
                     default_transition,
                     false,
-                    force_immediate_random_target,
                 )?;
                 rust_sim_record_point_dedup(
                     time_values,
@@ -1898,7 +1876,6 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
                 bp,
                 default_transition,
                 false,
-                force_immediate_random_target,
             )?;
         }
         rust_sim_record_point_dedup(
@@ -1956,7 +1933,6 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
     min_ramp_time: f64,
     default_transition: f64,
     drain_transition_post_cross_events: bool,
-    force_immediate_random_target: bool,
     bound_step_limit: &mut f64,
     side_effect_log: &mut RustSideEffectLog<'_>,
     cross_prev_values: &mut [f64],
@@ -2031,7 +2007,6 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
             event_time,
             min_ramp_time,
             default_transition,
-            force_immediate_random_target,
         )?;
         if *count > 0 {
             let last_recorded_time = time_values[*count - 1];
@@ -2067,7 +2042,6 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
             event_time,
             default_transition,
             false,
-            force_immediate_random_target,
         )?;
         rust_sim_execute_event_body(
             &events[candidate.event_idx],
@@ -2106,7 +2080,6 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
             event_time,
             default_transition,
             false,
-            force_immediate_random_target,
         )?;
         rust_sim_record_point_dedup(
             time_values,
@@ -2164,7 +2137,6 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
         step_end_time,
         min_ramp_time,
         default_transition,
-        force_immediate_random_target,
     )?;
 
     Ok((fired, transition_breakpoints))
@@ -2225,15 +2197,9 @@ pub fn rust_sim_event_transition_record_trace(
         return Err(-986);
     }
 
+    crate::util::reset_rdist_draw_indices();
     let eps = 1.0e-18;
     let use_cross_accepted_event_time = cross_acceptance_slack_factor > 0.0;
-    let force_immediate_random_target =
-        rust_sim_transition_targets_contain_rdist_normal(transitions, body_expr_ops)?
-            || rust_sim_always_event_body_contains_rdist_normal(
-                events,
-                body_stmt_ops,
-                body_expr_ops,
-            )?;
     let event_count = events.len();
     let transition_count = transitions.len();
     let has_pre_cross_events = events
@@ -2270,8 +2236,6 @@ pub fn rust_sim_event_transition_record_trace(
     let has_final_step_events = events
         .iter()
         .any(|event| event.kind == RUST_SIM_EVENT_FINAL_STEP);
-    let transition_targets_contain_rdist =
-        rust_sim_transition_targets_contain_rdist_normal(transitions, body_expr_ops)?;
     let mut source_breakpoints = 0_usize;
     let mut event_fires = 0_usize;
     let mut transition_breakpoints = 0_usize;
@@ -2402,7 +2366,6 @@ pub fn rust_sim_event_transition_record_trace(
         0.0,
         default_transition,
         true,
-        force_immediate_random_target,
     )?;
     if has_post_cross_events {
         rust_sim_collect_cross_events_into(
@@ -2484,7 +2447,6 @@ pub fn rust_sim_event_transition_record_trace(
             0.0,
             default_transition,
             false,
-            force_immediate_random_target,
         )?;
     }
     rust_sim_record_point(
@@ -2523,23 +2485,21 @@ pub fn rust_sim_event_transition_record_trace(
                 source_breakpoints += 1;
             }
         }
-        if !transition_targets_contain_rdist {
-            if let Some(bp) = next_transition_breakpoint_for_arrays(
-                &transition_start_times,
-                &transition_start_values,
-                &transition_target_values,
-                &transition_delays,
-                &transition_rise_times,
-                &transition_fall_times,
-                &transition_active_flags,
-                time,
-                min_ramp_time,
-            )? {
-                if bp > time && bp < time + dt {
-                    dt = bp - time;
-                    force_record = true;
-                    transition_breakpoints += 1;
-                }
+        if let Some(bp) = next_transition_breakpoint_for_arrays(
+            &transition_start_times,
+            &transition_start_values,
+            &transition_target_values,
+            &transition_delays,
+            &transition_rise_times,
+            &transition_fall_times,
+            &transition_active_flags,
+            time,
+            min_ramp_time,
+        )? {
+            if bp > time && bp < time + dt {
+                dt = bp - time;
+                force_record = true;
+                transition_breakpoints += 1;
             }
         }
         if has_pre_timer_events {
@@ -2677,7 +2637,6 @@ pub fn rust_sim_event_transition_record_trace(
                     min_ramp_time,
                     default_transition,
                     false,
-                    force_immediate_random_target,
                     &mut bound_step_limit,
                     &mut side_effect_log,
                     &mut cross_prev_values,
@@ -2750,7 +2709,6 @@ pub fn rust_sim_event_transition_record_trace(
             time,
             default_transition,
             false,
-            force_immediate_random_target,
         )?;
         if has_post_cross_events {
             rust_sim_collect_cross_events_into(
@@ -2806,7 +2764,6 @@ pub fn rust_sim_event_transition_record_trace(
                     min_ramp_time,
                     default_transition,
                     true,
-                    force_immediate_random_target,
                     &mut bound_step_limit,
                     &mut side_effect_log,
                     &mut cross_prev_values,
@@ -2847,7 +2804,6 @@ pub fn rust_sim_event_transition_record_trace(
                     time,
                     default_transition,
                     false,
-                    force_immediate_random_target,
                 )?;
             }
         }
@@ -2912,7 +2868,6 @@ pub fn rust_sim_event_transition_record_trace(
                 time,
                 default_transition,
                 false,
-                force_immediate_random_target,
             )?;
         }
 
