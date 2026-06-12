@@ -1909,3 +1909,73 @@ class TestStochasticTransitionRampConformance:
             f"{abs(t_cross - ideal) * 1e12:.1f} ps — stochastic transition"
             " bypass regression?"
         )
+
+
+class TestCrossAcceptanceLawMode:
+    """Opt-in Spectre-compatible cross event lateness (measured law).
+
+    DOE 2026-06-12 (testspace/cross-lateness-doe-20260612): strict Spectre
+    accepts a cross event late by Delta = 0.5 * reltol * |V_cross| / |slope|,
+    independent of maxstep, errpreset and explicit time_tol. With
+    evas_cross_acceptance_slack_factor=1.0 EVAS reproduces that law on
+    pre-phase (source-driven, ground-referenced) crossings; validated against
+    measured Spectre deltas to sub-fs. Default (factor unset) stays exact.
+    """
+
+    VA_SRC = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module law_probe(in_a, in_b, code_a, code_b);
+        input in_a, in_b;
+        output code_a, code_b;
+        electrical in_a, in_b, code_a, code_b;
+        parameter real vth_a = 3.141592653e-02;
+        parameter real vth_b = 1.505535214250;
+        real seen_a, seen_b;
+        analog begin
+            @(initial_step) begin
+                seen_a = -1.0;
+                seen_b = -1.0;
+            end
+            @(cross(V(in_a) - vth_a, +1)) seen_a = $abstime;
+            @(cross(V(in_b) - vth_b, +1)) seen_b = $abstime;
+            V(code_a) <+ (seen_a >= 0.0) ? (seen_a - 3.141592653e-9) / 1p : -1.0;
+            V(code_b) <+ (seen_b >= 0.0) ? (seen_b - 6.022140857e-9) / 1p : -1.0;
+        end
+        endmodule
+    """)
+
+    SCS_TEMPLATE = textwrap.dedent("""\
+        simulator lang=spectre
+        global 0
+        Va (in_a 0) vsource type=pwl wave=[0 0 10n 0.1]
+        Vb (in_b 0) vsource type=pwl wave=[0 0 10n 2.5]
+        I0 (in_a in_b code_a code_b) law_probe
+        simulatorOptions options reltol=1e-4 vabstol=1e-6{slack}
+        tran tran stop=10n maxstep=20p errpreset=conservative
+        save code_a code_b
+        ahdl_include "law_probe.va"
+    """)
+
+    def _run(self, tmp_path, slack_opt, out_name):
+        va_file = tmp_path / "law_probe.va"
+        va_file.write_text(self.VA_SRC)
+        scs_file = tmp_path / f"tb_{out_name}.scs"
+        scs_file.write_text(self.SCS_TEMPLATE.format(slack=slack_opt))
+        from evas.netlist.runner import evas_simulate
+        ok = evas_simulate(str(scs_file), output_dir=str(tmp_path / out_name))
+        assert ok
+        rows = list(csv.DictReader((tmp_path / out_name / "tran.csv").open()))
+        last = rows[-1]
+        return float(last["code_a"]), float(last["code_b"])
+
+    def test_law_mode_reproduces_spectre_lateness(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("EVAS_ENGINE", "evas-rust")
+        # Default: exact analytic event times.
+        code_a, code_b = self._run(tmp_path, "", "out_default")
+        assert abs(code_a) < 1e-3, f"default not exact: {code_a} ps"
+        assert abs(code_b) < 1e-3, f"default not exact: {code_b} ps"
+        # Law mode: Delta = 0.5 * reltol * t_root for a from-origin ramp.
+        code_a, code_b = self._run(
+            tmp_path, " evas_cross_acceptance_slack_factor=1.0", "out_law")
+        assert code_a == pytest.approx(0.5 * 1e-4 * 3.141592653e-9 * 1e12, rel=0.02), code_a
+        assert code_b == pytest.approx(0.5 * 1e-4 * 6.022140857e-9 * 1e12, rel=0.02), code_b

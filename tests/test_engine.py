@@ -1906,13 +1906,25 @@ endmodule
             return result, observer
 
         default_result, default_observer = run_with_factor(0.0)
-        accepted_result, accepted_observer = run_with_factor(0.25)
+        # Engine-level coefficient kappa: slack = kappa * |V_cross| / |slope|
+        # (the netlist runner folds 0.5 * reltol * user_factor into kappa).
+        # Driver crossing: clk ramps 0->1 V over 1 ns, vth 0.5 V -> root at
+        # 500 ps, node magnitude 0.5 V, slope 1e9 V/s, so kappa = 5e-4 gives
+        # slack = 5e-4 * 0.5 / 1e9 = 250 fs. The observer's own crossing on
+        # the 10 ps edge adds only kappa * 0.5 / 1e11 = 2.5 fs, hence the
+        # slightly loosened tolerance.
+        accepted_result, accepted_observer = run_with_factor(5e-4)
 
         assert default_observer.state["seen_t"] == pytest.approx(510e-12, abs=1e-15)
         assert default_result.signals["SEEN_T"][2] == pytest.approx(510e-12, abs=1e-15)
-        assert accepted_observer.state["seen_t"] == pytest.approx(512.5e-12, abs=1e-15)
-        assert accepted_result.signals["SEEN_T"][2] == pytest.approx(512.5e-12, abs=1e-15)
-        assert accepted_result.time[1] == pytest.approx(502.5e-12, abs=1e-15)
+        # Accepted-event-time is PRE-phase-only: the driver crossing (input
+        # net, pre phase) fires late by the modeled slack (500 ps + 250 fs)
+        # and its transition ramp shifts with it; the observer crossing is on
+        # a contributed net (post phase) and keeps exact interpolated timing,
+        # reading the shifted ramp midpoint at 500.25 ps + 5 ps = 505.25 ps.
+        assert accepted_observer.state["seen_t"] == pytest.approx(505.25e-12, abs=5e-15)
+        assert accepted_result.signals["SEEN_T"][2] == pytest.approx(505.25e-12, abs=5e-15)
+        assert accepted_result.time[1] == pytest.approx(500.25e-12, abs=5e-15)
 
     def test_rust_sim_program_rdist_event_body_preserves_transition_ramp(self):
         _build_rust_core_or_skip()
