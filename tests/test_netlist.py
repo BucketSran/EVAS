@@ -1979,3 +1979,42 @@ class TestCrossAcceptanceLawMode:
             tmp_path, " evas_cross_acceptance_slack_factor=1.0", "out_law")
         assert code_a == pytest.approx(0.5 * 1e-4 * 3.141592653e-9 * 1e12, rel=0.02), code_a
         assert code_b == pytest.approx(0.5 * 1e-4 * 6.022140857e-9 * 1e12, rel=0.02), code_b
+
+
+class TestCrossPhaseClassification:
+    """V(n1, n2) <+ x drives n1 only; n2 is the reference. A cross expression
+    that references a rail used solely as a contribution node2 (the common
+    V(in, VSS) benchmark style) must stay pre-phase, or pre-phase-only
+    features (cross-acceptance law mode) silently never apply."""
+
+    def test_contribution_node2_is_not_contributed(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.rust_program import (
+            _collect_contributed_nodes,
+            lower_stmt,
+        )
+
+        src = textwrap.dedent("""\
+            `include "disciplines.vams"
+            module phase_probe(inp, VSS, outp);
+            input inp;
+            inout VSS;
+            output outp;
+            electrical inp, VSS, outp;
+            real q;
+            analog begin
+                @(initial_step) q = 0.0;
+                @(cross(V(inp, VSS) - 0.5, +1)) q = 1.0;
+                V(outp, VSS) <+ q;
+            end
+            endmodule
+        """)
+        module = parse(src)
+        body_ir = lower_stmt(module.analog_block.body)
+        contributed = _collect_contributed_nodes(body_ir)
+        assert "outp" in contributed
+        assert "VSS" not in contributed, (
+            "contribution node2 wrongly counted as contributed: "
+            f"{sorted(contributed)}"
+        )
+        assert "inp" not in contributed

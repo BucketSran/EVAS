@@ -982,19 +982,19 @@ def _collect_contributed_nodes(stmt_ir: object) -> frozenset[str]:
 
     if isinstance(stmt_ir, ContributionIR):
         if stmt_ir.branch.access_type == "V":
+            # Only node1 is DRIVEN by a voltage contribution; node2 is the
+            # reference (V(n1, n2) <+ x sets n1 = n2 + x). Counting node2 as
+            # contributed wrongly classified every cross expression that
+            # references a rail (e.g. V(in, VSS) with VSS used as the node2 of
+            # output contributions) as post-phase, blocking pre-phase-only
+            # features such as the cross-acceptance law mode for the common
+            # ground-referenced benchmark style.
             node1_name = static_node_ref_name(
                 stmt_ir.branch.node1,
                 stmt_ir.branch.node1_index,
                 stmt_ir.branch.node1_index2,
             )
             nodes.add(str(node1_name or stmt_ir.branch.node1))
-            if stmt_ir.branch.node2 is not None:
-                node2_name = static_node_ref_name(
-                    stmt_ir.branch.node2,
-                    stmt_ir.branch.node2_index,
-                    stmt_ir.branch.node2_index2,
-                )
-                nodes.add(str(node2_name or stmt_ir.branch.node2))
         return frozenset(nodes)
 
     if isinstance(stmt_ir, EventStatementIR):
