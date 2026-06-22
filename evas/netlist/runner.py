@@ -1088,7 +1088,19 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     elif errpreset == 'liberal':
         refine_factor = min(refine_factor, 8)
         refine_steps = min(refine_steps, 4)
-    cross_acceptance_slack_factor = 0.25 if errpreset == 'conservative' else 0.0
+    # Spectre-compatible "accepted" cross event timing is an explicit opt-in
+    # experiment (2026-04 closure decision: exact/analytic stays the default
+    # and benchmark flows must not enable tolerance-compatible behavior).
+    # The lateness model is the measured Spectre law (cross-lateness DOE,
+    # 2026-06-12):  delta = factor * 0.5 * reltol * |V_cross| / |slope|,
+    # with factor=1.0 reproducing Spectre's observed behavior.
+    # Example: simulatorOptions options evas_cross_acceptance_slack_factor=1.0
+    try:
+        cross_acceptance_user_factor = max(
+            0.0, float(simopt.get('evas_cross_acceptance_slack_factor', 0.0) or 0.0)
+        )
+    except (TypeError, ValueError):
+        cross_acceptance_user_factor = 0.0
 
     evas_profile = str(simopt.get('evas_profile', '')).lower()
     refine_factor, refine_steps, reltol, applied_profile = _apply_evas_profile(
@@ -1331,8 +1343,15 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
         log.write("    evas_event_trace_audit = true")
     if rust_required:
         log.write("    evas_rust_required = true")
-    if cross_acceptance_slack_factor:
-        log.write(f"    evas_cross_acceptance_slack_factor = {cross_acceptance_slack_factor:g}")
+    # Engine-level coefficient kappa: slack = kappa * |V_cross| / |slope|.
+    # Folding 0.5 * reltol here keeps the FFI channel a single scalar while
+    # the user-facing factor stays a multiple of the measured Spectre law.
+    cross_acceptance_slack_factor = cross_acceptance_user_factor * 0.5 * reltol
+    if cross_acceptance_user_factor:
+        log.write(
+            f"    evas_cross_acceptance_slack_factor = {cross_acceptance_user_factor:g}"
+            f" (kappa = {cross_acceptance_slack_factor:g})"
+        )
     log.write("")
 
     t_sim_start = time.time()

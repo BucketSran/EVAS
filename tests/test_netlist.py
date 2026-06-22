@@ -1830,3 +1830,191 @@ class TestSpectreCompatibilityPreflight:
         assert ok is False
         log_text = log_path.read_text()
         assert "terminal count mismatch" in log_text
+
+
+class TestStochasticTransitionRampConformance:
+    """Regression guard for the 06526fa stochastic-transition bypass.
+
+    transition() targets derived from $rdist_normal must still produce a real
+    ramp: the recorded row at the event timestamp keeps the pre-event value and
+    the output midpoint lands ~tedge/2 after the tick (Spectre convention).
+    The 06526fa bypass snapped the output instantaneously at the event row,
+    which moved digital edges by ~half a record interval and broke certified
+    EVAS/Spectre parity on the vaBench dither case (252 ps vs 1.19 ps).
+    """
+
+    VA_SRC = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module stochastic_transition_probe(out);
+        output out;
+        electrical out;
+        parameter real sigma = 0.01;
+        parameter real tedge = 200p;
+        real level;
+
+        analog begin
+            @(initial_step) level = 0.0;
+            @(timer(1n)) level = 1.0 + sigma * $rdist_normal(0, 0, 1);
+            V(out) <+ transition(level, 0, tedge, tedge);
+        end
+        endmodule
+    """)
+
+    SCS_SRC = textwrap.dedent("""\
+        simulator lang=spectre
+        global 0
+        I0 (out) stochastic_transition_probe
+        tran tran stop=3n maxstep=50p
+        save out
+        ahdl_include "stochastic_transition_probe.va"
+    """)
+
+    def test_rdist_transition_keeps_ramp_semantics(self, tmp_path):
+        va_file = tmp_path / "stochastic_transition_probe.va"
+        va_file.write_text(self.VA_SRC)
+        scs_file = tmp_path / "tb_stochastic_transition_probe.scs"
+        scs_file.write_text(self.SCS_SRC)
+
+        from evas.netlist.runner import evas_simulate
+        ok = evas_simulate(str(scs_file), output_dir=str(tmp_path / "out"))
+        assert ok
+
+        csv_file = tmp_path / "out" / "tran.csv"
+        rows = [
+            (float(r["time"]), float(r["out"]))
+            for r in csv.DictReader(csv_file.open())
+        ]
+        level = max(v for _, v in rows)
+        assert level > 0.9
+
+        # Pre-event sample preserved: the last row at t <= 1n is still low.
+        at_tick = [v for t, v in rows if t <= 1.0e-9 + 1.0e-15]
+        assert at_tick, "no rows at or before the timer tick"
+        assert at_tick[-1] < 0.1 * level, (
+            f"pre-event sample lost at the tick row: {at_tick[-1]!r}"
+        )
+
+        # Ramp midpoint lands ~tedge/2 after the tick (linear interpolation).
+        vth = 0.5 * level
+        t_cross = None
+        for (t0, v0), (t1, v1) in zip(rows, rows[1:]):
+            if (v0 - vth) <= 0.0 < (v1 - vth):
+                frac = (vth - v0) / (v1 - v0)
+                t_cross = t0 + frac * (t1 - t0)
+                break
+        assert t_cross is not None, "no rising edge found"
+        ideal = 1.0e-9 + 100.0e-12
+        assert abs(t_cross - ideal) < 30.0e-12, (
+            f"transition midpoint {t_cross} deviates from {ideal} by "
+            f"{abs(t_cross - ideal) * 1e12:.1f} ps — stochastic transition"
+            " bypass regression?"
+        )
+
+
+class TestCrossAcceptanceLawMode:
+    """Opt-in Spectre-compatible cross event lateness (measured law).
+
+    DOE 2026-06-12 (testspace/cross-lateness-doe-20260612): strict Spectre
+    accepts a cross event late by Delta = 0.5 * reltol * |V_cross| / |slope|,
+    independent of maxstep, errpreset and explicit time_tol. With
+    evas_cross_acceptance_slack_factor=1.0 EVAS reproduces that law on
+    pre-phase (source-driven, ground-referenced) crossings; validated against
+    measured Spectre deltas to sub-fs. Default (factor unset) stays exact.
+    """
+
+    VA_SRC = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module law_probe(in_a, in_b, code_a, code_b);
+        input in_a, in_b;
+        output code_a, code_b;
+        electrical in_a, in_b, code_a, code_b;
+        parameter real vth_a = 3.141592653e-02;
+        parameter real vth_b = 1.505535214250;
+        real seen_a, seen_b;
+        analog begin
+            @(initial_step) begin
+                seen_a = -1.0;
+                seen_b = -1.0;
+            end
+            @(cross(V(in_a) - vth_a, +1)) seen_a = $abstime;
+            @(cross(V(in_b) - vth_b, +1)) seen_b = $abstime;
+            V(code_a) <+ (seen_a >= 0.0) ? (seen_a - 3.141592653e-9) / 1p : -1.0;
+            V(code_b) <+ (seen_b >= 0.0) ? (seen_b - 6.022140857e-9) / 1p : -1.0;
+        end
+        endmodule
+    """)
+
+    SCS_TEMPLATE = textwrap.dedent("""\
+        simulator lang=spectre
+        global 0
+        Va (in_a 0) vsource type=pwl wave=[0 0 10n 0.1]
+        Vb (in_b 0) vsource type=pwl wave=[0 0 10n 2.5]
+        I0 (in_a in_b code_a code_b) law_probe
+        simulatorOptions options reltol=1e-4 vabstol=1e-6{slack}
+        tran tran stop=10n maxstep=20p errpreset=conservative
+        save code_a code_b
+        ahdl_include "law_probe.va"
+    """)
+
+    def _run(self, tmp_path, slack_opt, out_name):
+        va_file = tmp_path / "law_probe.va"
+        va_file.write_text(self.VA_SRC)
+        scs_file = tmp_path / f"tb_{out_name}.scs"
+        scs_file.write_text(self.SCS_TEMPLATE.format(slack=slack_opt))
+        from evas.netlist.runner import evas_simulate
+        ok = evas_simulate(str(scs_file), output_dir=str(tmp_path / out_name))
+        assert ok
+        rows = list(csv.DictReader((tmp_path / out_name / "tran.csv").open()))
+        last = rows[-1]
+        return float(last["code_a"]), float(last["code_b"])
+
+    def test_law_mode_reproduces_spectre_lateness(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("EVAS_ENGINE", "evas-rust")
+        # Default: exact analytic event times.
+        code_a, code_b = self._run(tmp_path, "", "out_default")
+        assert abs(code_a) < 1e-3, f"default not exact: {code_a} ps"
+        assert abs(code_b) < 1e-3, f"default not exact: {code_b} ps"
+        # Law mode: Delta = 0.5 * reltol * t_root for a from-origin ramp.
+        code_a, code_b = self._run(
+            tmp_path, " evas_cross_acceptance_slack_factor=1.0", "out_law")
+        assert code_a == pytest.approx(0.5 * 1e-4 * 3.141592653e-9 * 1e12, rel=0.02), code_a
+        assert code_b == pytest.approx(0.5 * 1e-4 * 6.022140857e-9 * 1e12, rel=0.02), code_b
+
+
+class TestCrossPhaseClassification:
+    """V(n1, n2) <+ x drives n1 only; n2 is the reference. A cross expression
+    that references a rail used solely as a contribution node2 (the common
+    V(in, VSS) benchmark style) must stay pre-phase, or pre-phase-only
+    features (cross-acceptance law mode) silently never apply."""
+
+    def test_contribution_node2_is_not_contributed(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.rust_program import (
+            _collect_contributed_nodes,
+            lower_stmt,
+        )
+
+        src = textwrap.dedent("""\
+            `include "disciplines.vams"
+            module phase_probe(inp, VSS, outp);
+            input inp;
+            inout VSS;
+            output outp;
+            electrical inp, VSS, outp;
+            real q;
+            analog begin
+                @(initial_step) q = 0.0;
+                @(cross(V(inp, VSS) - 0.5, +1)) q = 1.0;
+                V(outp, VSS) <+ q;
+            end
+            endmodule
+        """)
+        module = parse(src)
+        body_ir = lower_stmt(module.analog_block.body)
+        contributed = _collect_contributed_nodes(body_ir)
+        assert "outp" in contributed
+        assert "VSS" not in contributed, (
+            "contribution node2 wrongly counted as contributed: "
+            f"{sorted(contributed)}"
+        )
+        assert "inp" not in contributed
