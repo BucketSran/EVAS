@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.4.5] — 2026-06-25
+
+### Fixed — Spectre Compatibility
+- Reject Verilog-A identifiers that reuse Spectre-reserved built-in, simulator
+  library, operator, and event function names while keeping legal function-call
+  usage intact.
+- Emit Spectre-style `VACOMP-2174` diagnostics for reserved identifiers,
+  including the marked source line and matching reserved-name guidance.
+- Suppress the incorrect `ahdl_include` fallback warning for normal bare
+  includes resolved relative to the `.scs` file directory.
+
+### Fixed — Transition Timing
+- Folded in transition and cross-acceptance fixes that align stochastic and
+  event-driven transition scheduling with the measured Spectre behavior.
+
 ## [0.4.4] — 2026-06-08
 
 ### Fixed — Engine Selection

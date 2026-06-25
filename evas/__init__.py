@@ -6,4 +6,4 @@ except ImportError:  # pragma: no cover - Python < 3.8 compatibility fallback
 try:
     __version__ = _package_version("evas-sim")
 except Exception:
-    __version__ = "0.4.4"
+    __version__ = "0.4.5"
