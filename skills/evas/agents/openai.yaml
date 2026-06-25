@@ -1,0 +1,7 @@
+interface:
+  display_name: "EVAS"
+  short_description: "Run and debug EVAS Verilog-A simulations"
+  default_prompt: "Use $evas to check and run this Verilog-A testbench with the appropriate EVAS engine."
+
+policy:
+  allow_implicit_invocation: true
