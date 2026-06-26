@@ -852,6 +852,50 @@ endmodule
         assert rust_sim._perf_stats["rust_sim_program_enabled"] == 1
         assert rust_sim._perf_stats["rust_sim_program_event_transition_enabled"] == 1
 
+    def test_rust_sim_program_event_body_parameter_for_loop_runs_without_fallback(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rustsim_parameter_for_body(out);
+    output voltage out;
+    parameter integer levels = 4;
+    real code = 0.0;
+    integer i = 0;
+    analog begin
+        @(initial_step) begin
+            code = 0;
+            for (i = 0; i <= levels - 2; i = i + 1) begin
+                code = code + 1;
+            end
+        end
+        V(out) <+ code;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        rust_model = ModelCls()
+        rust_sim = Simulator()
+        rust_sim.add_model(rust_model)
+        rust_sim.record("out")
+        rust_result = rust_sim.run(
+            tstop=2e-9,
+            tstep=1e-9,
+            rust_full_model_fastpath=True,
+            rust_full_model_required=True,
+            rust_required=True,
+            skip_source_error_control=True,
+        )
+
+        assert rust_result.time.tolist() == pytest.approx([0.0, 1e-9, 2e-9])
+        assert rust_result.signals["out"].tolist() == pytest.approx([3.0, 3.0, 3.0])
+        assert rust_result.signals["out"][-1] == pytest.approx(3.0)
+        assert rust_model.state["code"] == pytest.approx(3.0)
+        assert rust_model.state["i"] == pytest.approx(3.0)
+        assert rust_sim._perf_stats["rust_sim_program_enabled"] == 1
+        assert rust_sim._perf_stats["rust_sim_program_event_transition_enabled"] == 1
+        assert rust_sim._perf_stats["rust_full_model_required_failures"] == 0
+
     def test_rust_sim_program_final_step_updates_state_after_trace(self):
         _build_rust_core_or_skip()
         src = """\

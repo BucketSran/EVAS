@@ -402,12 +402,8 @@ def _iter_body_rejection_tags(
         if unrolled is not None:
             yield from _iter_body_rejection_tags(unrolled, bindings, node_slots)
             return
-        yield "for_loop"
-        yield from _iter_body_rejection_tags(stmt_ir.init, bindings, node_slots)
-        if encode_body_expr_ops(stmt_ir.cond, bindings, node_slots) is None:
-            yield from _iter_expr_rejection_tags(stmt_ir.cond, bindings, node_slots)
-        yield from _iter_body_rejection_tags(stmt_ir.update, bindings, node_slots)
-        yield from _iter_body_rejection_tags(stmt_ir.body, bindings, node_slots)
+        guarded_while = _for_statement_to_guarded_while(stmt_ir)
+        yield from _iter_body_rejection_tags(guarded_while, bindings, node_slots)
         return
 
     if isinstance(stmt_ir, WhileStatementIR):
@@ -793,7 +789,7 @@ def _append_body_stmt_ops(
     if isinstance(stmt_ir, ForStatementIR):
         unrolled = _unroll_static_for_statement(stmt_ir)
         if unrolled is None:
-            return False
+            unrolled = _for_statement_to_guarded_while(stmt_ir)
         return _append_body_stmt_ops(
             unrolled,
             bindings,
@@ -1361,6 +1357,20 @@ def _unroll_static_for_statement(stmt_ir: ForStatementIR) -> Optional[BlockIR]:
             statements.append(body)
         statements.append(update)
     return BlockIR(tuple(statements))
+
+
+def _for_statement_to_guarded_while(stmt_ir: ForStatementIR) -> BlockIR:
+    """Represent a dynamic ``for`` loop with the existing guarded while opcode."""
+
+    return BlockIR(
+        (
+            stmt_ir.init,
+            WhileStatementIR(
+                cond=stmt_ir.cond,
+                body=BlockIR((stmt_ir.body, stmt_ir.update)),
+            ),
+        )
+    )
 
 
 def _static_for_loop_values(stmt_ir: ForStatementIR) -> Optional[tuple[str, tuple[int, ...]]]:
