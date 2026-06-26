@@ -3667,6 +3667,12 @@ class Simulator:
             max_step = tstep
         if min_step is None:
             min_step = tstep / 4096.0
+        # Cap min_step to prevent pathologically small steps from causing
+        # excessive iteration counts. For typical analog simulations,
+        # tstep/64 provides adequate resolution while preventing infinite loops.
+        _min_step_floor = tstep / 64.0
+        if min_step < _min_step_floor:
+            min_step = _min_step_floor
         indexed_arrays_requested = bool(indexed_arrays)
         indexed_state_storage_requested = bool(indexed_state_storage)
         if not rust_static_eval:
@@ -6496,7 +6502,17 @@ class Simulator:
         self._step_sizes.append(0.0)
 
         # Main simulation loop
+        _max_steps = int(max(2e6, tstop / max(min_step, 1e-18) * 2))
+        _step_count = 0
         while time < tstop:
+            _step_count += 1
+            if _step_count > _max_steps:
+                import warnings
+                warnings.warn(
+                    f"Simulation exceeded {_max_steps} steps (time={time}, "
+                    f"tstop={tstop}); aborting to prevent infinite loop."
+                )
+                break
             force_record_point = False
             if refine_steps_left > 0:
                 dt = min(refine_dt, dynamic_step, max_step, tstop - time)
