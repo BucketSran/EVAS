@@ -1264,8 +1264,10 @@ def evas_simulate(scs_file: str, log_path: Optional[str] = None,
     }
     if evas_rust_engine:
         rust_full_model_fastpath = True
-        rust_full_model_required = True
         rust_required = True
+        # Allow Python fallback when Rust engine cannot fully model the design
+        # (evas_rust_full_model_required was previously forced True here,
+        #  which caused RuntimeError for designs with unsupported constructs)
     indexed_arrays_effective = (
         indexed_arrays
         or rust_static_eval
