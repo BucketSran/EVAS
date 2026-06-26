@@ -13283,6 +13283,18 @@ class _ModuleCompiler:
                 return lv / rv if rv != 0 else 0
             if expr.op == '%':
                 return lv % rv if rv != 0 else 0
+            if expr.op == '<<':
+                return int(lv) << int(rv)
+            if expr.op == '>>':
+                return int(lv) >> int(rv)
+            if expr.op == '&':
+                return int(lv) & int(rv)
+            if expr.op == '|':
+                return int(lv) | int(rv)
+            if expr.op == '^':
+                return int(lv) ^ int(rv)
+            if expr.op == '**':
+                return lv ** rv
         if isinstance(expr, FunctionCall):
             args = [self._eval_expr_static(arg, env) for arg in expr.args]
             name = expr.name[1:] if expr.name.startswith('$') else expr.name
