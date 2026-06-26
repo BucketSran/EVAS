@@ -238,6 +238,7 @@ class TestLexerOperators:
     def test_two_char_operators(self):
         mapping = {
             "<+": TokenType.CONTRIB,
+            "**": TokenType.POWER,
             "<<": TokenType.LSHIFT,
             ">>": TokenType.RSHIFT,
             ">=": TokenType.GE,
@@ -996,6 +997,14 @@ class TestParserExpressions:
         assert expr.op == "+"
         assert isinstance(expr.right, BinaryExpr)
         assert expr.right.op == "*"
+
+    def test_power_operator_is_right_associative(self):
+        stmts = _stmts("x = 2 ** 3 ** 2;")
+        expr = stmts[0].value
+        assert isinstance(expr, BinaryExpr)
+        assert expr.op == "**"
+        assert isinstance(expr.right, BinaryExpr)
+        assert expr.right.op == "**"
 
     def test_unary_minus_ident(self):
         stmts = _stmts("x = -y;")

@@ -41,9 +41,10 @@ class TokenType(Enum):
     PLUS = auto()        # +
     MINUS = auto()       # -
     STAR = auto()        # *
+    POWER = auto()       # **
     SLASH = auto()       # /
     PERCENT = auto()     # %
-    CARET = auto()       # ^  (xor in context, or pow)
+    CARET = auto()       # ^
     AMP = auto()         # &
     PIPE = auto()        # |
     TILDE = auto()       # ~
@@ -278,6 +279,8 @@ def tokenize(source: str) -> List[Token]:
             tt = None
             if two == '<+':
                 tt = TokenType.CONTRIB
+            elif two == '**':
+                tt = TokenType.POWER
             elif two == '<<':
                 tt = TokenType.LSHIFT
             elif two == '>>':

@@ -568,6 +568,123 @@ endmodule
         assert low_times
         assert min(low_times) < 1.7e-9
 
+    def test_static_bitwise_parameter_defaults_feed_initial_step(self):
+        src = """\
+`include "disciplines.vams"
+module static_bitwise_params(out);
+    output voltage out;
+    parameter integer bits = 4;
+    parameter integer levels = 1 << bits;
+    parameter integer mask = (levels - 1) & 7;
+    parameter integer inverted = ~0 & mask;
+    parameter integer mixed = (mask ^ 3) | 8;
+    parameter integer shifted = mixed >> 1;
+    real step = 0.0;
+    analog begin
+        @(initial_step) begin
+            step = 2.0 / levels + shifted;
+        end
+        V(out) <+ step;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        assert model.params["levels"] == 16
+        assert model.params["mask"] == 7
+        assert model.params["inverted"] == 7
+        assert model.params["mixed"] == 12
+        assert model.params["shifted"] == 6
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert model.state["step"] == pytest.approx(6.125)
+        assert result.signals["out"].tolist() == pytest.approx([6.125, 6.125])
+
+    def test_static_bitwise_variable_initializers_use_parameter_env(self):
+        src = """\
+`include "disciplines.vams"
+module static_bitwise_state(out);
+    output voltage out;
+    parameter integer bits = 3;
+    integer levels = 1 << bits;
+    integer mask = levels - 1;
+    real step = 1.0 / levels;
+    analog begin
+        V(out) <+ step + mask;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        assert model.state["levels"] == 8
+        assert model.state["mask"] == 7
+        assert model.state["step"] == pytest.approx(0.125)
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"].tolist() == pytest.approx([7.125, 7.125])
+
+    def test_static_bitwise_invalid_shift_is_nonfatal(self):
+        src = """\
+`include "disciplines.vams"
+module static_bad_shift(out);
+    output voltage out;
+    parameter integer bad_left = 1 << -1;
+    parameter integer bad_right = 8 >> -2;
+    parameter integer ok = 2;
+    analog begin
+        V(out) <+ bad_left + bad_right + ok;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        assert model.params["bad_left"] == 0
+        assert model.params["bad_right"] == 0
+        assert model.params["ok"] == 2
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"].tolist() == pytest.approx([2.0, 2.0])
+
+    def test_static_power_parameter_default_is_source_level(self):
+        src = """\
+`include "disciplines.vams"
+module static_power_probe(out);
+    output voltage out;
+    parameter real gain = 2 ** 3;
+    parameter real guarded = 0.0 ** -1.0;
+    analog begin
+        V(out) <+ gain + guarded;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        assert model.params["gain"] == pytest.approx(8.0)
+        assert model.params["guarded"] == 0
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"].tolist() == pytest.approx([8.0, 8.0])
+
     def test_rust_sim_program_dc_source_record_matches_default(self):
         _build_rust_core_or_skip()
 

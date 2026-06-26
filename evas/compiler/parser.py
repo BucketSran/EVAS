@@ -1046,19 +1046,26 @@ class Parser:
         return left
 
     def _parse_multiplicative(self) -> Expr:
-        left = self._parse_unary()
+        left = self._parse_power()
         while True:
             if self.match(TokenType.STAR):
-                right = self._parse_unary()
+                right = self._parse_power()
                 left = BinaryExpr('*', left, right)
             elif self.match(TokenType.SLASH):
-                right = self._parse_unary()
+                right = self._parse_power()
                 left = BinaryExpr('/', left, right)
             elif self.match(TokenType.PERCENT):
-                right = self._parse_unary()
+                right = self._parse_power()
                 left = BinaryExpr('%', left, right)
             else:
                 break
+        return left
+
+    def _parse_power(self) -> Expr:
+        left = self._parse_unary()
+        if self.match(TokenType.POWER):
+            right = self._parse_power()
+            return BinaryExpr('**', left, right)
         return left
 
     def _parse_unary(self) -> Expr:

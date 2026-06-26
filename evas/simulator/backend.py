@@ -13270,6 +13270,11 @@ class _ModuleCompiler:
             return -self._eval_expr_static(expr.operand, env)
         if isinstance(expr, UnaryExpr) and expr.op == '+':
             return self._eval_expr_static(expr.operand, env)
+        if isinstance(expr, UnaryExpr) and expr.op == '~':
+            try:
+                return ~int(self._eval_expr_static(expr.operand, env))
+            except Exception:
+                return 0
         if isinstance(expr, Identifier):
             if expr.name == 'inf':
                 return float('inf')
@@ -13279,16 +13284,7 @@ class _ModuleCompiler:
         if isinstance(expr, BinaryExpr):
             lv = self._eval_expr_static(expr.left, env)
             rv = self._eval_expr_static(expr.right, env)
-            if expr.op == '+':
-                return lv + rv
-            if expr.op == '-':
-                return lv - rv
-            if expr.op == '*':
-                return lv * rv
-            if expr.op == '/':
-                return lv / rv if rv != 0 else 0
-            if expr.op == '%':
-                return lv % rv if rv != 0 else 0
+            return self._eval_static_binary_expr(expr.op, lv, rv)
         if isinstance(expr, FunctionCall):
             args = [self._eval_expr_static(arg, env) for arg in expr.args]
             name = expr.name[1:] if expr.name.startswith('$') else expr.name
@@ -13314,6 +13310,40 @@ class _ModuleCompiler:
                     return fn(*args)
                 except Exception:
                     return 0
+        return 0
+
+    def _eval_static_binary_expr(self, op: str, lv: Any, rv: Any) -> Any:
+        try:
+            if op == '+':
+                return lv + rv
+            if op == '-':
+                return lv - rv
+            if op == '*':
+                return lv * rv
+            if op == '/':
+                return lv / rv if rv != 0 else 0
+            if op == '%':
+                return lv % rv if rv != 0 else 0
+            if op == '**':
+                value = lv ** rv
+                return 0 if isinstance(value, complex) else value
+            if op in {'<<', '>>', '&', '|', '^'}:
+                left = int(lv)
+                right = int(rv)
+                if op in {'<<', '>>'} and right < 0:
+                    return 0
+                if op == '<<':
+                    return left << right
+                if op == '>>':
+                    return left >> right
+                if op == '&':
+                    return left & right
+                if op == '|':
+                    return left | right
+                if op == '^':
+                    return left ^ right
+        except Exception:
+            return 0
         return 0
 
 
