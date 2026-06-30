@@ -18,6 +18,7 @@ from evas.simulator.rust_backend import (
     BODY_EXPR_ADD,
     BODY_EXPR_CONST,
     BODY_EXPR_MUL,
+    BODY_EXPR_POW,
     BODY_EXPR_READ_NODE,
     BODY_EXPR_READ_PARAM,
     BODY_EXPR_READ_STATE,
@@ -1287,6 +1288,20 @@ def test_rust_backend_evaluates_body_expr_without_writes():
     assert value == pytest.approx(2.75)
     assert node_values.tolist() == pytest.approx([0.25])
     assert state_values.tolist() == pytest.approx([2.0])
+
+
+def test_rust_backend_evaluates_body_expr_pow_function():
+    _build_rust_core()
+    backend = load_rust_backend(default_rust_core_library_path())
+    expr_ops = [
+        BodyExprOp(BODY_EXPR_CONST, value=1.8),
+        BodyExprOp(BODY_EXPR_CONST, value=9.0),
+        BodyExprOp(BODY_EXPR_POW),
+    ]
+
+    value = backend.evaluate_body_expr(expr_ops, array("d"), array("d"), array("d"))
+
+    assert value == pytest.approx(1.8**9)
 
 
 def test_rust_backend_evaluates_body_expr_batch_segments():
