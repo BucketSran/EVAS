@@ -237,11 +237,18 @@ class InstanceConnection:
     expr: Expr                        # usually Identifier/ArrayAccess
 
 @dataclass
+class InstanceParameterOverride:
+    """Module instance parameter override."""
+    param_name: str
+    expr: Expr
+
+@dataclass
 class ModuleInstance:
     """Hierarchical module instance (inside another module)."""
     module_name: str
     instance_name: str
     connections: List[InstanceConnection] = field(default_factory=list)
+    parameter_overrides: List[InstanceParameterOverride] = field(default_factory=list)
 
 @dataclass
 class Module:

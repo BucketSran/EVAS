@@ -63,6 +63,7 @@ class TokenType(Enum):
     QUESTION = auto()    # ?
     COLON = auto()       # :
     DOT = auto()         # .
+    HASH = auto()        # #
 
     # Delimiters
     LPAREN = auto()      # (
@@ -313,6 +314,7 @@ def tokenize(source: str) -> List[Token]:
             '>': TokenType.GT, '<': TokenType.LT,
             '=': TokenType.ASSIGN, '?': TokenType.QUESTION,
             ':': TokenType.COLON, '.': TokenType.DOT,
+            '#': TokenType.HASH,
             '(': TokenType.LPAREN, ')': TokenType.RPAREN,
             '[': TokenType.LBRACKET, ']': TokenType.RBRACKET,
             '{': TokenType.LBRACE, '}': TokenType.RBRACE,

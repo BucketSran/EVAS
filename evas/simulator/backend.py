@@ -1715,6 +1715,22 @@ class CompiledModel:
         for child in self._child_models:
             child._set_node_resolution_cache_enabled(enabled)
 
+    def _apply_child_param_override(
+        self,
+        child: "CompiledModel",
+        child_mod: Module,
+        name: str,
+        value: Any,
+    ) -> None:
+        for param in child_mod.parameters:
+            if param.name != name:
+                continue
+            if param.param_type == ParamType.INTEGER:
+                value = self._to_integer(value)
+            child.params[name] = value
+            return
+        child.params[name] = value
+
     def _resolve_external_node_uncached(self, node: str) -> str:
         """Resolve a local model node through node_map and one parent indirection."""
         ext = self.node_map.get(node, node)
@@ -4860,6 +4876,12 @@ class _ModuleCompiler:
             lines.append("        _child_cls, _child_mod = _entry")
             lines.append(f"        {child_var} = _child_cls()")
             lines.append(f"        {child_var}._parent_model = self")
+            for override in inst.parameter_overrides:
+                value = self._compile_expr(override.expr)
+                lines.append(
+                    f"        self._apply_child_param_override("
+                    f"{child_var}, _child_mod, {override.param_name!r}, {value})"
+                )
             lines.append(f"        {child_var}.node_map = {{}}")
             # Positional and named port connections.
             for ci, c in enumerate(inst.connections):
@@ -4871,10 +4893,7 @@ class _ModuleCompiler:
                 lines.append(f"        _pname = {port_expr!s}")
                 lines.append("        if _pname is not None:")
                 lines.append(f"            _target = {target}")
-                lines.append("            if _target in self._module_ports:")
-                lines.append("                _mapped = f'@parent:{_target}'")
-                lines.append("            else:")
-                lines.append(f"                _mapped = f'__{inst.instance_name}.{{_target}}'")
+                lines.append("            _mapped = f'@parent:{_target}'")
                 lines.append(f"            {child_var}.node_map[_pname] = _mapped")
             lines.append(f"        self._child_models.append({child_var})")
 

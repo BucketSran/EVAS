@@ -437,9 +437,16 @@ class Parser:
         # Hierarchical module instance:
         #   child_mod u1 (...);
         # Only parse common forms (positional and named .port(expr)).
-        if (tok.type == TokenType.IDENT and
-                self.peek_n(1).type == TokenType.IDENT and
-                self.peek_n(2).type == TokenType.LPAREN):
+        if (
+            tok.type == TokenType.IDENT
+            and (
+                (
+                    self.peek_n(1).type == TokenType.IDENT
+                    and self.peek_n(2).type == TokenType.LPAREN
+                )
+                or self.peek_n(1).type == TokenType.HASH
+            )
+        ):
             inst = self._parse_module_instance()
             if inst is not None:
                 module.instances.append(inst)
@@ -450,6 +457,22 @@ class Parser:
 
     def _parse_module_instance(self) -> Optional[ModuleInstance]:
         module_name = self.expect(TokenType.IDENT).value
+        parameter_overrides: List[InstanceParameterOverride] = []
+        if self.match(TokenType.HASH):
+            self.expect(TokenType.LPAREN)
+            if not self.at(TokenType.RPAREN):
+                while True:
+                    self.expect(TokenType.DOT)
+                    param_name = self.expect(TokenType.IDENT).value
+                    self.expect(TokenType.LPAREN)
+                    expr = self._parse_expression()
+                    self.expect(TokenType.RPAREN)
+                    parameter_overrides.append(
+                        InstanceParameterOverride(param_name=param_name, expr=expr)
+                    )
+                    if not self.match(TokenType.COMMA):
+                        break
+            self.expect(TokenType.RPAREN)
         instance_name = self.expect(TokenType.IDENT).value
         self.expect(TokenType.LPAREN)
 
@@ -475,6 +498,7 @@ class Parser:
             module_name=module_name,
             instance_name=instance_name,
             connections=conns,
+            parameter_overrides=parameter_overrides,
         )
 
     def _parse_port_direction_decl(self, module: Module):

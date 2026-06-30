@@ -148,6 +148,10 @@ class TestLexerIdentifiers:
         assert tok.type == TokenType.IDENT
         assert tok.value == "$strobe"
 
+    def test_hash_delimiter(self):
+        tok = _first("#")
+        assert tok.type == TokenType.HASH
+
 
 class TestLexerNumbers:
 

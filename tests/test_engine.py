@@ -8177,6 +8177,50 @@ child_inv u0 (
 endmodule
 """
 
+    VA_GAIN_CHILD = """\
+`include "disciplines.vams"
+module child_gain(inp, out);
+input inp;
+electrical inp;
+output out;
+electrical out;
+parameter real gain = 1.0;
+analog begin
+    V(out) <+ gain * V(inp);
+end
+endmodule
+"""
+
+    VA_GAIN_TOP = """\
+`include "disciplines.vams"
+module gain_chain(inp, out);
+input inp;
+electrical inp;
+output out;
+electrical out;
+electrical mid;
+child_gain #(.gain(2.0)) u0 (
+    .inp(inp),
+    .out(mid)
+);
+child_gain #(.gain(3.0)) u1 (
+    .inp(mid),
+    .out(out)
+);
+endmodule
+"""
+
+    VA_GAIN_TOP_ORDERED = """\
+`include "disciplines.vams"
+module gain_ordered(inp, out);
+input inp;
+electrical inp;
+output out;
+electrical out;
+child_gain #(.gain(4.0)) u0 (inp, out);
+endmodule
+"""
+
     def test_named_port_instance_parses(self):
         from evas.compiler.parser import parse
         mod = parse(self.VA_TOP)
@@ -8211,6 +8255,60 @@ endmodule
         nv["INP"] = 1.0
         top.evaluate(nv, 1e-9)
         assert nv["OUT"] == pytest.approx(0.0)
+
+    def test_parameter_override_and_internal_net_chain(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        child_mod = parse(self.VA_GAIN_CHILD)
+        top_mod = parse(self.VA_GAIN_TOP)
+        assert len(top_mod.instances) == 2
+        assert top_mod.instances[0].parameter_overrides[0].param_name == "gain"
+        ChildCls = compile_module(child_mod)
+        TopCls = compile_module(top_mod)
+        registry = {
+            "child_gain": (ChildCls, child_mod),
+            "gain_chain": (TopCls, top_mod),
+        }
+        ChildCls._module_registry = registry
+        TopCls._module_registry = registry
+
+        top = TopCls()
+        top.node_map = {"inp": "INP", "out": "OUT"}
+        nv = {"INP": 0.5}
+
+        top.initial_step(nv, 0.0)
+        top.evaluate(nv, 0.0)
+
+        assert top._child_models[0].params["gain"] == pytest.approx(2.0)
+        assert top._child_models[1].params["gain"] == pytest.approx(3.0)
+        assert nv["mid"] == pytest.approx(1.0)
+        assert nv["OUT"] == pytest.approx(3.0)
+
+    def test_ordered_port_instance_with_parameter_override(self):
+        from evas.compiler.parser import parse
+        from evas.simulator.backend import compile_module
+
+        child_mod = parse(self.VA_GAIN_CHILD)
+        top_mod = parse(self.VA_GAIN_TOP_ORDERED)
+        ChildCls = compile_module(child_mod)
+        TopCls = compile_module(top_mod)
+        registry = {
+            "child_gain": (ChildCls, child_mod),
+            "gain_ordered": (TopCls, top_mod),
+        }
+        ChildCls._module_registry = registry
+        TopCls._module_registry = registry
+
+        top = TopCls()
+        top.node_map = {"inp": "INP", "out": "OUT"}
+        nv = {"INP": 0.5}
+
+        top.initial_step(nv, 0.0)
+        top.evaluate(nv, 0.0)
+
+        assert top._child_models[0].params["gain"] == pytest.approx(4.0)
+        assert nv["OUT"] == pytest.approx(2.0)
 
 
 class TestSpectreRestrictedOperators:
