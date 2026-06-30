@@ -3,20 +3,9 @@
 import numpy as np
 import pytest
 
-from evas.simulator.indexed import (
-    DynamicBranchAccessIO,
-    IndexedVoltages,
-    IndexedStateArrayLayout,
-    IndexedVoltageArray,
-    IndexedVoltageSnapshotter,
-    NodeIndex,
-    StateIndex,
-    build_indexed_model_io_plan,
-    build_indexed_run_plan,
-    build_node_index,
-    check_indexed_trace_round_trip,
-    copy_values_into,
-)
+from evas.compiler.parser import parse
+from evas.simulator.backend import CompiledModel, compile_module
+from evas.simulator.engine import SimResult, Simulator, dc
 from evas.simulator.evaluate_ir import (
     COND_GE,
     COND_GT,
@@ -31,9 +20,20 @@ from evas.simulator.evaluate_ir import (
     normalize_linear_ops,
     normalize_transition_target_ops,
 )
-from evas.compiler.parser import parse
-from evas.simulator.backend import CompiledModel, compile_module
-from evas.simulator.engine import SimResult, Simulator, dc
+from evas.simulator.indexed import (
+    DynamicBranchAccessIO,
+    IndexedStateArrayLayout,
+    IndexedVoltageArray,
+    IndexedVoltages,
+    IndexedVoltageSnapshotter,
+    NodeIndex,
+    StateIndex,
+    build_indexed_model_io_plan,
+    build_indexed_run_plan,
+    build_node_index,
+    check_indexed_trace_round_trip,
+    copy_values_into,
+)
 
 
 def test_node_index_assigns_stable_ids_and_names():
@@ -1191,6 +1191,29 @@ def test_indexed_run_plan_collects_sources_records_and_model_nodes():
         plan.node_index.id_of("vout"),
         plan.node_index.id_of("vout"),
     )
+
+
+def test_compiled_model_allows_parameter_gain_on_boolean_sum_state():
+    src = r"""
+`include "disciplines.vams"
+module flash_thermometer_centered_sum(b0, b1, b2, b3, b4, b5, b6, b7, dout);
+input b0, b1, b2, b3, b4, b5, b6, b7;
+output dout;
+electrical b0, b1, b2, b3, b4, b5, b6, b7, dout;
+parameter real vth = 0.45;
+parameter real gain = 0.1125;
+real ones;
+analog begin
+    ones = (V(b0) > vth) + (V(b1) > vth) + (V(b2) > vth) + (V(b3) > vth)
+         + (V(b4) > vth) + (V(b5) > vth) + (V(b6) > vth) + (V(b7) > vth);
+    V(dout) <+ gain * ones;
+end
+endmodule
+"""
+
+    Model = compile_module(parse(src))
+
+    assert issubclass(Model, CompiledModel)
 
 
 def test_indexed_trace_round_trip_is_lossless_for_simresult():

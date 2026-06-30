@@ -6056,7 +6056,8 @@ class _ModuleCompiler:
             ):
                 return
             kind, state_name, gain = terms[0]
-            if kind != SOURCE_STATE or abs(float(gain) - 1.0) > 1e-18:
+            gain_value = self._static_float_or_none(gain)
+            if kind != SOURCE_STATE or gain_value is None or abs(gain_value - 1.0) > 1e-18:
                 return
             mapping.setdefault(str(state_name), set()).add(str(branch.node1))
 
@@ -6098,7 +6099,8 @@ class _ModuleCompiler:
         ):
             return None
         kind, state_name, gain = terms[0]
-        if kind != SOURCE_STATE or abs(float(gain) - 1.0) > 1e-18:
+        gain_value = self._static_float_or_none(gain)
+        if kind != SOURCE_STATE or gain_value is None or abs(gain_value - 1.0) > 1e-18:
             return None
         return str(state_name)
 
