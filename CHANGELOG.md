@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.4.6] — 2026-06-30
+
+### Fixed — Verilog-A Compatibility
+- Fixed affine lowering for valid voltage-domain expressions such as
+  `V(out) <+ V(in) - param`, including symbolic parameter subtraction in the
+  Rust static-affine path.
+- Fixed compilation of real parameter gains applied to boolean-sum state
+  variables, such as `gain * ones`, by avoiding tuple-to-float coercion in the
+  simple state-output optimizer.
+- Added source-level parsing and static elaboration for bitwise operators,
+  shifts, unary bit-not, and right-associative power expressions in parameter
+  defaults and variable initializers.
+
+### Fixed — Rust Backend Coverage
+- Let Rust event bodies execute parameter-bound `for` loops by lowering them to
+  guarded body-IR loops when static unrolling cannot prove bounds.
+- Added adaptive-step shrink floors that prevent runaway default error-control
+  microsteps while preserving explicit `min_step`, source breakpoints, model
+  breakpoints, bound-step contracts, and transition timing.
+
+### Fixed — Stochastic and Event Timing
+- Restored stochastic `transition()` ramp semantics while keeping Python and
+  `evas-rust` random draws schedule-independent through per-seed draw indices.
+- Updated cross-acceptance slack handling to use the measured Spectre lateness
+  law as an explicit opt-in mode.
+
 ## [0.4.5] — 2026-06-25
 
 ### Fixed — Spectre Compatibility
