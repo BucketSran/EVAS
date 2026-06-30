@@ -36,22 +36,97 @@ def _preprocess_recursive(source, defines, include_dirs, included_files,
                           default_transition):
     lines = source.split('\n')
     output_lines = []
+    condition_stack = []
+
+    def is_active():
+        return all(frame["active"] for frame in condition_stack)
 
     for line in lines:
         stripped = line.strip()
+
+        m = re.match(r'`ifdef\s+(\w+)', stripped)
+        if m:
+            parent_active = is_active()
+            cond = m.group(1) in defines
+            active = parent_active and cond
+            condition_stack.append(
+                {
+                    "parent_active": parent_active,
+                    "active": active,
+                    "branch_taken": active,
+                    "seen_else": False,
+                }
+            )
+            output_lines.append('')
+            continue
+
+        m = re.match(r'`ifndef\s+(\w+)', stripped)
+        if m:
+            parent_active = is_active()
+            cond = m.group(1) not in defines
+            active = parent_active and cond
+            condition_stack.append(
+                {
+                    "parent_active": parent_active,
+                    "active": active,
+                    "branch_taken": active,
+                    "seen_else": False,
+                }
+            )
+            output_lines.append('')
+            continue
+
+        m = re.match(r'`elsif\s+(\w+)', stripped)
+        if m:
+            if not condition_stack:
+                raise PreprocessorError("`elsif without matching `ifdef/`ifndef")
+            frame = condition_stack[-1]
+            if frame["seen_else"]:
+                raise PreprocessorError("`elsif after `else")
+            cond = m.group(1) in defines
+            active = frame["parent_active"] and not frame["branch_taken"] and cond
+            frame["active"] = active
+            frame["branch_taken"] = frame["branch_taken"] or active
+            output_lines.append('')
+            continue
+
+        if re.match(r'`else\b', stripped):
+            if not condition_stack:
+                raise PreprocessorError("`else without matching `ifdef/`ifndef")
+            frame = condition_stack[-1]
+            if frame["seen_else"]:
+                raise PreprocessorError("duplicate `else in conditional block")
+            frame["active"] = frame["parent_active"] and not frame["branch_taken"]
+            frame["branch_taken"] = True
+            frame["seen_else"] = True
+            output_lines.append('')
+            continue
+
+        if re.match(r'`endif\b', stripped):
+            if not condition_stack:
+                raise PreprocessorError("`endif without matching `ifdef/`ifndef")
+            condition_stack.pop()
+            output_lines.append('')
+            continue
+
+        active = is_active()
+        if not active:
+            output_lines.append('')
+            continue
 
         # `include "filename"
         m = re.match(r'`include\s+"([^"]+)"', stripped)
         if m:
             fname = m.group(1)
             content = _resolve_include(fname, include_dirs, included_files)
-            if content is not None:
-                sub_result = _preprocess_recursive(content, defines,
-                                                   include_dirs, included_files,
-                                                   default_transition)
-                output_lines.append(sub_result[0])
-                if sub_result[2] is not None:
-                    default_transition = sub_result[2]
+            if content is None:
+                raise PreprocessorError(f"include file not found: {fname}")
+            sub_result = _preprocess_recursive(content, defines,
+                                               include_dirs, included_files,
+                                               default_transition)
+            output_lines.append(sub_result[0])
+            if sub_result[2] is not None:
+                default_transition = sub_result[2]
             continue
 
         # `define NAME value
@@ -60,6 +135,12 @@ def _preprocess_recursive(source, defines, include_dirs, included_files,
             name = m.group(1)
             value = m.group(2).strip()
             defines[name] = value
+            continue
+
+        # `undef NAME
+        m = re.match(r'`undef\s+(\w+)', stripped)
+        if m:
+            defines.pop(m.group(1), None)
             continue
 
         # `default_transition value
@@ -74,6 +155,9 @@ def _preprocess_recursive(source, defines, include_dirs, included_files,
             processed = processed.replace(f'`{name}', value)
 
         output_lines.append(processed)
+
+    if condition_stack:
+        raise PreprocessorError("unterminated conditional block: missing `endif")
 
     return '\n'.join(output_lines), defines, default_transition
 

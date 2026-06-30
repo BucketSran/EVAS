@@ -45,6 +45,7 @@ from evas.compiler.ast_nodes import (
 )
 from evas.compiler.lexer import TokenType, tokenize
 from evas.compiler.parser import ParseError, parse
+from evas.compiler.preprocessor import PreprocessorError, preprocess
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -77,6 +78,56 @@ def _stmts(body: str):
     """Return the list of analog statements for a minimal module."""
     m = parse(_wrap(body))
     return m.analog_block.body.statements
+
+
+# ===========================================================================
+# Preprocessor
+# ===========================================================================
+
+class TestPreprocessor:
+
+    def test_ifdef_elsif_else_and_undef(self):
+        src = """\
+`define USE_B 1
+`ifdef USE_A
+value = 1;
+`elsif USE_B
+value = 2;
+`else
+value = 3;
+`endif
+`undef USE_B
+`ifndef USE_B
+gone = 1;
+`endif
+"""
+        out, defines, _default_transition = preprocess(src)
+
+        assert "value = 2;" in out
+        assert "value = 1;" not in out
+        assert "value = 3;" not in out
+        assert "gone = 1;" in out
+        assert "USE_B" not in defines
+
+    def test_inactive_missing_include_is_ignored(self):
+        src = """\
+`ifdef NEVER_DEFINED
+`include "missing_file.vams"
+`else
+value = 4;
+`endif
+"""
+        out, _defines, _default_transition = preprocess(src)
+
+        assert "value = 4;" in out
+
+    def test_active_missing_include_raises_clear_error(self):
+        with pytest.raises(PreprocessorError, match="include file not found"):
+            preprocess('`include "missing_file.vams"')
+
+    def test_unmatched_conditionals_raise_clear_error(self):
+        with pytest.raises(PreprocessorError, match="missing `endif"):
+            preprocess("`ifdef A\nvalue = 1;")
 
 
 # ===========================================================================
