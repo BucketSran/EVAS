@@ -8058,6 +8058,81 @@ endmodule
         assert outfile.exists()
         assert outfile.read_text().strip() == "ok"
 
+    def test_text_file_read_and_position_functions(self, tmp_path):
+        infile = tmp_path / "stimulus.txt"
+        infile.write_text("1.5 4\nhello\n", encoding="utf-8")
+        infile_s = str(infile).replace("\\", "/")
+        src = f"""\
+`include "disciplines.vams"
+module file_read_probe(out);
+    output voltage out;
+    parameter string filename = "{infile_s}";
+    integer fd;
+    integer code;
+    integer pos0;
+    integer pos1;
+    integer eof1;
+    real sample;
+    string line;
+    analog begin
+        @(initial_step) begin
+            fd = $fopen(filename, "r");
+            pos0 = $ftell(fd);
+            $fscanf(fd, "%f %d", sample, code);
+            $fgets(line, fd);
+            pos1 = $ftell(fd);
+            eof1 = $feof(fd);
+            $rewind(fd);
+            $fseek(fd, 0, 0);
+            $fclose(fd);
+        end
+        V(out) <+ sample + code + eof1;
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert model.state["sample"] == pytest.approx(1.5)
+        assert model.state["code"] == 4
+        assert model.state["line"] == "hello"
+        assert model.state["pos0"] == 0
+        assert model.state["pos1"] > model.state["pos0"]
+        assert model.state["eof1"] == 1
+        assert result.signals["out"].tolist() == pytest.approx([6.5, 6.5])
+
+    def test_table_model_1d_interpolates_file(self, tmp_path):
+        table = tmp_path / "gain_table.txt"
+        table.write_text("0, 0\n1, 2\n2, 8\n", encoding="utf-8")
+        table_s = str(table).replace("\\", "/")
+        src = f"""\
+`include "disciplines.vams"
+module table_model_probe(out);
+    output voltage out;
+    parameter string table_file = "{table_s}";
+    parameter real x = 1.5;
+    analog begin
+        V(out) <+ $table_model(x, table_file);
+    end
+endmodule
+"""
+        mod = parse(src)
+        ModelCls = compile_module(mod)
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"].tolist() == pytest.approx([5.0, 5.0])
+
     def test_fclose_cleans_handle(self, tmp_path):
         """After simulation, file handles should be cleaned up."""
         from evas.compiler.parser import parse

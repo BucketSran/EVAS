@@ -7,6 +7,7 @@ and state variable management.
 """
 import math
 import random
+import re
 from array import array
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -149,6 +150,7 @@ class CompiledModel:
         self._initial_step_done: bool = False
         self._initial_condition_mode: bool = False
         self._strobe_log: List[str] = []
+        self._table_model_cache: Dict[str, Tuple[Tuple[float, float], ...]] = {}
         self._event_time: float = 0.0  # $abstime inside cross/above event bodies
         self._temperature: float = 27.0  # degrees Celsius (expressions convert to Kelvin)
         self.timer_states: Dict[str, float] = {}  # key → next_fire_time
@@ -4456,6 +4458,88 @@ class CompiledModel:
             self._file_handles[fd].close()
             del self._file_handles[fd]
 
+    def _file_handle(self, fd: Any):
+        try:
+            return self._file_handles.get(int(fd))
+        except (TypeError, ValueError):
+            return None
+
+    def _feof(self, fd: Any) -> int:
+        handle = self._file_handle(fd)
+        if handle is None:
+            return 1
+        pos = handle.tell()
+        char = handle.read(1)
+        handle.seek(pos)
+        return 1 if char == "" else 0
+
+    def _ftell(self, fd: Any) -> int:
+        handle = self._file_handle(fd)
+        if handle is None:
+            return -1
+        try:
+            return int(handle.tell())
+        except OSError:
+            return -1
+
+    def _fseek(self, fd: Any, offset: Any, whence: Any = 0) -> int:
+        handle = self._file_handle(fd)
+        if handle is None:
+            return -1
+        try:
+            handle.seek(int(float(offset)), int(float(whence)))
+            return 0
+        except OSError:
+            return -1
+
+    def _rewind(self, fd: Any) -> int:
+        return self._fseek(fd, 0, 0)
+
+    def _fgets(self, fd: Any) -> str:
+        handle = self._file_handle(fd)
+        if handle is None:
+            return ""
+        return handle.readline().rstrip("\n")
+
+    @staticmethod
+    def _scan_format_types(fmt: Any) -> List[str]:
+        fmt_s = str(fmt)
+        return [
+            match.group(1).lower()
+            for match in re.finditer(
+                r"%\*?(?:\d+)?(?:\.\d+)?(?:[lLhH])?([deEfgGs])",
+                fmt_s,
+            )
+        ]
+
+    @staticmethod
+    def _scan_tokens(line: str) -> List[str]:
+        return [tok for tok in re.split(r"[\s,]+", line.strip()) if tok]
+
+    def _fscanf_values(self, fd: Any, fmt: Any) -> Tuple[int, Tuple[Any, ...]]:
+        handle = self._file_handle(fd)
+        if handle is None:
+            return 0, ()
+        types = self._scan_format_types(fmt)
+        if not types:
+            return 0, ()
+        line = handle.readline()
+        if line == "":
+            return 0, ()
+        tokens = self._scan_tokens(line)
+        values: List[Any] = []
+        for spec, token in zip(types, tokens):
+            try:
+                if spec == "d":
+                    values.append(self._to_integer(float(token)))
+                elif spec == "s":
+                    values.append(token)
+                else:
+                    values.append(float(token))
+            except ValueError:
+                break
+        return len(values), tuple(values)
+
     def _fstrobe(self, target: Any, fmt: str, *args):
         msg = self._format_message(fmt, *args)
 
@@ -4471,6 +4555,46 @@ class CompiledModel:
         if isinstance(target, str):
             with open(target, 'a') as f:
                 f.write(msg + '\n')
+
+    def _load_table_model_1d(self, filename: Any) -> Tuple[Tuple[float, float], ...]:
+        path = str(filename)
+        cached = self._table_model_cache.get(path)
+        if cached is not None:
+            return cached
+        rows: List[Tuple[float, float]] = []
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                tokens = self._scan_tokens(stripped)
+                if len(tokens) < 2:
+                    continue
+                try:
+                    rows.append((float(tokens[0]), float(tokens[1])))
+                except ValueError:
+                    continue
+        rows.sort(key=lambda item: item[0])
+        table = tuple(rows)
+        self._table_model_cache[path] = table
+        return table
+
+    def _table_model_1d(self, x: Any, filename: Any) -> float:
+        table = self._load_table_model_1d(filename)
+        if not table:
+            return 0.0
+        x_f = float(x)
+        if x_f <= table[0][0]:
+            return table[0][1]
+        if x_f >= table[-1][0]:
+            return table[-1][1]
+        for (x0, y0), (x1, y1) in zip(table, table[1:]):
+            if x0 <= x_f <= x1:
+                if x1 == x0:
+                    return y1
+                alpha = (x_f - x0) / (x1 - x0)
+                return y0 + alpha * (y1 - y0)
+        return table[-1][1]
 
     def _cleanup_files(self):
         for f in self._file_handles.values():
@@ -4647,6 +4771,7 @@ class _ModuleCompiler:
         self._idt_counter = 0
         self._slew_counter = 0
         self._last_cross_counter = 0
+        self._system_task_counter = 0
         self._uses_idtmod = False
         self._needs_future_node_voltages = False
         self._indent = 2
@@ -10321,6 +10446,38 @@ class _ModuleCompiler:
             return any(e.event_type == EventType.FINAL_STEP for e in event.events)
         return False
 
+    def _alloc_temp_var(self, prefix: str) -> str:
+        self._system_task_counter += 1
+        return f"_{prefix}_{self._system_task_counter}"
+
+    def _compile_task_target_assignment(
+        self,
+        target: Expr,
+        value: str,
+        indent: int,
+    ) -> List[str]:
+        prefix = '    ' * indent
+        if isinstance(target, Identifier):
+            name = target.name
+            if self._is_integer_variable(name):
+                value = f"self._to_integer({value})"
+            if self._state_local_fastpath_active and name in self._state_local_fastpath_names:
+                return [f"{prefix}{self._state_local_name_by_state[name]} = {value}"]
+            if self.indexed_state_fastpath_codegen and name in self._state_scalar_slot_by_name:
+                slot = self._state_scalar_slot_by_name[name]
+                return [f"{prefix}self._state_set_by_slot({slot}, {name!r}, {value})"]
+            return [f"{prefix}self._state_set({name!r}, {value})"]
+        if isinstance(target, ArrayAccess):
+            idx = self._compile_expr(target.index)
+            name = target.name
+            if self._is_integer_variable(name):
+                value = f"self._to_integer({value})"
+            return [f"{prefix}self._array_set({name!r}, int({idx}), {value})"]
+        raise CompilationError(
+            f"Module {self.module.name} has invalid system task target; "
+            "expected a variable or array element"
+        )
+
     def _compile_system_task(self, stmt: SystemTask, indent: int) -> List[str]:
         prefix = '    ' * indent
         lines: List[str] = []
@@ -10360,6 +10517,42 @@ class _ModuleCompiler:
                 lines.append(f"{prefix}self._fstrobe({fd}, '')")
             return lines
 
+        if stmt.name == '$fgets' and len(stmt.args) >= 2:
+            target = stmt.args[0]
+            fd = self._compile_expr(stmt.args[1])
+            value = f"self._fgets({fd})"
+            lines.extend(self._compile_task_target_assignment(target, value, indent))
+            return lines
+
+        if stmt.name == '$fscanf' and len(stmt.args) >= 2:
+            fd = self._compile_expr(stmt.args[0])
+            fmt_expr = self._compile_expr(stmt.args[1])
+            count_var = self._alloc_temp_var("fscanf_count")
+            values_var = self._alloc_temp_var("fscanf_values")
+            lines.append(f"{prefix}{count_var}, {values_var} = self._fscanf_values({fd}, {fmt_expr})")
+            for idx, target in enumerate(stmt.args[2:]):
+                lines.append(f"{prefix}if {count_var} > {idx}:")
+                lines.extend(
+                    self._compile_task_target_assignment(
+                        target,
+                        f"{values_var}[{idx}]",
+                        indent + 1,
+                    )
+                )
+            return lines
+
+        if stmt.name == '$rewind' and stmt.args:
+            fd = self._compile_expr(stmt.args[0])
+            lines.append(f"{prefix}self._rewind({fd})")
+            return lines
+
+        if stmt.name == '$fseek' and stmt.args:
+            fd = self._compile_expr(stmt.args[0])
+            offset = self._compile_expr(stmt.args[1]) if len(stmt.args) > 1 else "0"
+            whence = self._compile_expr(stmt.args[2]) if len(stmt.args) > 2 else "0"
+            lines.append(f"{prefix}self._fseek({fd}, {offset}, {whence})")
+            return lines
+
         if stmt.name in ('$sformat', '$swrite') and len(stmt.args) >= 2:
             target = stmt.args[0]
             fmt_expr = self._compile_expr(stmt.args[1])
@@ -10368,17 +10561,8 @@ class _ModuleCompiler:
                 value = f"self._sformat({fmt_expr}, {rest})"
             else:
                 value = f"self._sformat({fmt_expr})"
-            if isinstance(target, Identifier):
-                lines.append(f"{prefix}self._state_set({target.name!r}, {value})")
-                return lines
-            if isinstance(target, ArrayAccess):
-                idx = self._compile_expr(target.index)
-                lines.append(f"{prefix}self._array_set({target.name!r}, int({idx}), {value})")
-                return lines
-            raise CompilationError(
-                f"Module {self.module.name} has invalid {stmt.name} target; "
-                "expected a variable or array element"
-            )
+            lines.extend(self._compile_task_target_assignment(target, value, indent))
+            return lines
 
         return lines
 
@@ -13367,6 +13551,27 @@ class _ModuleCompiler:
             filename = args[0] if len(args) > 0 else "'output.txt'"
             mode = args[1] if len(args) > 1 else "'w'"
             return f"self._fopen({filename}, {mode})"
+        if name == '$feof':
+            fd = args[0] if len(args) > 0 else "0"
+            return f"self._feof({fd})"
+        if name == '$ftell':
+            fd = args[0] if len(args) > 0 else "0"
+            return f"self._ftell({fd})"
+        if name == '$fseek':
+            fd = args[0] if len(args) > 0 else "0"
+            offset = args[1] if len(args) > 1 else "0"
+            whence = args[2] if len(args) > 2 else "0"
+            return f"self._fseek({fd}, {offset}, {whence})"
+        if name == '$rewind':
+            fd = args[0] if len(args) > 0 else "0"
+            return f"self._rewind({fd})"
+        if name == '$fgets':
+            fd = args[0] if len(args) > 0 else "0"
+            return f"self._fgets({fd})"
+        if name == '$table_model':
+            x_expr = args[0] if len(args) > 0 else "0.0"
+            filename = args[1] if len(args) > 1 else "''"
+            return f"self._table_model_1d({x_expr}, {filename})"
         if name == "analysis":
             if expr.args and isinstance(expr.args[0], StringLiteral):
                 analysis_name = expr.args[0].value.strip().lower()
