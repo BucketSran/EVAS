@@ -685,6 +685,72 @@ endmodule
 
         assert result.signals["out"].tolist() == pytest.approx([8.0, 8.0])
 
+    def test_transient_analysis_and_noise_functions_are_deterministic(self):
+        src = """\
+`include "disciplines.vams"
+module transient_analysis_noise_probe(out);
+    output voltage out;
+    analog begin
+        V(out) <+ (analysis("tran") ? 1.25 : 9.0)
+                + (analysis("ac") ? 7.0 : 0.5)
+                + ac_stim(1.0, 0.0)
+                + white_noise(4.0, "thermal")
+                + flicker_noise(2.0, 1.0, "flicker")
+                + noise_table(1.0, "table");
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"].tolist() == pytest.approx([1.75, 1.75])
+
+    def test_rust_sim_program_transient_analysis_and_noise_functions(self):
+        _build_rust_core_or_skip()
+        src = """\
+`include "disciplines.vams"
+module rustsim_transient_analysis_noise(out);
+    output voltage out;
+    analog begin
+        V(out) <+ (analysis("tran") ? 1.25 : 9.0)
+                + (analysis("dc") ? 7.0 : 0.5)
+                + ac_stim(1.0, 0.0)
+                + white_noise(4.0, "thermal")
+                + flicker_noise(2.0, 1.0, "flicker")
+                + noise_table(1.0, "table");
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+
+        def run_model(use_rust: bool):
+            sim = Simulator()
+            sim.add_model(ModelCls())
+            sim.record("out")
+            result = sim.run(
+                tstop=2e-9,
+                tstep=1e-9,
+                rust_full_model_fastpath=use_rust,
+                rust_full_model_required=use_rust,
+                rust_required=use_rust,
+                skip_source_error_control=True,
+            )
+            return result, sim
+
+        default_result, _default_sim = run_model(False)
+        rust_result, rust_sim = run_model(True)
+
+        assert rust_result.time.tolist() == pytest.approx(default_result.time.tolist())
+        assert rust_result.signals["out"].tolist() == pytest.approx(
+            default_result.signals["out"].tolist()
+        )
+        assert rust_sim._perf_stats["rust_full_model_required_failures"] == 0
+
     def test_rust_sim_program_dc_source_record_matches_default(self):
         _build_rust_core_or_skip()
 

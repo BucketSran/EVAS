@@ -13181,6 +13181,19 @@ class _ModuleCompiler:
             filename = args[0] if len(args) > 0 else "'output.txt'"
             mode = args[1] if len(args) > 1 else "'w'"
             return f"self._fopen({filename}, {mode})"
+        if name == "analysis":
+            if expr.args and isinstance(expr.args[0], StringLiteral):
+                analysis_name = expr.args[0].value.strip().lower()
+                return "1.0" if analysis_name in {"tran", "transient"} else "0.0"
+            analysis = args[0] if args else "''"
+            return (
+                f"(1.0 if str({analysis}).strip().lower() in "
+                "{'tran', 'transient'} else 0.0)"
+            )
+        if name == "ac_stim":
+            return "0.0"
+        if name in {"flicker_noise", "noise_table", "white_noise"}:
+            return "0.0"
 
         raise CompilationError(f"Unsupported Verilog-A function call: {name}()")
 

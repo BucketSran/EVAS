@@ -115,6 +115,16 @@ STATEFUL_ANALOG_FUNCTIONS = frozenset(
     }
 )
 
+TRANSIENT_ANALYSIS_FUNCTIONS = frozenset(
+    {
+        "ac_stim",
+        "analysis",
+        "flicker_noise",
+        "noise_table",
+        "white_noise",
+    }
+)
+
 SUPPORTED_SYSTEM_FUNCTIONS = frozenset(
     {
         "$dist_uniform",
@@ -210,7 +220,11 @@ class LoweringContext:
     @classmethod
     def veriloga_body(cls) -> "LoweringContext":
         return cls(
-            allowed_functions=PURE_MATH_FUNCTIONS | STATEFUL_ANALOG_FUNCTIONS,
+            allowed_functions=(
+                PURE_MATH_FUNCTIONS
+                | STATEFUL_ANALOG_FUNCTIONS
+                | TRANSIENT_ANALYSIS_FUNCTIONS
+            ),
             allowed_system_functions=SUPPORTED_SYSTEM_FUNCTIONS,
             allowed_methods=SUPPORTED_METHODS,
         )
@@ -373,6 +387,13 @@ def lower_expr(
         args = _lower_expr_tuple(ast_expr.args, ctx)
         if args is None:
             return None
+        if name in {"ac_stim", "flicker_noise", "noise_table", "white_noise"}:
+            return LiteralIR(0.0)
+        if name == "analysis":
+            if args and isinstance(args[0], LiteralIR):
+                analysis_name = str(args[0].value).strip().lower()
+                return LiteralIR(1.0 if analysis_name in {"tran", "transient"} else 0.0)
+            return LiteralIR(0.0)
         return FunctionCallIR(name, args)
 
     if isinstance(ast_expr, BranchAccess):
