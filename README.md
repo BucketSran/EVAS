@@ -23,6 +23,11 @@ EVAS simulates **voltage-mode, event-driven** Verilog-A behavioral models. You p
 2. **A `.scs` testbench netlist** — voltage sources, `ahdl_include`, and a `tran` statement
 3. **Run `evas simulate`** — get `tran.csv` waveforms and optional plots
 
+The main simulator is transient-first. Compiled models also expose lightweight
+behavioral helpers for `analysis("ac")`, `ac_stim()`, and Verilog-A noise source
+functions so source-style models can run AC/noise sweeps from Python without
+claiming SPICE-style linearized circuit analysis.
+
 The bundled examples are a compact smoke-test set. For your own design, copy the
 closest example directory, swap in your `.va`, adjust the stimulus sources and
 `save` list, and run. The larger verification example library belongs with the
@@ -101,8 +106,10 @@ the in-package reference for common wiring patterns:
 | `$fopen()`, `$fclose()`, `$fstrobe()`, `$fwrite()`, `$fdisplay()` | ✅ |
 | `$display`, `$strobe`, `$random`, `$dist_uniform()`, `$rdist_normal()` | ✅ |
 | `last_crossing(expr, dir, time_tol, expr_tol)` | ✅ (most-recent event-time approximation) |
+| `analysis("ac")`, `ac_stim()` | ✅ (behavioral Python sweep helper) |
+| `white_noise()`, `flicker_noise()`, `noise_table()` | ✅ (behavioral PSD / integrated-noise helper) |
 | `I() <+`, `ddt()`, `idt()`, `q() <+` | not supported by design |
-| AC/DC analysis, transistors | not supported by design |
+| SPICE-style AC/DC matrix solving, transistors | not supported by design |
 | Spectre `subckt` hierarchy | not yet implemented |
 
 ### Accuracy Profiles

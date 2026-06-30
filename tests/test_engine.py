@@ -734,6 +734,71 @@ endmodule
 
         assert result.signals["out"].tolist() == pytest.approx([1.75, 1.75])
 
+    def test_behavioral_ac_sweep_enables_analysis_and_ac_stim(self):
+        src = """\
+`include "disciplines.vams"
+module behavioral_ac_probe(out);
+    output voltage out;
+    analog begin
+        V(out) <+ (analysis("ac") ? ac_stim(2.0, 90.0) : 0.125);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        ac_point = model.evaluate_ac(frequency=1e3)
+        ac_sweep = model.ac_sweep([1e3, 1e6])
+
+        assert ac_point["out"].real == pytest.approx(0.0, abs=1e-12)
+        assert ac_point["out"].imag == pytest.approx(2.0)
+        assert [value.imag for value in ac_sweep["out"]] == pytest.approx([2.0, 2.0])
+        assert model.output_nodes == {}
+
+    def test_behavioral_noise_spectrum_and_integrated_noise(self):
+        src = """\
+`include "disciplines.vams"
+module behavioral_noise_probe(out);
+    output voltage out;
+    analog begin
+        V(out) <+ white_noise(4.0, "thermal")
+                + flicker_noise(2.0, 1.0, "flicker")
+                + noise_table(10.0, 1.0, 20.0, 3.0, "table");
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        noise_10hz = model.evaluate_noise(frequency=10.0)
+        spectrum = model.noise_spectrum([10.0, 20.0])
+        rms = model.integrated_noise("out", [10.0, 20.0])
+
+        assert noise_10hz["out"] == pytest.approx(5.2)
+        assert spectrum["out"] == pytest.approx([5.2, 7.1])
+        assert rms == pytest.approx(math.sqrt(61.5))
+
+    def test_behavioral_analysis_points_do_not_mutate_transient_state(self):
+        src = """\
+`include "disciplines.vams"
+module analysis_state_probe(out);
+    output voltage out;
+    integer n;
+    analog begin
+        n = n + 1;
+        V(out) <+ (analysis("ac") ? ac_stim(1.0, 0.0) : n);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        assert model.evaluate_ac(frequency=1e3)["out"] == pytest.approx(1.0 + 0.0j)
+        model.evaluate({}, 0.0)
+
+        assert model.state["n"] == 1
+        assert model.output_nodes["out"] == pytest.approx(1.0)
+
     def test_rust_sim_program_transient_analysis_and_noise_functions(self):
         _build_rust_core_or_skip()
         src = """\

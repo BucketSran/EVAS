@@ -5,6 +5,7 @@ Takes a parsed Module AST and generates a Python class that implements
 the behavioral model with proper event handling, transition operators,
 and state variable management.
 """
+import copy
 import math
 import random
 import re
@@ -144,8 +145,10 @@ class CompiledModel:
         self.cross_detectors: Dict[str, CrossDetector] = {}
         self.above_detectors: Dict[str, AboveDetector] = {}
         self.digital_edge_states: Dict[str, int] = {}
-        self.output_nodes: Dict[str, float] = {}
+        self.output_nodes: Dict[str, Any] = {}
         self._output_nodes_version: int = 0
+        self._analysis_mode: str = "tran"
+        self._analysis_frequency: float = 0.0
         self.node_map: Dict[str, str] = {}  # port_name -> external_node
         self.default_transition: float = 1e-12
         self._initial_step_done: bool = False
@@ -407,6 +410,272 @@ class CompiledModel:
 
     def final_step(self, node_voltages: Dict[str, float], time: float):
         pass
+
+    def _set_analysis_context(self, mode: str, frequency: float):
+        self._analysis_mode = str(mode).strip().lower() or "tran"
+        self._analysis_frequency = float(frequency)
+        for child in self._child_models:
+            child._set_analysis_context(self._analysis_mode, self._analysis_frequency)
+
+    def _snapshot_analysis_context(self):
+        return (
+            self._analysis_mode,
+            self._analysis_frequency,
+            tuple(child._snapshot_analysis_context() for child in self._child_models),
+        )
+
+    def _restore_analysis_context(self, snapshot):
+        mode, frequency, child_snapshots = snapshot
+        self._analysis_mode = mode
+        self._analysis_frequency = frequency
+        for child, child_snapshot in zip(self._child_models, child_snapshots):
+            child._restore_analysis_context(child_snapshot)
+
+    def _snapshot_analysis_state(self):
+        return {
+            "state": copy.deepcopy(self.state),
+            "arrays": copy.deepcopy(self.arrays),
+            "transitions": copy.deepcopy(self.transitions),
+            "slew_states": copy.deepcopy(self.slew_states),
+            "cross_detectors": copy.deepcopy(self.cross_detectors),
+            "above_detectors": copy.deepcopy(self.above_detectors),
+            "digital_edge_states": copy.deepcopy(self.digital_edge_states),
+            "output_nodes": copy.deepcopy(self.output_nodes),
+            "output_nodes_version": self._output_nodes_version,
+            "timer_states": copy.deepcopy(self.timer_states),
+            "timer_last_fired": copy.deepcopy(self.timer_last_fired),
+            "timer_kinds": copy.deepcopy(self.timer_kinds),
+            "initial_step_done": self._initial_step_done,
+            "bound_step": self._bound_step,
+            "event_time": self._event_time,
+            "event_context_active": self._event_context_active,
+            "transition_pending_count": self._transition_pending_count,
+            "transition_pending_input": copy.deepcopy(self._transition_pending_input),
+            "active_transition_keys": copy.deepcopy(self._active_transition_keys),
+            "transition_active_keys_known": self._transition_active_keys_known,
+            "children": tuple(child._snapshot_analysis_state() for child in self._child_models),
+        }
+
+    def _restore_analysis_state(self, snapshot):
+        self.state = snapshot["state"]
+        self.arrays = snapshot["arrays"]
+        self.transitions = snapshot["transitions"]
+        self.slew_states = snapshot["slew_states"]
+        self.cross_detectors = snapshot["cross_detectors"]
+        self.above_detectors = snapshot["above_detectors"]
+        self.digital_edge_states = snapshot["digital_edge_states"]
+        self.output_nodes = snapshot["output_nodes"]
+        self._output_nodes_version = snapshot["output_nodes_version"]
+        self.timer_states = snapshot["timer_states"]
+        self.timer_last_fired = snapshot["timer_last_fired"]
+        self.timer_kinds = snapshot["timer_kinds"]
+        self._initial_step_done = snapshot["initial_step_done"]
+        self._bound_step = snapshot["bound_step"]
+        self._event_time = snapshot["event_time"]
+        self._event_context_active = snapshot["event_context_active"]
+        self._transition_pending_count = snapshot["transition_pending_count"]
+        self._transition_pending_input = snapshot["transition_pending_input"]
+        self._active_transition_keys = snapshot["active_transition_keys"]
+        self._transition_active_keys_known = snapshot["transition_active_keys_known"]
+        for child, child_snapshot in zip(self._child_models, snapshot["children"]):
+            child._restore_analysis_state(child_snapshot)
+
+    def _analysis(self, name: Any) -> bool:
+        requested = str(name).strip().lower()
+        mode = self._analysis_mode
+        aliases = {
+            "tran": {"tran", "transient"},
+            "dc": {"dc", "op", "operating_point", "operating-point"},
+            "ac": {"ac", "smallsig", "small_signal", "small-signal"},
+            "noise": {"noise"},
+        }
+        active = aliases.get(mode, {mode})
+        return requested in active
+
+    def _ac_stim(self, *args: Any) -> Any:
+        if self._analysis_mode != "ac":
+            return 0.0
+        analysis_name: Any = "ac"
+        mag: Any = 1.0
+        phase_deg: Any = 0.0
+        if args:
+            if isinstance(args[0], str):
+                analysis_name = args[0]
+                if len(args) > 1:
+                    mag = args[1]
+                if len(args) > 2:
+                    phase_deg = args[2]
+            else:
+                mag = args[0]
+                if len(args) > 1:
+                    phase_deg = args[1]
+        if not self._analysis(analysis_name):
+            return 0.0
+        magnitude = float(mag)
+        phase = math.radians(float(phase_deg))
+        return complex(magnitude * math.cos(phase), magnitude * math.sin(phase))
+
+    def _white_noise(self, power: Any = 0.0, name: Any = "") -> float:
+        if self._analysis_mode != "noise":
+            return 0.0
+        try:
+            return max(0.0, float(power))
+        except Exception:
+            return 0.0
+
+    def _flicker_noise(
+        self,
+        power: Any = 0.0,
+        exponent: Any = 1.0,
+        name: Any = "",
+    ) -> float:
+        if self._analysis_mode != "noise":
+            return 0.0
+        try:
+            pwr = max(0.0, float(power))
+            exp = float(exponent)
+        except Exception:
+            return 0.0
+        freq = max(abs(float(self._analysis_frequency)), 1e-30)
+        return pwr / (freq ** exp)
+
+    def _noise_table(self, *args: Any) -> float:
+        if self._analysis_mode != "noise" or not args:
+            return 0.0
+        first = args[0]
+        if isinstance(first, str):
+            try:
+                return max(0.0, float(self._table_model_1d(self._analysis_frequency, first)))
+            except Exception:
+                return 0.0
+
+        numeric: List[float] = []
+        for arg in args:
+            if isinstance(arg, str):
+                break
+            try:
+                numeric.append(float(arg))
+            except Exception:
+                break
+        if not numeric:
+            return 0.0
+        if len(numeric) == 1:
+            return max(0.0, numeric[0])
+        if len(numeric) % 2:
+            numeric = numeric[:-1]
+        if not numeric:
+            return 0.0
+        pairs = sorted(zip(numeric[0::2], numeric[1::2]), key=lambda item: item[0])
+        freq = float(self._analysis_frequency)
+        if freq <= pairs[0][0]:
+            return max(0.0, pairs[0][1])
+        if freq >= pairs[-1][0]:
+            return max(0.0, pairs[-1][1])
+        for (f0, y0), (f1, y1) in zip(pairs, pairs[1:]):
+            if f0 <= freq <= f1:
+                if f1 == f0:
+                    return max(0.0, y1)
+                alpha = (freq - f0) / (f1 - f0)
+                return max(0.0, y0 + alpha * (y1 - y0))
+        return max(0.0, pairs[-1][1])
+
+    def _analysis_point(
+        self,
+        mode: str,
+        frequency: float,
+        node_voltages: Optional[Dict[str, Any]] = None,
+        time: float = 0.0,
+    ) -> Dict[str, Any]:
+        state_snapshot = self._snapshot_analysis_state()
+        context_snapshot = self._snapshot_analysis_context()
+        nv = dict(node_voltages or {})
+        try:
+            self._set_analysis_context(mode, frequency)
+            self.output_nodes = {}
+            self._output_nodes_version = 0
+            self.initial_step(nv, time)
+            self.evaluate(nv, time)
+            if self._transition_pending_count > 0:
+                self._flush_transitions(nv, time)
+            return dict(self.output_nodes)
+        finally:
+            self._restore_analysis_state(state_snapshot)
+            self._restore_analysis_context(context_snapshot)
+
+    def evaluate_ac(
+        self,
+        node_voltages: Optional[Dict[str, Any]] = None,
+        frequency: float = 1.0,
+        time: float = 0.0,
+    ) -> Dict[str, Any]:
+        return self._analysis_point("ac", frequency, node_voltages, time)
+
+    def evaluate_noise(
+        self,
+        node_voltages: Optional[Dict[str, Any]] = None,
+        frequency: float = 1.0,
+        time: float = 0.0,
+    ) -> Dict[str, Any]:
+        return self._analysis_point("noise", frequency, node_voltages, time)
+
+    def ac_sweep(
+        self,
+        frequencies,
+        node_voltages: Optional[Dict[str, Any]] = None,
+        time: float = 0.0,
+    ) -> Dict[str, List[Any]]:
+        sweep: Dict[str, List[Any]] = {}
+        for idx, frequency in enumerate(frequencies):
+            point = self.evaluate_ac(node_voltages, float(frequency), time)
+            for node, value in point.items():
+                if node not in sweep:
+                    sweep[node] = [0.0] * idx
+                sweep[node].append(value)
+            for node in set(sweep) - set(point):
+                sweep[node].append(0.0)
+        return sweep
+
+    def noise_spectrum(
+        self,
+        frequencies,
+        node_voltages: Optional[Dict[str, Any]] = None,
+        time: float = 0.0,
+    ) -> Dict[str, List[float]]:
+        sweep: Dict[str, List[float]] = {}
+        for idx, frequency in enumerate(frequencies):
+            point = self.evaluate_noise(node_voltages, float(frequency), time)
+            for node, value in point.items():
+                try:
+                    psd = max(0.0, float(value.real if isinstance(value, complex) else value))
+                except Exception:
+                    psd = 0.0
+                if node not in sweep:
+                    sweep[node] = [0.0] * idx
+                sweep[node].append(psd)
+            for node in set(sweep) - set(point):
+                sweep[node].append(0.0)
+        return sweep
+
+    def integrated_noise(
+        self,
+        node: str,
+        frequencies,
+        node_voltages: Optional[Dict[str, Any]] = None,
+        time: float = 0.0,
+    ) -> float:
+        freqs = [float(freq) for freq in frequencies]
+        if len(freqs) < 2:
+            return 0.0
+        spectra = self.noise_spectrum(freqs, node_voltages, time)
+        values = spectra.get(node, [])
+        if len(values) < 2:
+            return 0.0
+        area = 0.0
+        for f0, f1, y0, y1 in zip(freqs, freqs[1:], values, values[1:]):
+            if f1 <= f0:
+                continue
+            area += 0.5 * (float(y0) + float(y1)) * (f1 - f0)
+        return math.sqrt(max(0.0, area))
 
     def _set_rust_body_ir_backend(self, backend, *, production: bool = False):
         """Install the opt-in 094 body-IR production backend for this tree."""
@@ -3558,7 +3827,7 @@ class CompiledModel:
             self._indexed_voltage_probe(node, ext, 0.0, False)
         return 0.0
 
-    def _set_output(self, node: str, value: float, node_voltages: Dict[str, float]):
+    def _set_output(self, node: str, value: Any, node_voltages: Dict[str, Any]):
         """Set an output node voltage."""
         if not self.node_map:
             if node not in self.output_nodes:
@@ -3566,7 +3835,7 @@ class CompiledModel:
             self.output_nodes[node] = value
             node_voltages[node] = value
             self._event_trace_audit_note_write("output", node)
-            if self._indexed_output_writer is not None:
+            if self._analysis_mode == "tran" and self._indexed_output_writer is not None:
                 self._indexed_output_writer(node, value)
             return
 
@@ -3576,14 +3845,14 @@ class CompiledModel:
         ext = self._resolve_external_node(node)
         node_voltages[ext] = value
         self._event_trace_audit_note_write("output", ext)
-        if self._indexed_output_writer is not None:
+        if self._analysis_mode == "tran" and self._indexed_output_writer is not None:
             self._indexed_output_writer(ext, value)
 
     def _set_static_branch_output_by_slot(
         self,
         slot: int,
-        value: float,
-        node_voltages: Dict[str, float],
+        value: Any,
+        node_voltages: Dict[str, Any],
     ):
         """Write a static branch output by run-installed node id when available."""
         try:
@@ -3593,6 +3862,9 @@ class CompiledModel:
         if self._event_context_active:
             self._perf_stats["static_branch_fastpath_fallbacks"] += 1
             self._set_output(node, value, node_voltages)
+            return
+        if self._analysis_mode != "tran":
+            self._set_static_branch_output(node, value, node_voltages)
             return
 
         if node not in self.output_nodes:
@@ -3615,7 +3887,7 @@ class CompiledModel:
 
         self._set_static_branch_output(node, value, node_voltages)
 
-    def _set_static_branch_output(self, node: str, value: float, node_voltages: Dict[str, float]):
+    def _set_static_branch_output(self, node: str, value: Any, node_voltages: Dict[str, Any]):
         """Fast helper for compile-time-static branch voltage contributions."""
         if self._event_context_active:
             self._perf_stats["static_branch_fastpath_fallbacks"] += 1
@@ -3628,7 +3900,7 @@ class CompiledModel:
         ext = self._resolve_external_node(node)
         node_voltages[ext] = value
         self._event_trace_audit_note_write("output", ext)
-        if self._indexed_output_writer is not None:
+        if self._analysis_mode == "tran" and self._indexed_output_writer is not None:
             self._indexed_output_writer(ext, value)
 
     def _transition(self, key: str, time: float, target: float,
@@ -10797,11 +11069,19 @@ class _ModuleCompiler:
             "expected a variable or array element"
         )
 
-    def _compile_system_task(self, stmt: SystemTask, indent: int) -> List[str]:
+    def _compile_system_task(
+        self,
+        stmt: SystemTask,
+        indent: int,
+        *,
+        suppress_display_strobe: bool = False,
+    ) -> List[str]:
         prefix = '    ' * indent
         lines: List[str] = []
 
         if stmt.name in ('$strobe', '$display'):
+            if suppress_display_strobe:
+                return lines
             if stmt.args:
                 fmt_expr = self._compile_expr(stmt.args[0])
                 rest = ', '.join(self._compile_expr(a) for a in stmt.args[1:])
@@ -11064,7 +11344,13 @@ class _ModuleCompiler:
                     lines.extend(default_lines)
 
         elif isinstance(stmt, SystemTask):
-            lines.extend(self._compile_system_task(stmt, indent))
+            lines.extend(
+                self._compile_system_task(
+                    stmt,
+                    indent,
+                    suppress_display_strobe=True,
+                )
+            )
 
         elif isinstance(stmt, TaskCall):
             lines.extend(self._compile_task_call(stmt, indent))
@@ -14203,18 +14489,20 @@ class _ModuleCompiler:
             filename = args[1] if len(args) > 1 else "''"
             return f"self._table_model_1d({x_expr}, {filename})"
         if name == "analysis":
-            if expr.args and isinstance(expr.args[0], StringLiteral):
-                analysis_name = expr.args[0].value.strip().lower()
-                return "1.0" if analysis_name in {"tran", "transient"} else "0.0"
             analysis = args[0] if args else "''"
-            return (
-                f"(1.0 if str({analysis}).strip().lower() in "
-                "{'tran', 'transient'} else 0.0)"
-            )
+            return f"self._analysis({analysis})"
         if name == "ac_stim":
-            return "0.0"
-        if name in {"flicker_noise", "noise_table", "white_noise"}:
-            return "0.0"
+            joined = ", ".join(args)
+            return f"self._ac_stim({joined})" if joined else "self._ac_stim()"
+        if name == "white_noise":
+            joined = ", ".join(args)
+            return f"self._white_noise({joined})" if joined else "self._white_noise()"
+        if name == "flicker_noise":
+            joined = ", ".join(args)
+            return f"self._flicker_noise({joined})" if joined else "self._flicker_noise()"
+        if name == "noise_table":
+            joined = ", ".join(args)
+            return f"self._noise_table({joined})" if joined else "self._noise_table()"
 
         raise CompilationError(f"Unsupported Verilog-A function call: {name}()")
 
