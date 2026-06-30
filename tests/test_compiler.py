@@ -14,20 +14,37 @@ Parser tests (TestParser):
   - Event statements: @cross, @above, @initial_step, combined
   - Expressions: binary, unary, ternary, function calls, array, method
 """
-import math
 import pytest
 
-from evas.compiler.lexer import tokenize, TokenType, LexerError
-from evas.compiler.parser import parse, ParseError
 from evas.compiler.ast_nodes import (
-    Assignment, AnalogBlock, BinaryExpr, Block, BranchAccess,
-    CaseStatement, Contribution, CombinedEvent, Direction, EventExpr,
-    EventStatement, EventType, ForStatement, FunctionCall, Identifier,
-    IfStatement, MethodCall, Module, NumberLiteral, ParamType,
-    ParameterDecl, StringLiteral, SystemTask, TernaryExpr, UnaryExpr,
-    VariableDecl, ArrayAccess, WhileStatement,
+    ArrayAccess,
+    Assignment,
+    BinaryExpr,
+    Block,
+    BranchAccess,
+    CaseStatement,
+    CombinedEvent,
+    Contribution,
+    Direction,
+    EventExpr,
+    EventStatement,
+    EventType,
+    ForStatement,
+    FunctionCall,
+    Identifier,
+    IfStatement,
+    MethodCall,
+    Module,
+    NumberLiteral,
+    ParamType,
+    StringLiteral,
+    SystemTask,
+    TernaryExpr,
+    UnaryExpr,
+    WhileStatement,
 )
-
+from evas.compiler.lexer import TokenType, tokenize
+from evas.compiler.parser import ParseError, parse
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -446,6 +463,12 @@ class TestParserVariables:
         m = _parse("module m(); integer i; endmodule")
         v = next(v for v in m.variables if v.name == "i")
         assert v.var_type == ParamType.INTEGER
+
+    def test_string_variable(self):
+        m = _parse('module m(); string label = "idle"; endmodule')
+        v = next(v for v in m.variables if v.name == "label")
+        assert v.var_type == ParamType.STRING
+        assert isinstance(v.init_values[0], StringLiteral)
 
     def test_array_variable(self):
         m = _parse("module m(); integer arr[7:0]; endmodule")

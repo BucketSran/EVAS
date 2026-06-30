@@ -416,8 +416,11 @@ class Parser:
             self._parse_parameter_decl(module)
             return
 
-        # Variable declarations: real, integer, genvar
-        if tok.type in (TokenType.REAL, TokenType.INTEGER, TokenType.GENVAR):
+        # Variable declarations: real, integer, genvar, string
+        if (
+            tok.type in (TokenType.REAL, TokenType.INTEGER, TokenType.GENVAR)
+            or (tok.type == TokenType.IDENT and tok.value == "string")
+        ):
             self._parse_variable_decl(module)
             return
 
@@ -614,9 +617,14 @@ class Parser:
         ))
 
     def _parse_variable_decl(self, module: Module):
-        """Parse: real|integer|genvar name[range] [= init] [, name] ;"""
+        """Parse: real|integer|genvar|string name[range] [= init] [, name] ;"""
         type_tok = self.advance()
-        var_type = ParamType.REAL if type_tok.type == TokenType.REAL else ParamType.INTEGER
+        if type_tok.type == TokenType.REAL:
+            var_type = ParamType.REAL
+        elif type_tok.type == TokenType.IDENT and type_tok.value == "string":
+            var_type = ParamType.STRING
+        else:
+            var_type = ParamType.INTEGER
         is_genvar = type_tok.type == TokenType.GENVAR
 
         while True:

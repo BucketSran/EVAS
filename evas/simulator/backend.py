@@ -49,6 +49,23 @@ class CompilationError(Exception):
     pass
 
 
+_RANDOM_DISTRIBUTION_FUNCTIONS = frozenset(
+    {
+        "$dist_chi_square",
+        "$dist_erlang",
+        "$dist_exponential",
+        "$dist_poisson",
+        "$dist_t",
+        "$rdist_chi_square",
+        "$rdist_erlang",
+        "$rdist_exponential",
+        "$rdist_normal",
+        "$rdist_poisson",
+        "$rdist_t",
+    }
+)
+
+
 class CompiledModel:
     """Base class for compiled Verilog-A models."""
     _module_ast = None
@@ -4397,11 +4414,19 @@ class CompiledModel:
             values[flat_slot] = float(stored)
         self._perf_stats["indexed_state_array_writes"] += 1
 
-    def _strobe(self, time: float, fmt: str, *args):
+    @staticmethod
+    def _format_message(fmt: Any, *args: Any) -> str:
         try:
-            msg = (fmt % args) if args else fmt
+            fmt_s = str(fmt)
+            return (fmt_s % args) if args else fmt_s
         except Exception as e:
-            msg = f"{fmt}  [format error: {e}]"
+            return f"{fmt}  [format error: {e}]"
+
+    def _sformat(self, fmt: Any, *args: Any) -> str:
+        return self._format_message(fmt, *args)
+
+    def _strobe(self, time: float, fmt: str, *args):
+        msg = self._format_message(fmt, *args)
         self._strobe_log.append((time, msg))
 
     def _fopen(self, filename: str, mode: str = 'w') -> int:
@@ -4416,10 +4441,7 @@ class CompiledModel:
             del self._file_handles[fd]
 
     def _fstrobe(self, target: Any, fmt: str, *args):
-        try:
-            msg = (fmt % args) if args else fmt
-        except Exception as e:
-            msg = f"{fmt}  [format error: {e}]"
+        msg = self._format_message(fmt, *args)
 
         try:
             fd = int(target)
@@ -4479,6 +4501,20 @@ class CompiledModel:
         scale = 1.0 / float(1 << 53)
         return min(max(float(mantissa) * scale, 1.0e-12), 1.0 - 1.0e-12)
 
+    def _rdist_stream_key(self, seed: Optional[float], salt: int) -> int:
+        seed_value = 0.0 if seed is None else float(seed)
+        seed_bits = self._float_to_u64_bits(seed_value)
+        counters = getattr(self, "_rdist_draw_indices", None)
+        if counters is None:
+            counters = {}
+            self._rdist_draw_indices = counters
+        index = counters.get(seed_bits, 0)
+        counters[seed_bits] = index + 1
+        return seed_bits ^ self._rotl64(index, 17) ^ int(salt)
+
+    def _rdist_rng(self, seed: Optional[float], salt: int) -> random.Random:
+        return random.Random(self._rdist_stream_key(seed, salt))
+
     def _rand_normal(
         self,
         seed: Optional[float],
@@ -4492,20 +4528,56 @@ class CompiledModel:
         # matches the LRM's sequential-stream semantics. `time` is accepted
         # for call-site compatibility but no longer enters the hash.
         del time
-        seed_value = 0.0 if seed is None else float(seed)
-        seed_bits = self._float_to_u64_bits(seed_value)
-        counters = getattr(self, "_rdist_draw_indices", None)
-        if counters is None:
-            counters = {}
-            self._rdist_draw_indices = counters
-        index = counters.get(seed_bits, 0)
-        counters[seed_bits] = index + 1
-        stream = seed_bits ^ self._rotl64(index, 17) ^ 0xD1B54A32D192ED03
+        stream = self._rdist_stream_key(seed, 0xD1B54A32D192ED03)
         u1 = self._uniform01_from_u64(self._splitmix64(stream))
         u2 = self._uniform01_from_u64(self._splitmix64(stream ^ 0xA0761D6478BD642F))
         radius = math.sqrt(-2.0 * math.log(u1))
         angle = 2.0 * math.pi * u2
         return float(mean) + float(std) * radius * math.cos(angle)
+
+    def _rand_exponential(self, seed: Optional[float], mean: float) -> float:
+        mean_f = max(0.0, float(mean))
+        if mean_f == 0.0:
+            return 0.0
+        stream = self._rdist_stream_key(seed, 0x94D049BB133111EB)
+        u = self._uniform01_from_u64(self._splitmix64(stream))
+        return -mean_f * math.log(u)
+
+    def _rand_poisson(self, seed: Optional[float], mean: float) -> int:
+        lam = max(0.0, float(mean))
+        if lam == 0.0:
+            return 0
+        rng = self._rdist_rng(seed, 0xBF58476D1CE4E5B9)
+        if lam < 50.0:
+            limit = math.exp(-lam)
+            product = 1.0
+            count = 0
+            while product > limit:
+                count += 1
+                product *= max(rng.random(), 1.0e-12)
+            return max(0, count - 1)
+        return max(0, int(round(rng.gauss(lam, math.sqrt(lam)))))
+
+    def _rand_chi_square(self, seed: Optional[float], dof: float) -> float:
+        k = max(1.0e-12, float(dof))
+        return self._rdist_rng(seed, 0xD6E8FEB86659FD93).gammavariate(k / 2.0, 2.0)
+
+    def _rand_t(self, seed: Optional[float], dof: float) -> float:
+        k = max(1.0e-12, float(dof))
+        rng = self._rdist_rng(seed, 0xA0761D6478BD642F)
+        normal = rng.gauss(0.0, 1.0)
+        chi = rng.gammavariate(k / 2.0, 2.0)
+        return normal / math.sqrt(chi / k)
+
+    def _rand_erlang(self, seed: Optional[float], k: float, mean: float) -> float:
+        stages = max(1, int(round(float(k))))
+        mean_f = max(0.0, float(mean))
+        if mean_f == 0.0:
+            return 0.0
+        return self._rdist_rng(seed, 0xE7037ED1A0B428DB).gammavariate(
+            stages,
+            mean_f / stages,
+        )
 
     def _rand_uniform(self, seed: Optional[float], lo: float, hi: float) -> float:
         rng = self._seed_to_stream(seed)
@@ -4627,12 +4699,15 @@ class _ModuleCompiler:
         state_array_ranges = []
         for v in mod.variables:
             is_integer = self._is_integer_decl(v)
+            is_string = self._is_string_decl(v)
             if v.is_array:
                 hi = v.array_hi if v.array_hi is not None else 0
                 lo = v.array_lo if v.array_lo is not None else 0
-                state_array_ranges.append((v.name, min(hi, lo), max(hi, lo), is_integer))
+                if not is_string:
+                    state_array_ranges.append((v.name, min(hi, lo), max(hi, lo), is_integer))
             else:
-                state_scalar_names.append(v.name)
+                if not is_string:
+                    state_scalar_names.append(v.name)
                 if is_integer:
                     integer_state_names.append(v.name)
         self._state_array_range_by_name = {
@@ -4757,7 +4832,7 @@ class _ModuleCompiler:
                     or v.var_type in {"integer", "genvar"}
                 ):
                     init_val = CompiledModel._to_integer(init_val)
-                lines.append(f"        self.state[{v.name!r}] = {init_val}")
+                lines.append(f"        self.state[{v.name!r}] = {init_val!r}")
                 static_env[v.name] = init_val
 
         # Initialize array variables
@@ -10099,7 +10174,7 @@ class _ModuleCompiler:
         return any(call.name in names for call in self._iter_function_calls_in_expr(expr))
 
     def _transition_target_uses_random_state(self, expr: Expr) -> bool:
-        if self._expr_has_function_call(expr, {"$rdist_normal"}):
+        if self._expr_has_function_call(expr, _RANDOM_DISTRIBUTION_FUNCTIONS):
             return True
         return self._expr_references_nodes(expr, self._random_state_names())
 
@@ -10122,7 +10197,7 @@ class _ModuleCompiler:
                 name = stmt.target.name
                 value = stmt.value
                 if (
-                    self._expr_has_function_call(value, {"$rdist_normal"})
+                    self._expr_has_function_call(value, _RANDOM_DISTRIBUTION_FUNCTIONS)
                     or self._expr_references_nodes(value, random_names)
                 ) and name not in random_names:
                     random_names.add(name)
@@ -10227,6 +10302,67 @@ class _ModuleCompiler:
             return any(e.event_type == EventType.FINAL_STEP for e in event.events)
         return False
 
+    def _compile_system_task(self, stmt: SystemTask, indent: int) -> List[str]:
+        prefix = '    ' * indent
+        lines: List[str] = []
+
+        if stmt.name in ('$strobe', '$display'):
+            if stmt.args:
+                fmt_expr = self._compile_expr(stmt.args[0])
+                rest = ', '.join(self._compile_expr(a) for a in stmt.args[1:])
+                if rest:
+                    lines.append(f"{prefix}self._strobe(time, {fmt_expr}, {rest})")
+                else:
+                    lines.append(f"{prefix}self._strobe(time, {fmt_expr})")
+            else:
+                lines.append(f"{prefix}self._strobe(time, '')")
+            return lines
+
+        if stmt.name == '$bound_step' and stmt.args:
+            val = self._compile_expr(stmt.args[0])
+            lines.append(f"{prefix}self._bound_step = {val}")
+            return lines
+
+        if stmt.name == '$fclose' and stmt.args:
+            fd = self._compile_expr(stmt.args[0])
+            lines.append(f"{prefix}self._fclose(int({fd}))")
+            return lines
+
+        if stmt.name in ('$fstrobe', '$fwrite', '$fdisplay') and stmt.args:
+            fd = self._compile_expr(stmt.args[0])
+            if len(stmt.args) > 1:
+                fmt_expr = self._compile_expr(stmt.args[1])
+                rest = ', '.join(self._compile_expr(a) for a in stmt.args[2:])
+                if rest:
+                    lines.append(f"{prefix}self._fstrobe({fd}, {fmt_expr}, {rest})")
+                else:
+                    lines.append(f"{prefix}self._fstrobe({fd}, {fmt_expr})")
+            else:
+                lines.append(f"{prefix}self._fstrobe({fd}, '')")
+            return lines
+
+        if stmt.name in ('$sformat', '$swrite') and len(stmt.args) >= 2:
+            target = stmt.args[0]
+            fmt_expr = self._compile_expr(stmt.args[1])
+            rest = ', '.join(self._compile_expr(a) for a in stmt.args[2:])
+            if rest:
+                value = f"self._sformat({fmt_expr}, {rest})"
+            else:
+                value = f"self._sformat({fmt_expr})"
+            if isinstance(target, Identifier):
+                lines.append(f"{prefix}self._state_set({target.name!r}, {value})")
+                return lines
+            if isinstance(target, ArrayAccess):
+                idx = self._compile_expr(target.index)
+                lines.append(f"{prefix}self._array_set({target.name!r}, int({idx}), {value})")
+                return lines
+            raise CompilationError(
+                f"Module {self.module.name} has invalid {stmt.name} target; "
+                "expected a variable or array element"
+            )
+
+        return lines
+
     def _compile_statement(self, stmt, indent) -> List[str]:
         """Compile a statement to Python code lines."""
         prefix = '    ' * indent
@@ -10288,34 +10424,7 @@ class _ModuleCompiler:
             lines.extend(self._compile_case(stmt, indent))
 
         elif isinstance(stmt, SystemTask):
-            # $strobe, $display → collect output
-            if stmt.name in ('$strobe', '$display'):
-                if stmt.args:
-                    fmt_expr = self._compile_expr(stmt.args[0])
-                    rest = ', '.join(self._compile_expr(a) for a in stmt.args[1:])
-                    if rest:
-                        lines.append(f"{prefix}self._strobe(time, {fmt_expr}, {rest})")
-                    else:
-                        lines.append(f"{prefix}self._strobe(time, {fmt_expr})")
-                else:
-                    lines.append(f"{prefix}self._strobe(time, '')")
-            elif stmt.name == '$bound_step' and stmt.args:
-                val = self._compile_expr(stmt.args[0])
-                lines.append(f"{prefix}self._bound_step = {val}")
-            elif stmt.name == '$fclose' and stmt.args:
-                fd = self._compile_expr(stmt.args[0])
-                lines.append(f"{prefix}self._fclose(int({fd}))")
-            elif stmt.name in ('$fstrobe', '$fwrite', '$fdisplay') and stmt.args:
-                fd = self._compile_expr(stmt.args[0])
-                if len(stmt.args) > 1:
-                    fmt_expr = self._compile_expr(stmt.args[1])
-                    rest = ', '.join(self._compile_expr(a) for a in stmt.args[2:])
-                    if rest:
-                        lines.append(f"{prefix}self._fstrobe({fd}, {fmt_expr}, {rest})")
-                    else:
-                        lines.append(f"{prefix}self._fstrobe({fd}, {fmt_expr})")
-                else:
-                    lines.append(f"{prefix}self._fstrobe({fd}, '')")
+            lines.extend(self._compile_system_task(stmt, indent))
 
         return lines
 
@@ -10412,6 +10521,9 @@ class _ModuleCompiler:
                 else:
                     lines.append(f"{prefix}else:")
                     lines.extend(default_lines)
+
+        elif isinstance(stmt, SystemTask):
+            lines.extend(self._compile_system_task(stmt, indent))
 
         return lines
 
@@ -12331,6 +12443,19 @@ class _ModuleCompiler:
             or variable.var_type in {"integer", "genvar"}
         )
 
+    def _is_string_variable(self, name: str) -> bool:
+        for variable in self.module.variables:
+            if variable.name == name:
+                return self._is_string_decl(variable)
+        return False
+
+    def _is_string_decl(self, variable) -> bool:
+        return (
+            variable.var_type == ParamType.STRING
+            or getattr(variable.var_type, "name", "") == "STRING"
+            or variable.var_type == "string"
+        )
+
     def _compile_for(self, stmt: ForStatement, indent) -> List[str]:
         prefix = '    ' * indent
         lines = []
@@ -13163,6 +13288,48 @@ class _ModuleCompiler:
             else:
                 seed, mean, std = "None", "0.0", "1.0"
             return f"self._rand_normal({seed}, {mean}, {std}, time)"
+        if name in {'$rdist_exponential', '$dist_exponential'}:
+            if len(args) >= 2:
+                seed, mean = args[0], args[1]
+            elif len(args) == 1:
+                seed, mean = "None", args[0]
+            else:
+                seed, mean = "None", "1.0"
+            return f"self._rand_exponential({seed}, {mean})"
+        if name in {'$rdist_poisson', '$dist_poisson'}:
+            if len(args) >= 2:
+                seed, mean = args[0], args[1]
+            elif len(args) == 1:
+                seed, mean = "None", args[0]
+            else:
+                seed, mean = "None", "1.0"
+            return f"self._rand_poisson({seed}, {mean})"
+        if name in {'$rdist_chi_square', '$dist_chi_square'}:
+            if len(args) >= 2:
+                seed, dof = args[0], args[1]
+            elif len(args) == 1:
+                seed, dof = "None", args[0]
+            else:
+                seed, dof = "None", "1.0"
+            return f"self._rand_chi_square({seed}, {dof})"
+        if name in {'$rdist_t', '$dist_t'}:
+            if len(args) >= 2:
+                seed, dof = args[0], args[1]
+            elif len(args) == 1:
+                seed, dof = "None", args[0]
+            else:
+                seed, dof = "None", "1.0"
+            return f"self._rand_t({seed}, {dof})"
+        if name in {'$rdist_erlang', '$dist_erlang'}:
+            if len(args) >= 3:
+                seed, stages, mean = args[0], args[1], args[2]
+            elif len(args) == 2:
+                seed, stages, mean = "None", args[0], args[1]
+            elif len(args) == 1:
+                seed, stages, mean = "None", "1.0", args[0]
+            else:
+                seed, stages, mean = "None", "1.0", "1.0"
+            return f"self._rand_erlang({seed}, {stages}, {mean})"
         if name == '$random':
             seed = args[0] if len(args) > 0 else "None"
             return f"self._rand_int32({seed})"

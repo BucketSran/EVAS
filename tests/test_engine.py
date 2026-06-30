@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from evas.compiler.parser import parse
+from evas.simulator.backend import CompilationError, CompiledModel, compile_module
 from evas.simulator.engine import (
     AboveDetector,
     CrossDetector,
@@ -27,16 +29,11 @@ from evas.simulator.engine import (
     ramp,
     sine,
 )
-from evas.simulator.backend import CompiledModel
-from evas.simulator.backend import CompilationError
-from evas.simulator.backend import compile_module
 from evas.simulator.rust_coverage import (
     audit_veriloga_paths,
     estimate_event_transition_plan_profiles,
     estimate_event_transition_profiles,
 )
-from evas.compiler.parser import parse
-
 
 RUST_CORE = Path(__file__).resolve().parents[1] / "evas" / "rust_core"
 
@@ -5636,7 +5633,6 @@ endmodule
         assert calls == [("inp", "VIN", pytest.approx(0.7), False)]
 
     def test_transition_first_call_returns_target(self):
-        nv = {}
         val = self.model._transition("t0", time=0.0, target=1.0, rise=10e-9)
         assert val == pytest.approx(1.0)
 
@@ -5771,6 +5767,55 @@ endmodule
         seq_d = [m3._rand_normal(8, 0.0, 1.0, 0.0) for _ in range(3)]
         assert all(c != d for c, d in zip(seq_c, seq_d))
 
+    def test_extra_seeded_random_distributions_are_deterministic(self):
+        def draw(model):
+            return (
+                model._rand_exponential(17, 2.0),
+                model._rand_poisson(17, 4.0),
+                model._rand_chi_square(17, 3.0),
+                model._rand_t(17, 5.0),
+                model._rand_erlang(17, 3.0, 6.0),
+            )
+
+        first = draw(CompiledModel())
+        second = draw(CompiledModel())
+        third = draw(CompiledModel())
+
+        assert first == pytest.approx(second)
+        assert first == pytest.approx(third)
+        assert first[0] >= 0.0
+        assert isinstance(first[1], int)
+        assert first[1] >= 0
+        assert first[2] >= 0.0
+        assert first[4] >= 0.0
+
+    def test_compiled_extra_random_distribution_calls_are_deterministic(self):
+        src = """\
+`include "disciplines.vams"
+module extra_random_probe(out);
+    output voltage out;
+    analog begin
+        V(out) <+ $rdist_exponential(23, 2.0)
+                + $rdist_poisson(23, 4.0)
+                + $rdist_chi_square(23, 3.0)
+                + $rdist_t(23, 5.0)
+                + $rdist_erlang(23, 3.0, 6.0)
+                + $dist_poisson(24, 2.0);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        m1 = ModelCls()
+        m2 = ModelCls()
+        nv1 = {}
+        nv2 = {}
+
+        m1.evaluate(nv1, 0.0)
+        m2.evaluate(nv2, 5e-9)
+
+        assert math.isfinite(nv1["out"])
+        assert nv1["out"] == pytest.approx(nv2["out"])
+
     def test_unseeded_random_stream_is_deterministic_per_model(self):
         seq_a = [self.model._rand_uniform(None, -1.0, 1.0) for _ in range(3)]
         m2 = CompiledModel()
@@ -5819,6 +5864,34 @@ endmodule
         self.model._strobe(1e-9, "val=%d", 7)
         assert len(self.model._strobe_log) == 1
         assert "7" in self.model._strobe_log[0][1]
+
+    def test_compiled_sformat_and_swrite_update_string_state(self):
+        src = """\
+`include "disciplines.vams"
+module format_probe(out);
+    output voltage out;
+    string msg = "idle";
+    integer code;
+    analog begin
+        code = 7;
+        $sformat(msg, "code=%0d gain=%0.1f", code, 1.5);
+        $strobe("%s", msg);
+        $swrite(msg, "next-%0d", code + 1);
+        V(out) <+ code;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"].tolist() == pytest.approx([7.0, 7.0])
+        assert model.state["msg"] == "next-8"
+        assert model._strobe_log[0][1] == "code=7 gain=1.5"
 
     def test_next_breakpoint_no_active_transitions(self):
         assert self.model.next_breakpoint(0.0) is None
@@ -7456,7 +7529,7 @@ endmodule
 
         sim = Simulator()
         sim.add_model(model)
-        result = sim.run(tstop=10e-9, tstep=1e-9)
+        sim.run(tstop=10e-9, tstep=1e-9)
         # After simulation, final_step should have set flag=99
         assert model.state['flag'] == 99
 
@@ -7825,7 +7898,7 @@ endmodule
         sim.add_source("clk", pulse(v_lo=0.0, v_hi=1.0, period=20e-9,
                                      rise=0.1e-9, fall=0.1e-9, duty=0.5))
         sim.add_model(model)
-        result = sim.run(tstop=100e-9, tstep=1e-9)
+        sim.run(tstop=100e-9, tstep=1e-9)
 
         # File should exist and have lines
         assert outfile.exists()
