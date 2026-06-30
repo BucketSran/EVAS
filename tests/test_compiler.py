@@ -116,6 +116,18 @@ gone = 1;
         assert "gone = 1;" in out
         assert "USE_B" not in defines
 
+    def test_function_like_macro_expands_arguments(self):
+        src = """\
+`define CLIP(x, lo, hi) (((x) < (lo)) ? (lo) : (((x) > (hi)) ? (hi) : (x)))
+y = `CLIP(a + b, 0, max(v, 1));
+"""
+        out, defines, _default_transition = preprocess(src)
+
+        assert "CLIP" in defines
+        assert "`CLIP" not in out
+        assert "a + b" in out
+        assert "max(v, 1)" in out
+
     def test_inactive_missing_include_is_ignored(self):
         src = """\
 `ifdef NEVER_DEFINED

@@ -3,6 +3,7 @@ preprocessor.py — Handle `include, `define, `default_transition directives
 """
 import re
 from pathlib import Path
+from typing import Optional
 
 VAMS_INCLUDE_DIR = Path(__file__).resolve().parent.parent / 'vams'
 
@@ -129,6 +130,19 @@ def _preprocess_recursive(source, defines, include_dirs, included_files,
                 default_transition = sub_result[2]
             continue
 
+        # `define NAME(arg, ...) value
+        m = re.match(r'`define\s+(\w+)\(([^)]*)\)\s+(.*)', stripped)
+        if m:
+            name = m.group(1)
+            args = tuple(
+                arg.strip()
+                for arg in m.group(2).split(',')
+                if arg.strip()
+            )
+            value = m.group(3).strip()
+            defines[name] = {"args": args, "body": value}
+            continue
+
         # `define NAME value
         m = re.match(r'`define\s+(\w+)\s+(.*)', stripped)
         if m:
@@ -151,8 +165,10 @@ def _preprocess_recursive(source, defines, include_dirs, included_files,
 
         # Apply macro substitutions
         processed = line
+        processed = _expand_function_macros(processed, defines)
         for name, value in defines.items():
-            processed = processed.replace(f'`{name}', value)
+            if isinstance(value, str):
+                processed = processed.replace(f'`{name}', value)
 
         output_lines.append(processed)
 
@@ -160,6 +176,100 @@ def _preprocess_recursive(source, defines, include_dirs, included_files,
         raise PreprocessorError("unterminated conditional block: missing `endif")
 
     return '\n'.join(output_lines), defines, default_transition
+
+
+def _expand_function_macros(line: str, defines: dict) -> str:
+    processed = line
+    for name, spec in defines.items():
+        if not isinstance(spec, dict) or "args" not in spec:
+            continue
+        needle = f"`{name}("
+        search_from = 0
+        while True:
+            start = processed.find(needle, search_from)
+            if start < 0:
+                break
+            args_start = start + len(needle) - 1
+            args_end = _find_matching_paren(processed, args_start)
+            if args_end is None:
+                search_from = start + len(needle)
+                continue
+            raw_args = processed[args_start + 1:args_end]
+            actuals = _split_macro_args(raw_args)
+            replacement = _substitute_function_macro(spec, actuals)
+            processed = processed[:start] + replacement + processed[args_end + 1:]
+            search_from = start + len(replacement)
+    return processed
+
+
+def _find_matching_paren(text: str, open_idx: int) -> Optional[int]:
+    depth = 0
+    in_string = False
+    escaped = False
+    for idx in range(open_idx, len(text)):
+        ch = text[idx]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0:
+                return idx
+    return None
+
+
+def _split_macro_args(raw: str) -> list[str]:
+    args = []
+    start = 0
+    depth = 0
+    in_string = False
+    escaped = False
+    for idx, ch in enumerate(raw):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch in "({[":
+            depth += 1
+        elif ch in ")}]":
+            depth = max(0, depth - 1)
+        elif ch == ',' and depth == 0:
+            args.append(raw[start:idx].strip())
+            start = idx + 1
+    tail = raw[start:].strip()
+    if tail or raw:
+        args.append(tail)
+    return args
+
+
+def _substitute_function_macro(spec: dict, actuals: list[str]) -> str:
+    formals = tuple(spec.get("args", ()))
+    body = str(spec.get("body", ""))
+    mapping = {
+        formal: actuals[idx] if idx < len(actuals) else ""
+        for idx, formal in enumerate(formals)
+    }
+    result = body
+    for formal, actual in mapping.items():
+        result = re.sub(rf'\b{re.escape(formal)}\b', actual, result)
+    return result
 
 
 def _resolve_include(filename, include_dirs, included_files):
