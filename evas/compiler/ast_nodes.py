@@ -24,6 +24,8 @@ class EventType(Enum):
     INITIAL_STEP = auto()
     TIMER = auto()
     FINAL_STEP = auto()
+    POSEDGE = auto()
+    NEGEDGE = auto()
 
 
 class BinOp(Enum):
@@ -310,6 +312,8 @@ class Module:
     tasks: List[TaskDecl] = field(default_factory=list)
     analog_block: Optional[AnalogBlock] = None
     instances: List[ModuleInstance] = field(default_factory=list)
+    continuous_assigns: List[Assignment] = field(default_factory=list)
+    always_blocks: List[EventStatement] = field(default_factory=list)
     default_transition: Optional[float] = None
     defines: dict = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)

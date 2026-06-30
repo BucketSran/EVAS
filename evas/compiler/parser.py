@@ -72,7 +72,6 @@ _UNSUPPORTED_DIGITAL_PROCEDURAL_BLOCKS = {
     # Digital Verilog procedural blocks are outside the supported Verilog-A
     # subset and Spectre rejects them in AHDL compilation.
     'initial',
-    'always',
 }
 
 
@@ -312,7 +311,13 @@ class Parser:
 
             # Skip discipline
             discipline = 'electrical'
-            if self.at(TokenType.ELECTRICAL, TokenType.VOLTAGE, TokenType.CURRENT):
+            if self.at(
+                TokenType.ELECTRICAL,
+                TokenType.VOLTAGE,
+                TokenType.CURRENT,
+                TokenType.LOGIC,
+                TokenType.WREAL,
+            ):
                 discipline = self.advance().value
 
             # Check for array
@@ -407,8 +412,24 @@ class Parser:
             return
 
         # Discipline declarations: electrical, voltage, current
-        if tok.type in (TokenType.ELECTRICAL, TokenType.VOLTAGE, TokenType.CURRENT):
+        if tok.type in (
+            TokenType.ELECTRICAL,
+            TokenType.VOLTAGE,
+            TokenType.CURRENT,
+            TokenType.LOGIC,
+            TokenType.WREAL,
+        ):
             self._parse_discipline_decl(module)
+            return
+
+        # Continuous assign
+        if tok.type == TokenType.ASSIGN_KW:
+            module.continuous_assigns.append(self._parse_continuous_assign())
+            return
+
+        # Digital always block
+        if tok.type == TokenType.ALWAYS:
+            module.always_blocks.append(self._parse_always_block())
             return
 
         # Parameter declarations
@@ -509,6 +530,16 @@ class Parser:
             parameter_overrides=parameter_overrides,
         )
 
+    def _parse_continuous_assign(self) -> Assignment:
+        self.expect(TokenType.ASSIGN_KW)
+        stmt = self._parse_simple_assignment()
+        self.match(TokenType.SEMI)
+        return stmt
+
+    def _parse_always_block(self) -> EventStatement:
+        self.expect(TokenType.ALWAYS)
+        return self._parse_event_statement()
+
     def _parse_port_direction_decl(self, module: Module):
         """Parse: input/output/inout [discipline] [range] name [, name] ;"""
         direction_tok = self.advance()
@@ -528,7 +559,13 @@ class Parser:
 
         # Parse port names
         while True:
-            if self.at(TokenType.ELECTRICAL, TokenType.VOLTAGE, TokenType.CURRENT):
+            if self.at(
+                TokenType.ELECTRICAL,
+                TokenType.VOLTAGE,
+                TokenType.CURRENT,
+                TokenType.LOGIC,
+                TokenType.WREAL,
+            ):
                 discipline = self.advance().value
                 # Check again for range after discipline
                 if self.at(TokenType.LBRACKET) and array_hi is None:
@@ -870,6 +907,7 @@ class Parser:
         if tok.type in (
             TokenType.REAL, TokenType.INTEGER, TokenType.GENVAR,
             TokenType.ELECTRICAL, TokenType.VOLTAGE, TokenType.CURRENT,
+            TokenType.LOGIC, TokenType.WREAL,
             TokenType.PARAMETER, TokenType.INPUT, TokenType.OUTPUT,
             TokenType.INOUT,
         ):
@@ -946,6 +984,16 @@ class Parser:
         - final_step
         """
         tok = self.peek()
+
+        if tok.type in (TokenType.POSEDGE, TokenType.NEGEDGE):
+            edge_tok = self.advance()
+            signal = self._parse_expression()
+            event_type = (
+                EventType.POSEDGE
+                if edge_tok.type == TokenType.POSEDGE
+                else EventType.NEGEDGE
+            )
+            return EventExpr(event_type, [signal])
 
         if tok.type == TokenType.IDENT:
             if tok.value == 'cross':

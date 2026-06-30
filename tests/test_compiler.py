@@ -642,6 +642,41 @@ class TestParserSubprograms:
         assert call.name == "update"
 
 
+class TestParserVerilogAMS:
+
+    def test_ansi_logic_wreal_ports_and_assign(self):
+        src = """
+        module wreal_gain(input wreal a, output wreal y);
+            assign y = 0.75 * a;
+        endmodule
+        """
+        m = _parse(src)
+
+        assert [p.discipline for p in m.port_decls] == ["wreal", "wreal"]
+        assert len(m.continuous_assigns) == 1
+        assert isinstance(m.continuous_assigns[0], Assignment)
+
+    def test_always_posedge_block(self):
+        src = """
+        module dff(input logic clk, input logic rst, input logic d, output logic q);
+            always @(posedge clk or posedge rst) begin
+                if (rst) q = 1'b0;
+                else q = d;
+            end
+        endmodule
+        """
+        m = _parse(src)
+
+        assert [p.discipline for p in m.port_decls] == ["logic", "logic", "logic", "logic"]
+        assert len(m.always_blocks) == 1
+        event = m.always_blocks[0].event
+        assert isinstance(event, CombinedEvent)
+        assert [child.event_type for child in event.events] == [
+            EventType.POSEDGE,
+            EventType.POSEDGE,
+        ]
+
+
 class TestParserContributions:
 
     def test_single_node_contribution(self):

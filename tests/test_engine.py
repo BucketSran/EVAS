@@ -8736,3 +8736,66 @@ endmodule
         result = sim.run(tstop=1e-9, tstep=1e-9)
 
         assert result.signals["out/net"].tolist() == pytest.approx([0.75, 0.75])
+
+
+class TestVerilogAMSBehavior:
+
+    def test_wreal_continuous_assign_drives_output(self):
+        src = """\
+module wreal_gain(input wreal a, output wreal y);
+    assign y = 0.75 * a;
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.add_source("a", dc(2.0))
+        sim.record("y")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["y"].tolist() == pytest.approx([1.5, 1.5])
+
+    def test_logic_input_controls_mixed_analog_bridge(self):
+        src = """\
+`include "disciplines.vams"
+module mixed_bridge(input voltage vin, input logic en, output voltage vout);
+    analog begin
+        V(vout) <+ en ? V(vin) : 0.0;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.add_source("vin", dc(0.8))
+        sim.add_source("en", dc(1.0))
+        sim.record("vout")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["vout"].tolist() == pytest.approx([0.8, 0.8])
+
+    def test_always_posedge_updates_logic_output(self):
+        src = """\
+module dff(input logic clk, input logic rst, input logic d, output logic q);
+    always @(posedge clk or posedge rst) begin
+        if (rst) q = 1'b0;
+        else q = d;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+        nv = {"clk": 0.0, "rst": 0.0, "d": 1.0}
+
+        model.evaluate(nv, 0.0)
+        assert model.output_nodes.get("q", 0.0) == pytest.approx(0.0)
+
+        nv["clk"] = 1.0
+        model.evaluate(nv, 1e-9)
+
+        assert model.state["q"] == 1
+        assert model.output_nodes["q"] == pytest.approx(1.0)

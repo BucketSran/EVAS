@@ -20,9 +20,15 @@ class TokenType(Enum):
     ELECTRICAL = auto()
     VOLTAGE = auto()
     CURRENT = auto()
+    LOGIC = auto()
+    WREAL = auto()
     INPUT = auto()
     OUTPUT = auto()
     INOUT = auto()
+    ASSIGN_KW = auto()
+    ALWAYS = auto()
+    POSEDGE = auto()
+    NEGEDGE = auto()
     IF = auto()
     ELSE = auto()
     FOR = auto()
@@ -102,9 +108,15 @@ KEYWORDS = {
     'electrical': TokenType.ELECTRICAL,
     'voltage': TokenType.VOLTAGE,
     'current': TokenType.CURRENT,
+    'logic': TokenType.LOGIC,
+    'wreal': TokenType.WREAL,
     'input': TokenType.INPUT,
     'output': TokenType.OUTPUT,
     'inout': TokenType.INOUT,
+    'assign': TokenType.ASSIGN_KW,
+    'always': TokenType.ALWAYS,
+    'posedge': TokenType.POSEDGE,
+    'negedge': TokenType.NEGEDGE,
     'if': TokenType.IF,
     'else': TokenType.ELSE,
     'for': TokenType.FOR,

@@ -143,6 +143,7 @@ class CompiledModel:
         self.slew_states: Dict[str, Dict[str, float]] = {}
         self.cross_detectors: Dict[str, CrossDetector] = {}
         self.above_detectors: Dict[str, AboveDetector] = {}
+        self.digital_edge_states: Dict[str, int] = {}
         self.output_nodes: Dict[str, float] = {}
         self._output_nodes_version: int = 0
         self.node_map: Dict[str, str] = {}  # port_name -> external_node
@@ -4727,6 +4728,18 @@ class CompiledModel:
         rng = self._seed_to_stream(seed)
         return rng.randint(-2147483648, 2147483647)
 
+    def _check_digital_edge(self, key: str, value: Any, edge: str) -> bool:
+        current = 1 if float(value) != 0.0 else 0
+        previous = self.digital_edge_states.get(key)
+        self.digital_edge_states[key] = current
+        if previous is None:
+            return False
+        if edge == "posedge":
+            return previous == 0 and current == 1
+        if edge == "negedge":
+            return previous == 1 and current == 0
+        return False
+
     @staticmethod
     def _bit_select(value: Any, index: Any) -> int:
         idx = max(0, int(index))
@@ -4842,6 +4855,7 @@ class _ModuleCompiler:
         self._state_local_fastpath_names: set[str] = set()
         self._param_types = {p.name: p.param_type for p in module.parameters}
         self._var_types = {v.name: v.var_type for v in module.variables}
+        self._port_disciplines = {p.name: p.discipline for p in module.port_decls}
         self._evaluate_ir_static_param_values: Dict[str, Any] = {}
         self._evaluate_ir_static_loop_values: Dict[str, int] = {}
         self._event_lfsr_shift_ir_ops: Dict[str, tuple] = {}
@@ -4904,6 +4918,13 @@ class _ModuleCompiler:
                     state_scalar_names.append(v.name)
                 if is_integer:
                     integer_state_names.append(v.name)
+        for p in mod.port_decls:
+            if p.discipline not in {"logic", "wreal"}:
+                continue
+            if p.name not in state_scalar_names:
+                state_scalar_names.append(p.name)
+            if p.discipline == "logic" and p.name not in integer_state_names:
+                integer_state_names.append(p.name)
         self._state_array_range_by_name = {
             name: (lo, hi, is_integer)
             for name, lo, hi, is_integer in state_array_ranges
@@ -5029,6 +5050,13 @@ class _ModuleCompiler:
                 lines.append(f"        self.state[{v.name!r}] = {init_val!r}")
                 static_env[v.name] = init_val
 
+        for p in mod.port_decls:
+            if p.discipline not in {"logic", "wreal"} or p.name in static_env:
+                continue
+            init_val = 0 if p.discipline == "logic" else 0.0
+            lines.append(f"        self.state[{p.name!r}] = {init_val!r}")
+            static_env[p.name] = init_val
+
         # Initialize array variables
         for name, (hi, lo, init_vals) in array_vars.items():
             lines.append(f"        self.arrays[{name!r}] = {{}}")
@@ -5090,6 +5118,8 @@ class _ModuleCompiler:
             for stmt in mod.analog_block.body.statements:
                 stmt_lines = self._compile_initial_step_statement(stmt, 2)
                 lines.extend(stmt_lines)
+        for stmt in mod.continuous_assigns:
+            lines.extend(self._compile_assignment(stmt, 2))
         # Audit 088 fix: initial_step may emit transition_output_lazy via
         # _compile_contribution. Flush so pending state is not orphaned.
         lines.append("        if self._transition_pending_count > 0:")
@@ -5164,6 +5194,10 @@ class _ModuleCompiler:
 
         if mod.analog_block:
             lines.extend(self._compile_statement(mod.analog_block.body, 2))
+        for stmt in mod.continuous_assigns:
+            lines.extend(self._compile_assignment(stmt, 2))
+        for stmt in mod.always_blocks:
+            lines.extend(self._compile_statement(stmt, 2))
 
         # Audit 088: flush any deferred transition contributions for this
         # model before declaring evaluate() done. Safe even if the analyzer
@@ -5222,6 +5256,8 @@ class _ModuleCompiler:
             for stmt in mod.analog_block.body.statements:
                 stmt_lines = self._compile_refresh_statement(stmt, 2)
                 lines.extend(stmt_lines)
+        for stmt in mod.continuous_assigns:
+            lines.extend(self._compile_assignment(stmt, 2))
         # Audit 088 fix: same as post_update_events — flush at end.
         lines.append("        if self._transition_pending_count > 0:")
         lines.append("            self._flush_transitions(nv, time)")
@@ -11799,6 +11835,9 @@ class _ModuleCompiler:
                 # Skip in evaluate — handled in final_step method
                 return []
 
+            elif event.event_type in (EventType.POSEDGE, EventType.NEGEDGE):
+                return self._compile_digital_event_statement(stmt, indent)
+
             elif event.event_type == EventType.CROSS:
                 if self._event_requires_post_update(event):
                     return []
@@ -11950,6 +11989,8 @@ class _ModuleCompiler:
                         continue
                     key = self._alloc_event_key("above", e)
                     conditions.append(self._compile_above_call(e, key))
+                elif e.event_type in (EventType.POSEDGE, EventType.NEGEDGE):
+                    conditions.append(self._compile_digital_event_condition(e))
                 elif e.event_type == EventType.TIMER:
                     key = self._alloc_event_key("timer", e)
                     if len(e.args) == 2:
@@ -11987,6 +12028,33 @@ class _ModuleCompiler:
                 lines.append(f"{prefix}    self._event_time = time")
 
         return lines
+
+    def _compile_digital_event_statement(self, stmt: EventStatement, indent: int) -> List[str]:
+        prefix = "    " * indent
+        event = stmt.event
+        if isinstance(event, CombinedEvent):
+            conditions = [
+                self._compile_digital_event_condition(e)
+                for e in event.events
+                if e.event_type in (EventType.POSEDGE, EventType.NEGEDGE)
+            ]
+            cond = " or ".join(conditions) if conditions else "False"
+        elif isinstance(event, EventExpr):
+            cond = self._compile_digital_event_condition(event)
+        else:
+            cond = "False"
+        lines = [f"{prefix}if {cond}:"]
+        body_lines = self._compile_statement(stmt.body, indent + 1)
+        lines.extend(body_lines or [f"{prefix}    pass"])
+        return lines
+
+    def _compile_digital_event_condition(self, event: EventExpr) -> str:
+        if not event.args:
+            return "False"
+        value = self._compile_expr(event.args[0])
+        edge = "posedge" if event.event_type == EventType.POSEDGE else "negedge"
+        key = f"digital_{edge}_{id(event)}"
+        return f"self._check_digital_edge({key!r}, {value}, {edge!r})"
 
     def _record_timer_static_linear_segment_ir(
         self,
@@ -12783,6 +12851,13 @@ class _ModuleCompiler:
                 if self._is_integer_name(name):
                     val = f"self._to_integer({val})"
                 return [f"{prefix}{self._local_name_by_var[name]} = {val}"]
+            if self._is_logic_or_wreal_port(name):
+                if self._port_disciplines.get(name) == "logic":
+                    val = f"self._to_integer({val})"
+                return [
+                    f"{prefix}self._state_set({name!r}, {val})",
+                    f"{prefix}self._set_output({name!r}, {val}, nv)",
+                ]
             if self._is_integer_variable(name):
                 val = f"self._to_integer({val})"
             if name == self._in_loop_var:
@@ -12996,6 +13071,8 @@ class _ModuleCompiler:
         for variable in self.module.variables:
             if variable.name == name:
                 return self._is_integer_decl(variable)
+        if self._port_disciplines.get(name) == "logic":
+            return True
         return False
 
     def _is_integer_name(self, name: str) -> bool:
@@ -13003,7 +13080,18 @@ class _ModuleCompiler:
             return self._local_types[name] == ParamType.INTEGER
         if name in self._param_types:
             return self._param_types[name] == ParamType.INTEGER
+        if self._port_disciplines.get(name) == "logic":
+            return True
         return self._is_integer_variable(name)
+
+    def _is_logic_or_wreal_port(self, name: str) -> bool:
+        return self._port_disciplines.get(name) in {"logic", "wreal"}
+
+    def _port_direction(self, name: str) -> Optional[Direction]:
+        for port in self.module.port_decls:
+            if port.name == name:
+                return port.direction
+        return None
 
     def _is_integer_decl(self, variable) -> bool:
         return (
@@ -13733,6 +13821,11 @@ class _ModuleCompiler:
                         slot = self._state_scalar_slot_by_name[name]
                         return f"self._state_get_by_slot({slot}, {name!r})"
                     return f"self.state[{name!r}]"
+            if self._is_logic_or_wreal_port(name):
+                direction = self._port_direction(name)
+                if direction in {Direction.INPUT, Direction.INOUT}:
+                    return self._compile_node_voltage(name)
+                return f"self.state.get({name!r}, 0.0)"
             # Check if it's a special constant
             if name == 'inf':
                 return "float('inf')"
@@ -13863,6 +13956,8 @@ class _ModuleCompiler:
             if self._param_types.get(expr.name) == ParamType.INTEGER:
                 return True, True
             if self._var_types.get(expr.name) == ParamType.INTEGER:
+                return True, True
+            if self._port_disciplines.get(expr.name) == "logic":
                 return True, True
             return False, False
 
