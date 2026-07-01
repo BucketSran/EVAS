@@ -7823,6 +7823,58 @@ endmodule
         expected_vt = 1.380649e-23 * 300.15 / 1.602176634e-19
         assert result.signals["out"][-1] == pytest.approx(expected_vt, rel=1e-4)
 
+    def test_environment_function_call_forms(self):
+        src = """\
+`include "disciplines.vams"
+module env_call_test(out);
+    output voltage out;
+    real value;
+    analog begin
+        value = $temperature() + ($vt(300.15) / $vt())
+              + $simparam("temp") + $simparam("missing", 2.5)
+              + $abstime() + $realtime();
+        V(out) <+ value;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"][-1] == pytest.approx(330.65 + 2e-9)
+
+    def test_environment_functions_in_module_scope_initializers(self):
+        src = """\
+`include "disciplines.vams"
+module env_init_test(out);
+    output voltage out;
+    real vt_explicit = $vt(300.15);
+    real temp_kelvin = $temperature();
+    real fallback = $simparam("missing", 4.25);
+    analog begin
+        V(out) <+ temp_kelvin + fallback + (vt_explicit / $vt());
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        expected_vt = 1.380649e-23 * 300.15 / 1.602176634e-19
+        assert model.state["vt_explicit"] == pytest.approx(expected_vt)
+        assert model.state["temp_kelvin"] == pytest.approx(300.15)
+        assert model.state["fallback"] == pytest.approx(4.25)
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"][-1] == pytest.approx(305.4)
+
 
 class TestCaseStatement:
     """Test case/endcase via compiled VA modules."""
@@ -8816,6 +8868,31 @@ endmodule
         result = sim.run(tstop=1e-9, tstep=1e-10)
 
         assert result.signals["out"][0] == pytest.approx(0.5, abs=1e-12)
+
+    def test_analog_initial_block_runs_as_initial_step(self):
+        src = """\
+`include "disciplines.vams"
+module analog_initial_runtime(out);
+    output voltage out;
+    real x;
+    analog initial begin
+        x = 0.75;
+    end
+    analog begin
+        V(out) <+ x;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert model.state["x"] == pytest.approx(0.75)
+        assert result.signals["out"].tolist() == pytest.approx([0.75, 0.75])
 
 
 class TestSlewOperator:

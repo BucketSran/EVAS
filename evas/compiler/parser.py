@@ -463,11 +463,8 @@ class Parser:
         # Analog block
         if tok.type == TokenType.ANALOG:
             self.advance()
-            block = self._parse_block_or_statement()
-            if isinstance(block, Block):
-                module.analog_block = AnalogBlock(body=block)
-            else:
-                module.analog_block = AnalogBlock(body=Block(statements=[block]))
+            block = self._parse_analog_block_or_statement()
+            self._append_analog_block(module, block)
             return
 
         # Hierarchical module instance:
@@ -880,6 +877,25 @@ class Parser:
         return TaskDecl(name=name, args=args, variables=variables, body=Block(statements=statements))
 
     # ─── Statements ───
+
+    def _parse_analog_block_or_statement(self) -> Statement:
+        """Parse an analog item, including Spectre's ``analog initial`` form."""
+        tok = self.peek()
+        if tok.type == TokenType.IDENT and tok.value == "initial":
+            self.advance()
+            body = self._parse_block_or_statement()
+            return EventStatement(event=EventExpr(EventType.INITIAL_STEP), body=body)
+        return self._parse_block_or_statement()
+
+    def _append_analog_block(self, module: Module, stmt: Statement) -> None:
+        if isinstance(stmt, Block):
+            block = stmt
+        else:
+            block = Block(statements=[stmt])
+        if module.analog_block is None:
+            module.analog_block = AnalogBlock(body=block)
+            return
+        module.analog_block.body.statements.extend(block.statements)
 
     def _parse_block_or_statement(self) -> Statement:
         """Parse a begin/end block or a single statement."""

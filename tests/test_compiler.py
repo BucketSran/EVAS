@@ -874,6 +874,27 @@ class TestParserEventStatements:
         assert isinstance(stmt.event, EventExpr)
         assert stmt.event.event_type == EventType.INITIAL_STEP
 
+    def test_analog_initial_block_lowers_to_initial_step(self):
+        src = """
+        module m(out);
+        electrical out;
+        real x;
+        analog initial begin
+            x = 0;
+        end
+        analog begin
+            V(out) <+ x;
+        end
+        endmodule
+        """
+        m = _parse(src)
+        stmts = m.analog_block.body.statements
+        assert len(stmts) == 2
+        assert isinstance(stmts[0], EventStatement)
+        assert isinstance(stmts[0].event, EventExpr)
+        assert stmts[0].event.event_type == EventType.INITIAL_STEP
+        assert isinstance(stmts[1], Contribution)
+
     def test_bare_initial_step_block_is_rejected(self):
         src = """
         module m(out);

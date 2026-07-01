@@ -517,6 +517,20 @@ class CompiledModel:
         active = aliases.get(mode, {mode})
         return requested in active
 
+    def _simparam(self, name: Any, default: Any = 0.0) -> Any:
+        key = str(name).strip().lower()
+        values = {
+            "temp": self._temperature,
+            "temperature": self._temperature,
+            "tnom": 27.0,
+            "gmin": 1e-12,
+            "reltol": 1e-3,
+            "abstol": 1e-12,
+            "iabstol": 1e-12,
+            "vabstol": 1e-6,
+        }
+        return values.get(key, default)
+
     def _ac_stim(self, *args: Any) -> Any:
         if self._analysis_mode != "ac":
             return 0.0
@@ -14163,6 +14177,17 @@ class _ModuleCompiler:
         if name.startswith("$") and name[1:] in math_aliases:
             name = name[1:]
         args = [self._compile_transition_probe_expr(a) for a in expr.args]
+        if name in ("$abstime", "$realtime"):
+            return "_probe_time"
+        if name == "$temperature":
+            return "(self._temperature + 273.15)"
+        if name == "$vt":
+            temp = args[0] if args else "(self._temperature + 273.15)"
+            return f"(1.380649e-23 * ({temp}) / 1.602176634e-19)"
+        if name == "$simparam":
+            simparam_name = args[0] if args else "''"
+            default = args[1] if len(args) > 1 else "0.0"
+            return f"self._simparam({simparam_name}, {default})"
         if name == "ln":
             return f"math.log({args[0]})"
         if name == "log":
@@ -14512,6 +14537,18 @@ class _ModuleCompiler:
             name = name[1:]
         args = [self._compile_expr(a) for a in expr.args]
 
+        if name in ('$abstime', '$realtime'):
+            return "self._event_time"
+        if name == '$temperature':
+            return "(self._temperature + 273.15)"
+        if name == '$vt':
+            temp = args[0] if args else "(self._temperature + 273.15)"
+            return f"(1.380649e-23 * ({temp}) / 1.602176634e-19)"
+        if name == '$simparam':
+            simparam_name = args[0] if args else "''"
+            default = args[1] if len(args) > 1 else "0.0"
+            return f"self._simparam({simparam_name}, {default})"
+
         if name in self._user_function_by_name:
             method = f"_user_fn_{self._safe_python_suffix(name)}"
             joined = ", ".join(args)
@@ -14835,6 +14872,12 @@ class _ModuleCompiler:
         if isinstance(expr, Identifier):
             if expr.name == 'inf':
                 return float('inf')
+            if expr.name in ('$abstime', '$realtime'):
+                return 0.0
+            if expr.name == '$temperature':
+                return 300.15
+            if expr.name == '$vt':
+                return 1.380649e-23 * 300.15 / 1.602176634e-19
             if expr.name in env:
                 return env[expr.name]
             return 0
@@ -14871,6 +14914,27 @@ class _ModuleCompiler:
         if isinstance(expr, FunctionCall):
             args = [self._eval_expr_static(arg, env) for arg in expr.args]
             name = expr.name[1:] if expr.name.startswith('$') else expr.name
+            if expr.name in ('$abstime', '$realtime'):
+                return 0.0
+            if expr.name == '$temperature':
+                return 300.15
+            if expr.name == '$vt':
+                temp = args[0] if args else 300.15
+                return 1.380649e-23 * temp / 1.602176634e-19
+            if expr.name == '$simparam':
+                key = str(args[0]).strip().lower() if args else ""
+                default = args[1] if len(args) > 1 else 0.0
+                values = {
+                    "temp": 27.0,
+                    "temperature": 27.0,
+                    "tnom": 27.0,
+                    "gmin": 1e-12,
+                    "reltol": 1e-3,
+                    "abstol": 1e-12,
+                    "iabstol": 1e-12,
+                    "vabstol": 1e-6,
+                }
+                return values.get(key, default)
             funcs = {
                 'abs': abs,
                 'sqrt': math.sqrt,
