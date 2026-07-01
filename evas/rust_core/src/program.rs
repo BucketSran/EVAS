@@ -594,8 +594,8 @@ pub(crate) struct RustSimCrossCandidate {
     pub(crate) event_idx: usize,
     pub(crate) event_time: f64,
     pub(crate) trigger_time: f64,
+    pub(crate) trigger_direction: i32,
 }
-
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rust_sim_collect_cross_events_into(
@@ -694,6 +694,7 @@ pub(crate) fn rust_sim_collect_cross_events_into(
                     cross_times[0]
                 },
                 trigger_time: cross_times[0],
+                trigger_direction: trigger_dirs[0],
             });
         }
     }
@@ -704,6 +705,118 @@ pub(crate) fn rust_sim_collect_cross_events_into(
             .then_with(|| left.event_idx.cmp(&right.event_idx))
     });
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rust_sim_execute_cross_event_body(
+    sources: &[EvasRustSimSourceSpec],
+    events: &[EvasRustSimEventSpec],
+    candidate: &RustSimCrossCandidate,
+    same_step_candidates: &[RustSimCrossCandidate],
+    body_stmt_ops: &[EvasRustBodyStmtOp],
+    body_expr_ops: &[EvasRustBodyExprOp],
+    node_values: &mut [f64],
+    state_values: &mut [f64],
+    param_values: &[f64],
+    time: f64,
+    bound_step_limit: &mut f64,
+    side_effect_log: Option<&mut RustSideEffectLog<'_>>,
+) -> Result<(), i32> {
+    if candidate.event_idx >= events.len() {
+        return Err(-972);
+    }
+    let event = &events[candidate.event_idx];
+    let mut restored_nodes: Vec<(usize, f64)> = Vec::new();
+    if event.phase == RUST_SIM_EVENT_PHASE_PRE && event.kind == RUST_SIM_EVENT_CROSS {
+        let eps = 1.0e-18;
+        for related in same_step_candidates {
+            if related.event_idx >= events.len()
+                || related.trigger_direction == 0
+                || (related.event_time - candidate.event_time).abs() > eps
+            {
+                continue;
+            }
+            let related_event = &events[related.event_idx];
+            if related_event.phase != RUST_SIM_EVENT_PHASE_PRE
+                || related_event.kind != RUST_SIM_EVENT_CROSS
+                || related_event.body_stmt_start != event.body_stmt_start
+                || related_event.body_stmt_count != event.body_stmt_count
+                || related_event.expr_count == 0
+            {
+                continue;
+            }
+            let expr_end = related_event
+                .expr_start
+                .checked_add(related_event.expr_count)
+                .ok_or(-970)?;
+            if expr_end > body_expr_ops.len() {
+                return Err(-971);
+            }
+            let baseline_expr = rust_sim_eval_expr_segment(
+                body_expr_ops,
+                related_event.expr_start,
+                related_event.expr_count,
+                node_values,
+                state_values,
+                param_values,
+                time,
+                0.0,
+            )?;
+            for op in &body_expr_ops[related_event.expr_start..expr_end] {
+                if op.op_kind != BODY_EXPR_READ_NODE || op.index >= node_values.len() {
+                    continue;
+                }
+                if !sources.iter().any(|source| source.node_id == op.index) {
+                    continue;
+                }
+                if restored_nodes.iter().any(|(idx, _)| *idx == op.index) {
+                    continue;
+                }
+                let original = node_values[op.index];
+                let delta = 1.0e-12_f64.max(original.abs() * 1.0e-12);
+                node_values[op.index] = original + delta;
+                let perturbed_expr = rust_sim_eval_expr_segment(
+                    body_expr_ops,
+                    related_event.expr_start,
+                    related_event.expr_count,
+                    node_values,
+                    state_values,
+                    param_values,
+                    time,
+                    0.0,
+                );
+                node_values[op.index] = original;
+                let sensitivity = match perturbed_expr {
+                    Ok(value) => value - baseline_expr,
+                    Err(code) => return Err(code),
+                };
+                if sensitivity == 0.0 {
+                    continue;
+                }
+                let nudge_direction = (related.trigger_direction as f64) * sensitivity.signum();
+                node_values[op.index] = original + nudge_direction * delta;
+                restored_nodes.push((op.index, original));
+            }
+        }
+    }
+
+    let result = rust_sim_execute_event_body(
+        event,
+        body_stmt_ops,
+        body_expr_ops,
+        node_values,
+        state_values,
+        param_values,
+        time,
+        bound_step_limit,
+        side_effect_log,
+    );
+    for (idx, value) in restored_nodes {
+        if idx < node_values.len() {
+            node_values[idx] = value;
+        }
+    }
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1177,7 +1290,9 @@ fn rust_sim_transition_targets_contain_rdist_normal(
 ) -> Result<bool, i32> {
     for transition in transitions {
         let start = transition.target_expr_start;
-        let end = start.checked_add(transition.target_expr_count).ok_or(-976)?;
+        let end = start
+            .checked_add(transition.target_expr_count)
+            .ok_or(-976)?;
         if end > body_expr_ops.len() {
             return Err(-977);
         }
@@ -1779,8 +1894,11 @@ pub(crate) fn rust_sim_record_transition_breakpoints_until(
                     default_transition,
                     false,
                 )?;
-                rust_sim_execute_event_body(
-                    &events[candidate.event_idx],
+                rust_sim_execute_cross_event_body(
+                    sources,
+                    events,
+                    candidate,
+                    &post_cross_candidates,
                     body_stmt_ops,
                     body_expr_ops,
                     node_values,
@@ -2023,8 +2141,11 @@ pub(crate) fn rust_sim_execute_ordered_cross_events(
             default_transition,
             false,
         )?;
-        rust_sim_execute_event_body(
-            &events[candidate.event_idx],
+        rust_sim_execute_cross_event_body(
+            sources,
+            events,
+            candidate,
+            candidates,
             body_stmt_ops,
             body_expr_ops,
             node_values,

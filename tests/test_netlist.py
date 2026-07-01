@@ -59,6 +59,49 @@ def test_configured_evas_engine_normalizes_rust_aliases(monkeypatch):
     assert _configured_evas_engine({}) == "evas-rust"
 
 
+def test_evas2_cross_zero_event_uses_python_event_semantics(tmp_path, monkeypatch):
+    _build_rust_core_or_skip()
+    va_file = tmp_path / "cross_zero_latched.va"
+    va_file.write_text(textwrap.dedent("""\
+        `include "disciplines.vams"
+
+        module cross_zero_latched(bit, out);
+            input bit;
+            output out;
+            electrical bit, out;
+            parameter real vth = 0.45;
+            real y;
+
+            analog begin
+                @(initial_step or cross(V(bit) - vth, 0)) begin
+                    y = (V(bit) > vth) ? 1.0 : 0.0;
+                end
+                V(out) <+ transition(y, 0, 1p, 1p);
+            end
+        endmodule
+    """))
+    scs_file = tmp_path / "tb_cross_zero_latched.scs"
+    scs_file.write_text(textwrap.dedent("""\
+        simulator lang=spectre
+        global 0
+
+        ahdl_include "cross_zero_latched.va"
+
+        Vbit (bit 0) vsource type=pwl wave=[0 0 1n 0 1.1n 0.9 2n 0.9]
+        XDUT (bit out) cross_zero_latched
+
+        tran tran stop=2n maxstep=10p
+        save bit out
+    """))
+
+    monkeypatch.setenv("EVAS_ENGINE", "evas2")
+    out_dir = tmp_path / "out"
+    assert evas_simulate(str(scs_file), output_dir=str(out_dir))
+    data = np.genfromtxt(out_dir / "tran.csv", delimiter=",", names=True)
+    idx = int(np.argmin(np.abs(data["time"] - 1.5e-9)))
+    assert data["out"][idx] == pytest.approx(1.0, abs=0.05)
+
+
 # ===========================================================================
 # _normalize_node_name
 # ===========================================================================
