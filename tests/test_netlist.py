@@ -2064,3 +2064,51 @@ class TestCrossPhaseClassification:
             f"{sorted(contributed)}"
         )
         assert "inp" not in contributed
+
+
+class TestCadenceLrmGapFillRunnerAllowlist:
+    """The netlist runner preflight must not lag backend language support."""
+
+    def test_runner_accepts_cadence_lrm_gap_fill_helpers(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("EVAS_ENGINE", "python")
+        va_file = tmp_path / "cadence_lrm_gap_runner.va"
+        va_file.write_text(textwrap.dedent("""\
+            `include "disciplines.vams"
+            module cadence_lrm_gap_runner(inp, out);
+            input voltage inp;
+            output voltage out;
+            parameter real gain = 2.0;
+            parameter string table_file = "missing.tbl";
+            real surf[0:1][0:1];
+            real value;
+            analog initial begin
+                $analog_node_alias(out, inp);
+            end
+            analog begin
+                V(out) : ddt(V(out)) == V(inp);
+                value = $vt($temperature()) + $simparam("tnom", 27.0)
+                      + $param_given(gain) + $port_connected(out)
+                      + $rtoi(2.7) + $cds_get_mc_trial_number()
+                      + inp.potential.abstol
+                      + potential(inp)
+                      + $table_model(0.5, table_file)
+                      + $table_model(0.5, 0.25, surf)
+                      + idt(I(out), 0.0)
+                      + laplace_nd(V(inp), {1}, {1, 1})
+                      + zi_nd(V(inp), {1}, {1, 1}, 1n);
+                potential(out) <+ value;
+            end
+            endmodule
+        """))
+        scs_file = tmp_path / "tb_cadence_lrm_gap_runner.scs"
+        scs_file.write_text(textwrap.dedent("""\
+            simulator lang=spectre
+            global 0
+            ahdl_include "cadence_lrm_gap_runner.va"
+            Vin (inp 0) vsource dc=0.2
+            X0 (inp out) cadence_lrm_gap_runner
+            tran tran stop=1n
+            save inp out
+        """))
+
+        assert evas_simulate(str(scs_file), output_dir=str(tmp_path / "out"))

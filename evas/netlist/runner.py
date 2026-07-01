@@ -230,12 +230,32 @@ def _expr_has_call(expr, call_name: str) -> bool:
 
 
 _SUPPORTED_FUNCTION_CALLS = {
-    'transition', 'slew', 'idtmod', 'cross', 'last_crossing',
+    'transition', 'slew', 'ddt', 'idt', 'idtmod', 'cross', 'last_crossing',
+    'limexp',
+    'laplace_nd', 'laplace_np', 'laplace_zd', 'laplace_zp',
+    'zi_nd', 'zi_np', 'zi_zd', 'zi_zp',
     'ln', 'log', 'exp', 'sqrt', 'abs', 'pow', 'min', 'max',
     'sin', 'cos', 'tan', 'tanh', 'floor', 'ceil',
     '$ln', '$log', '$exp', '$sqrt', '$abs', '$pow', '$min', '$max',
     '$sin', '$cos', '$tan', '$tanh', '$floor', '$ceil',
-    '$rdist_normal', '$random', '$dist_uniform', '$fopen',
+    '$temperature', '$vt', '$simparam', '$attribute',
+    'potential', 'flow',
+    '$rtoi', '$param_given', '$port_connected',
+    '$analog_node_alias', '$analog_port_alias',
+    '$cds_get_mc_trial_number', '$cds_set_rf_source_info',
+    '$cds_violation',
+    '$table_model',
+    '$rdist_normal', '$rdist_exponential', '$rdist_poisson',
+    '$rdist_chi_square', '$rdist_t', '$rdist_erlang',
+    '$dist_normal', '$dist_exponential', '$dist_poisson',
+    '$dist_chi_square', '$dist_t', '$dist_erlang',
+    '$random', '$dist_uniform', '$rdist_uniform',
+    '$fopen', '$fclose', '$fwrite', '$fstrobe', '$strobe',
+    '$display', '$debug', '$warning', '$error', '$info',
+    '$fscanf', '$fgets', '$feof', '$fseek', '$ftell', '$rewind',
+    '$swrite', '$sformat',
+    'analysis', 'ac_stim', 'white_noise', 'flicker_noise', 'noise_table',
+    '$abstime', '$realtime', '$bound_step', '$discontinuity',
 }
 
 
