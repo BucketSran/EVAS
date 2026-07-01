@@ -531,6 +531,32 @@ class CompiledModel:
         }
         return values.get(key, default)
 
+    def _port_connected(self, name: Any) -> float:
+        port = str(name)
+        if port in self.node_map:
+            return 1.0
+        if port in getattr(self.__class__, "_module_ports", ()):
+            return 1.0
+        return 0.0
+
+    def _attribute_value(self, path: Any) -> float:
+        key = str(path).strip().lower()
+        if key.endswith(".potential.abstol"):
+            return float(self._simparam("vabstol", 1e-6))
+        if key.endswith(".flow.abstol"):
+            return float(self._simparam("iabstol", 1e-12))
+        if key.endswith(".abstol"):
+            return float(self._simparam("abstol", 1e-12))
+        return 0.0
+
+    def _table_model(self, *args: Any) -> float:
+        if len(args) >= 2 and isinstance(args[-1], str):
+            try:
+                return self._table_model_1d(args[0], args[-1])
+            except OSError:
+                return 0.0
+        return 0.0
+
     def _ac_stim(self, *args: Any) -> Any:
         if self._analysis_mode != "ac":
             return 0.0
@@ -11268,6 +11294,9 @@ class _ModuleCompiler:
         prefix = '    ' * indent
         lines: List[str] = []
 
+        if stmt.name == '$analog_node_alias':
+            return lines
+
         if stmt.name in ('$strobe', '$display'):
             if suppress_display_strobe:
                 return lines
@@ -11355,6 +11384,8 @@ class _ModuleCompiler:
         return lines
 
     def _compile_task_call(self, stmt: TaskCall, indent: int) -> List[str]:
+        if stmt.name == "$indirect_branch":
+            return []
         if stmt.name not in self._user_task_by_name:
             raise CompilationError(
                 f"Unsupported Verilog-A task call: {stmt.name}()"
@@ -14188,6 +14219,28 @@ class _ModuleCompiler:
             simparam_name = args[0] if args else "''"
             default = args[1] if len(args) > 1 else "0.0"
             return f"self._simparam({simparam_name}, {default})"
+        if name == "$attribute":
+            attr_path = args[0] if args else "''"
+            return f"self._attribute_value({attr_path})"
+        if name == "potential":
+            branch = self._branch_from_generic_access_call(expr)
+            if branch is not None:
+                return self._compile_transition_probe_expr(branch)
+            return "0.0"
+        if name == "flow":
+            return "0.0"
+        if name == "$rtoi":
+            value = args[0] if args else "0.0"
+            return f"self._to_integer({value})"
+        if name == "$param_given":
+            return "0.0"
+        if name == "$port_connected":
+            port_name = self._compile_node_name_arg(expr.args[0]) if expr.args else "''"
+            return f"self._port_connected({port_name})"
+        if name in {"$analog_node_alias", "$cds_get_mc_trial_number"}:
+            return "0.0"
+        if name == "$table_model":
+            return "0.0"
         if name == "ln":
             return f"math.log({args[0]})"
         if name == "log":
@@ -14309,6 +14362,8 @@ class _ModuleCompiler:
             # Check if it's a variable
             for v in self.module.variables:
                 if v.name == name:
+                    if getattr(v, "is_array", False):
+                        return "0.0"
                     if (
                         self._state_local_fastpath_active
                         and name != self._in_loop_var
@@ -14527,6 +14582,50 @@ class _ModuleCompiler:
         # Fallback: allow unusual connection expressions as stringified value.
         return f"str({self._compile_expr(expr)})"
 
+    def _compile_node_name_arg(self, expr: Expr) -> str:
+        if isinstance(expr, Identifier):
+            return repr(expr.name)
+        if isinstance(expr, StringLiteral):
+            return repr(expr.value)
+        if isinstance(expr, ArrayAccess):
+            idx = self._compile_expr(expr.index)
+            if getattr(expr, "index2", None) is not None:
+                idx2 = self._compile_expr(expr.index2)
+                return f"self._resolve_dynamic_node({expr.name!r}, {idx}, {idx2})"
+            return f"self._resolve_dynamic_node({expr.name!r}, {idx})"
+        return f"str({self._compile_expr(expr)})"
+
+    def _node_ref_from_expr(self, expr: Expr) -> Optional[Tuple[str, Optional[Expr], Optional[Expr]]]:
+        if isinstance(expr, Identifier):
+            return expr.name, None, None
+        if isinstance(expr, ArrayAccess):
+            return expr.name, expr.index, getattr(expr, "index2", None)
+        return None
+
+    def _branch_from_generic_access_call(self, expr: FunctionCall) -> Optional[BranchAccess]:
+        if expr.name not in {"potential", "flow"} or not expr.args:
+            return None
+        first = self._node_ref_from_expr(expr.args[0])
+        if first is None:
+            return None
+        node1, idx1, idx1_2 = first
+        node2 = idx2 = idx2_2 = None
+        if len(expr.args) > 1:
+            second = self._node_ref_from_expr(expr.args[1])
+            if second is None:
+                return None
+            node2, idx2, idx2_2 = second
+        access_type = "V" if expr.name == "potential" else "I"
+        return BranchAccess(
+            access_type=access_type,
+            node1=node1,
+            node2=node2,
+            node1_index=idx1,
+            node2_index=idx2,
+            node1_index2=idx1_2,
+            node2_index2=idx2_2,
+        )
+
     def _compile_function_call(self, expr: FunctionCall) -> str:
         name = expr.name
         math_aliases = {
@@ -14548,6 +14647,26 @@ class _ModuleCompiler:
             simparam_name = args[0] if args else "''"
             default = args[1] if len(args) > 1 else "0.0"
             return f"self._simparam({simparam_name}, {default})"
+        if name == '$attribute':
+            attr_path = args[0] if args else "''"
+            return f"self._attribute_value({attr_path})"
+        if name in {'potential', 'flow'}:
+            branch = self._branch_from_generic_access_call(expr)
+            if branch is not None and branch.access_type == "V":
+                return self._compile_expr(branch)
+            return "0.0"
+        if name == '$rtoi':
+            value = args[0] if args else "0.0"
+            return f"self._to_integer({value})"
+        if name == '$param_given':
+            return "0.0"
+        if name == '$port_connected':
+            port_name = self._compile_node_name_arg(expr.args[0]) if expr.args else "''"
+            return f"self._port_connected({port_name})"
+        if name == '$analog_node_alias':
+            return "0.0"
+        if name == '$cds_get_mc_trial_number':
+            return "0"
 
         if name in self._user_function_by_name:
             method = f"_user_fn_{self._safe_python_suffix(name)}"
@@ -14753,9 +14872,8 @@ class _ModuleCompiler:
             fd = args[0] if len(args) > 0 else "0"
             return f"self._fgets({fd})"
         if name == '$table_model':
-            x_expr = args[0] if len(args) > 0 else "0.0"
-            filename = args[1] if len(args) > 1 else "''"
-            return f"self._table_model_1d({x_expr}, {filename})"
+            joined = ", ".join(args)
+            return f"self._table_model({joined})" if joined else "0.0"
         if name == "analysis":
             analysis = args[0] if args else "''"
             return f"self._analysis({analysis})"
@@ -14935,6 +15053,26 @@ class _ModuleCompiler:
                     "vabstol": 1e-6,
                 }
                 return values.get(key, default)
+            if expr.name == '$attribute':
+                key = str(args[0]).strip().lower() if args else ""
+                if key.endswith(".potential.abstol"):
+                    return 1e-6
+                if key.endswith(".flow.abstol"):
+                    return 1e-12
+                if key.endswith(".abstol"):
+                    return 1e-12
+                return 0.0
+            if expr.name == '$rtoi':
+                return CompiledModel._to_integer(args[0] if args else 0.0)
+            if expr.name in {
+                '$param_given',
+                '$analog_node_alias',
+                '$cds_get_mc_trial_number',
+                '$table_model',
+            }:
+                return 0.0
+            if expr.name == '$port_connected':
+                return 1.0
             funcs = {
                 'abs': abs,
                 'sqrt': math.sqrt,

@@ -8427,6 +8427,112 @@ endmodule
 
         assert result.signals["out"].tolist() == pytest.approx([5.0, 5.0])
 
+    def test_cadence_environment_gap_fill_helpers_compile_and_run(self):
+        src = """\
+`include "disciplines.vams"
+module cadence_env_helpers(out, inp);
+    output voltage out;
+    input voltage inp;
+    parameter real gain = 2.0;
+    real value;
+    analog begin
+        value = $vt($temperature()) + $simparam("tnom", 27.0)
+              + $param_given(gain) + $port_connected(out)
+              + $rtoi(2.7) + $cds_get_mc_trial_number();
+        V(out) <+ value;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        expected_vt = 1.380649e-23 * 300.15 / 1.602176634e-19
+        assert result.signals["out"][-1] == pytest.approx(expected_vt + 31.0)
+
+    def test_cadence_indirect_branch_attributes_and_alias_compile(self):
+        src = """\
+`include "disciplines.vams"
+module cadence_branch_attrs(out, inp);
+    output voltage out;
+    input voltage inp;
+    real tol;
+    analog initial begin
+        $analog_node_alias(out, inp);
+    end
+    analog begin
+        V(out) : ddt(V(out)) == V(inp);
+        tol = inp.potential.abstol + out.flow.abstol;
+        V(out) <+ V(inp) + tol;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.add_source("inp", dc(0.5))
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"][-1] == pytest.approx(0.500001000001)
+
+    def test_cadence_generic_potential_and_extended_table_model_compile(self):
+        src = """\
+`include "disciplines.vams"
+module cadence_generic_access(out, inp);
+    output voltage out;
+    input voltage inp;
+    parameter string table_file = "missing.tbl";
+    real surf[0:1][0:1];
+    analog begin
+        potential(out) <+ potential(inp)
+                        + $table_model(0.5, table_file)
+                        + $table_model(0.5, 0.25, surf);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.add_source("inp", dc(0.25))
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"].tolist() == pytest.approx([0.25, 0.25])
+
+    def test_cadence_continuous_time_gap_fill_forms_compile(self):
+        src = """\
+`include "disciplines.vams"
+module cadence_continuous_forms(out, inp);
+    output voltage out;
+    input voltage inp;
+    analog begin
+        I(out) <+ 1p * ddt(V(inp));
+        V(out) <+ idt(I(out), 0.0)
+                + laplace_nd(V(inp), {1}, {1, 1})
+                + zi_nd(V(inp), {1}, {1, 1}, 1n);
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.add_source("inp", dc(0.1))
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert len(result.signals["out"]) == 2
+
     def test_fclose_cleans_handle(self, tmp_path):
         """After simulation, file handles should be cleaned up."""
         from evas.compiler.parser import parse

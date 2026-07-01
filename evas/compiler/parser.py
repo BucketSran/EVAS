@@ -1197,12 +1197,30 @@ class Parser:
         """Parse assignment or contribution statement."""
         expr = self._parse_expression()
 
+        # Indirect branch assignment/balance:
+        #   V(out) : V(in) == 0;
+        # EVAS accepts this syntax as a conservative no-op constraint holder.
+        if self.match(TokenType.COLON):
+            balance = self._parse_expression()
+            if isinstance(balance, BinaryExpr) and balance.op == "==":
+                lhs = balance.left
+                rhs = balance.right
+            else:
+                lhs = balance
+                self.expect(TokenType.EQ)
+                rhs = self._parse_expression()
+            self.match(TokenType.SEMI)
+            return TaskCall(name="$indirect_branch", args=[expr, lhs, rhs])
+
         # Contribution: V(a,b) <+ expr
         if self.match(TokenType.CONTRIB):
             rhs = self._parse_expression()
             self.match(TokenType.SEMI)
             if isinstance(expr, BranchAccess):
                 return Contribution(branch=expr, expr=rhs)
+            branch = self._generic_access_to_branch(expr)
+            if branch is not None:
+                return Contribution(branch=branch, expr=rhs)
             raise ParseError("Left side of <+ must be a branch access (V/I)")
 
         # Assignment: ident = expr
@@ -1225,6 +1243,39 @@ class Parser:
         raise ParseError(
             "Expected assignment '=', contribution '<+', or ';' after expression",
             self.peek(),
+        )
+
+    def _node_ref_from_expr(self, expr: Expr) -> Optional[Tuple[str, Optional[Expr], Optional[Expr]]]:
+        if isinstance(expr, Identifier):
+            return expr.name, None, None
+        if isinstance(expr, ArrayAccess):
+            return expr.name, expr.index, getattr(expr, "index2", None)
+        return None
+
+    def _generic_access_to_branch(self, expr: Expr) -> Optional[BranchAccess]:
+        if not isinstance(expr, FunctionCall):
+            return None
+        if expr.name not in {"potential", "flow"} or not expr.args:
+            return None
+        first = self._node_ref_from_expr(expr.args[0])
+        if first is None:
+            return None
+        node1, idx1, idx1_2 = first
+        node2 = idx2 = idx2_2 = None
+        if len(expr.args) > 1:
+            second = self._node_ref_from_expr(expr.args[1])
+            if second is None:
+                return None
+            node2, idx2, idx2_2 = second
+        access_type = "V" if expr.name == "potential" else "I"
+        return BranchAccess(
+            access_type=access_type,
+            node1=node1,
+            node2=node2,
+            node1_index=idx1,
+            node2_index=idx2,
+            node1_index2=idx1_2,
+            node2_index2=idx2_2,
         )
 
     # ─── Expressions (precedence climbing) ───
@@ -1437,15 +1488,22 @@ class Parser:
         if tok.type == TokenType.IDENT:
             name = self.advance().value
 
-            # Method call: name.method(args)
+            # Method call: name.method(args), or node/branch attribute path
+            # such as in.potential.abstol.
             if self.at(TokenType.DOT):
                 self._reject_reserved_identifier(tok, "method-call object")
-                self.advance()
-                method = self.expect(TokenType.IDENT).value
-                self.expect(TokenType.LPAREN)
-                args = self._parse_arg_list()
-                self.expect(TokenType.RPAREN)
-                return MethodCall(obj=name, method=method, args=args)
+                parts = [name]
+                while self.at(TokenType.DOT):
+                    self.advance()
+                    parts.append(self.expect(TokenType.IDENT).value)
+                if self.at(TokenType.LPAREN):
+                    self.advance()
+                    args = self._parse_arg_list()
+                    self.expect(TokenType.RPAREN)
+                    if len(parts) == 2:
+                        return MethodCall(obj=parts[0], method=parts[1], args=args)
+                    return FunctionCall(name=".".join(parts), args=args)
+                return FunctionCall(name="$attribute", args=[StringLiteral(".".join(parts))])
 
             # Function call: name(args)
             if self.at(TokenType.LPAREN):
