@@ -112,6 +112,7 @@ class Parser:
     def __init__(self, tokens: List[Token]):
         self.tokens = tokens
         self.pos = 0
+        self._repeat_counter = 0
 
     def peek(self) -> Token:
         return self.tokens[self.pos]
@@ -933,9 +934,17 @@ class Parser:
         if tok.type == TokenType.FOR:
             return self._parse_for_statement()
 
+        # Repeat loop
+        if tok.type == TokenType.REPEAT:
+            return self._parse_repeat_statement()
+
         # While loop
         if tok.type == TokenType.WHILE:
             return self._parse_while_statement()
+
+        # Do-while loop
+        if tok.type == TokenType.DO:
+            return self._parse_do_while_statement()
 
         # Case statement
         if tok.type == TokenType.CASE:
@@ -1072,6 +1081,28 @@ class Parser:
         body = self._parse_block_or_statement()
         return ForStatement(init=init, cond=cond, update=update, body=body)
 
+    def _parse_repeat_statement(self) -> Block:
+        self.expect(TokenType.REPEAT)
+        self.expect(TokenType.LPAREN)
+        count = self._parse_expression()
+        self.expect(TokenType.RPAREN)
+        body = self._parse_block_or_statement()
+
+        loop_var = f"__evas_repeat_{self._repeat_counter}"
+        limit_var = f"__evas_repeat_limit_{self._repeat_counter}"
+        self._repeat_counter += 1
+        limit = Assignment(Identifier(limit_var), count)
+        init = Assignment(Identifier(loop_var), NumberLiteral(0.0))
+        cond = BinaryExpr("<", Identifier(loop_var), Identifier(limit_var))
+        update = Assignment(
+            Identifier(loop_var),
+            BinaryExpr("+", Identifier(loop_var), NumberLiteral(1.0)),
+        )
+        return Block(statements=[
+            limit,
+            ForStatement(init=init, cond=cond, update=update, body=body),
+        ])
+
     def _parse_while_statement(self) -> WhileStatement:
         self.expect(TokenType.WHILE)
         self.expect(TokenType.LPAREN)
@@ -1079,6 +1110,16 @@ class Parser:
         self.expect(TokenType.RPAREN)
         body = self._parse_block_or_statement()
         return WhileStatement(cond=cond, body=body)
+
+    def _parse_do_while_statement(self) -> Block:
+        self.expect(TokenType.DO)
+        body = self._parse_block_or_statement()
+        self.expect(TokenType.WHILE)
+        self.expect(TokenType.LPAREN)
+        cond = self._parse_expression()
+        self.expect(TokenType.RPAREN)
+        self.match(TokenType.SEMI)
+        return Block(statements=[body, WhileStatement(cond=cond, body=body)])
 
     def _parse_case_statement(self) -> CaseStatement:
         """Parse: case (expr) value: stmt ... default: stmt endcase"""

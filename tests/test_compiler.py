@@ -791,6 +791,16 @@ class TestParserForLoop:
         assert isinstance(stmt.init.target, Identifier)
         assert stmt.init.target.name == "i"
 
+    def test_repeat_loop_lowers_to_hidden_for_loop(self):
+        stmts = _stmts("repeat (4) x = x + 1;")
+        stmt = stmts[0]
+        assert isinstance(stmt, Block)
+        assert isinstance(stmt.statements[0], Assignment)
+        assert isinstance(stmt.statements[1], ForStatement)
+        assert isinstance(stmt.statements[1].body, Assignment)
+        assert isinstance(stmt.statements[1].init.target, Identifier)
+        assert stmt.statements[1].init.target.name.startswith("__evas_repeat_")
+
     def test_for_condition(self):
         stmts = _stmts("for (i = 0; i < 4; i = i + 1) x = 1;")
         stmt = stmts[0]
@@ -1121,6 +1131,13 @@ class TestParserWhileStatement:
         stmt = stmts[0]
         assert isinstance(stmt, WhileStatement)
         assert isinstance(stmt.body, Assignment)
+
+    def test_do_while_lowers_to_body_plus_while(self):
+        stmts = _stmts("do x = x + 1; while (x < 3);")
+        stmt = stmts[0]
+        assert isinstance(stmt, Block)
+        assert isinstance(stmt.statements[0], Assignment)
+        assert isinstance(stmt.statements[1], WhileStatement)
 
 
 class TestParserExpressions:

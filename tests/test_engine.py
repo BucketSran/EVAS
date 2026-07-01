@@ -5892,7 +5892,8 @@ module extra_random_probe(out);
                 + $rdist_chi_square(23, 3.0)
                 + $rdist_t(23, 5.0)
                 + $rdist_erlang(23, 3.0, 6.0)
-                + $dist_poisson(24, 2.0);
+                + $dist_poisson(24, 2.0)
+                + $rdist_uniform(25, -1.0, 1.0);
     end
 endmodule
 """
@@ -5907,6 +5908,33 @@ endmodule
 
         assert math.isfinite(nv1["out"])
         assert nv1["out"] == pytest.approx(nv2["out"])
+
+    def test_compiled_sformat_function_returns_formatted_string(self):
+        src = """\
+`include "disciplines.vams"
+module sformat_function_probe(out);
+    output voltage out;
+    string msg;
+    integer code;
+    analog begin
+        code = 7;
+        msg = $sformat("code=%0d", code);
+        $strobe("%s", msg);
+        V(out) <+ code;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert result.signals["out"].tolist() == pytest.approx([7.0, 7.0])
+        assert model.state["msg"] == "code=7"
+        assert model._strobe_log[0][1] == "code=7"
 
     def test_unseeded_random_stream_is_deterministic_per_model(self):
         seq_a = [self.model._rand_uniform(None, -1.0, 1.0) for _ in range(3)]
@@ -7556,6 +7584,38 @@ endmodule
 
         assert result.signals["out"][-1] == pytest.approx(2.0, abs=1e-12)
 
+    def test_repeat_and_do_while_in_event_body_execute(self):
+        src = """\
+`include "disciplines.vams"
+module repeat_do_probe(out);
+    output voltage out;
+    integer count;
+    integer once;
+    analog begin
+        @(initial_step) begin
+            count = 0;
+            repeat (4) begin
+                count = count + 2;
+            end
+            once = 5;
+            do begin
+                once = once + 1;
+            end while (once < 0);
+        end
+        V(out) <+ count + once;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-10)
+
+        assert result.signals["out"][-1] == pytest.approx(14.0, abs=1e-12)
+
 
 class TestIdtmodEvent:
     """Smoke test for idtmod() compilation and runtime behavior."""
@@ -8171,6 +8231,42 @@ endmodule
         assert model.state["pos1"] > model.state["pos0"]
         assert model.state["eof1"] == 1
         assert result.signals["out"].tolist() == pytest.approx([6.5, 6.5])
+
+    def test_fscanf_function_form_returns_count_and_updates_targets(self, tmp_path):
+        infile = tmp_path / "stimulus_func.txt"
+        infile.write_text("2.25 6\n", encoding="utf-8")
+        infile_s = str(infile).replace("\\", "/")
+        src = f"""\
+`include "disciplines.vams"
+module fscanf_function_probe(out);
+    output voltage out;
+    parameter string filename = "{infile_s}";
+    integer fd;
+    integer code;
+    integer count;
+    real sample;
+    analog begin
+        @(initial_step) begin
+            fd = $fopen(filename, "r");
+            count = $fscanf(fd, "%f %d", sample, code);
+            $fclose(fd);
+        end
+        V(out) <+ sample + code + count;
+    end
+endmodule
+"""
+        ModelCls = compile_module(parse(src))
+        model = ModelCls()
+
+        sim = Simulator()
+        sim.add_model(model)
+        sim.record("out")
+        result = sim.run(tstop=1e-9, tstep=1e-9)
+
+        assert model.state["count"] == 2
+        assert model.state["sample"] == pytest.approx(2.25)
+        assert model.state["code"] == 6
+        assert result.signals["out"].tolist() == pytest.approx([10.25, 10.25])
 
     def test_table_model_1d_interpolates_file(self, tmp_path):
         table = tmp_path / "gain_table.txt"

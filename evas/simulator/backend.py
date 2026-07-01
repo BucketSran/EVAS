@@ -58,12 +58,14 @@ _RANDOM_DISTRIBUTION_FUNCTIONS = frozenset(
         "$dist_exponential",
         "$dist_poisson",
         "$dist_t",
+        "$dist_uniform",
         "$rdist_chi_square",
         "$rdist_erlang",
         "$rdist_exponential",
         "$rdist_normal",
         "$rdist_poisson",
         "$rdist_t",
+        "$rdist_uniform",
     }
 )
 
@@ -4812,6 +4814,22 @@ class CompiledModel:
             except ValueError:
                 break
         return len(values), tuple(values)
+
+    def _fscanf_assign(self, fd: Any, fmt: Any, target_specs) -> int:
+        count, values = self._fscanf_values(fd, fmt)
+        for spec, value in zip(target_specs, values):
+            if not spec:
+                continue
+            kind = spec[0]
+            if kind == "state":
+                _kind, name, integer = spec
+                stored = self._to_integer(value) if integer else value
+                self._state_set(name, stored)
+            elif kind == "array":
+                _kind, name, idx, integer = spec
+                stored = self._to_integer(value) if integer else value
+                self._array_set(name, int(idx), stored)
+        return count
 
     def _fstrobe(self, target: Any, fmt: str, *args):
         msg = self._format_message(fmt, *args)
@@ -11069,6 +11087,22 @@ class _ModuleCompiler:
             "expected a variable or array element"
         )
 
+    def _compile_fscanf_target_spec(self, target: Expr) -> str:
+        if isinstance(target, Identifier):
+            name = target.name
+            if name in self._local_name_by_var:
+                raise CompilationError(
+                    "$fscanf() function form cannot update local variables; "
+                    "use task-statement form for local targets"
+                )
+            return repr(("state", name, self._is_integer_variable(name)))
+        if isinstance(target, ArrayAccess):
+            idx = self._compile_expr(target.index)
+            return f"('array', {target.name!r}, int({idx}), {self._is_integer_variable(target.name)!r})"
+        raise CompilationError(
+            "$fscanf() target arguments must be variables or array elements"
+        )
+
     def _compile_system_task(
         self,
         stmt: SystemTask,
@@ -14452,8 +14486,8 @@ class _ModuleCompiler:
         if name == '$random':
             seed = args[0] if len(args) > 0 else "None"
             return f"self._rand_int32({seed})"
-        if name == '$dist_uniform':
-            # $dist_uniform(seed, lo, hi) or shorthand $dist_uniform(lo, hi)
+        if name in {'$dist_uniform', '$rdist_uniform'}:
+            # $dist_uniform/$rdist_uniform(seed, lo, hi) or shorthand (lo, hi).
             if len(args) >= 3:
                 seed, lo, hi = args[0], args[1], args[2]
             elif len(args) == 2:
@@ -14463,6 +14497,24 @@ class _ModuleCompiler:
             else:
                 seed, lo, hi = "None", "0.0", "1.0"
             return f"self._rand_uniform({seed}, {lo}, {hi})"
+        if name == '$sformat':
+            fmt_expr = args[0] if len(args) > 0 else "''"
+            rest = ", ".join(args[1:])
+            if rest:
+                return f"self._sformat({fmt_expr}, {rest})"
+            return f"self._sformat({fmt_expr})"
+        if name == '$fscanf':
+            fd = args[0] if len(args) > 0 else "0"
+            fmt_expr = args[1] if len(args) > 1 else "''"
+            specs = ", ".join(
+                self._compile_fscanf_target_spec(target)
+                for target in expr.args[2:]
+            )
+            if specs:
+                specs = f"({specs},)"
+            else:
+                specs = "()"
+            return f"self._fscanf_assign({fd}, {fmt_expr}, {specs})"
         if name == '$fopen':
             filename = args[0] if len(args) > 0 else "'output.txt'"
             mode = args[1] if len(args) > 1 else "'w'"

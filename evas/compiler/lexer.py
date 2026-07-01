@@ -32,7 +32,9 @@ class TokenType(Enum):
     IF = auto()
     ELSE = auto()
     FOR = auto()
+    REPEAT = auto()
     WHILE = auto()
+    DO = auto()
     CASE = auto()
     ENDCASE = auto()
     FUNCTION = auto()
@@ -120,7 +122,9 @@ KEYWORDS = {
     'if': TokenType.IF,
     'else': TokenType.ELSE,
     'for': TokenType.FOR,
+    'repeat': TokenType.REPEAT,
     'while': TokenType.WHILE,
+    'do': TokenType.DO,
     'case': TokenType.CASE,
     'endcase': TokenType.ENDCASE,
     'function': TokenType.FUNCTION,
