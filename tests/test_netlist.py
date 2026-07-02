@@ -430,6 +430,13 @@ def _make_sine(name, freq=0.0, ampl=0.0, sinedc=0.0, **extra):
                          source_type="sine", params=params)
 
 
+def _make_square(name, val0=0.0, val1=1.0, period=0.0, **extra):
+    params = {"type": "square", "val0": val0, "val1": val1, "period": period}
+    params.update(extra)
+    return SpectreSource(name=name, node_pos="clk", node_neg="0",
+                         source_type="square", params=params)
+
+
 class TestAddSpectreSourceDegenerateCases:
 
     def _sim(self):
@@ -622,6 +629,109 @@ class TestAddSpectreSourceDegenerateCases:
         sim = self._sim()
         with pytest.raises(ValueError, match="strictly increasing"):
             _add_spectre_source(sim, src, "0")
+
+
+# ===========================================================================
+# _add_spectre_source — square source (EVAS defect D1)
+# ===========================================================================
+
+class TestAddSpectreSourceSquareSource:
+    """vsource type=square must register a waveform with edge breakpoints so
+    that source-driven @cross events fire — previously the type was silently
+    dropped and the driven node stuck at its initial value (EVAS defect D1)."""
+
+    def _sim(self):
+        return Simulator()
+
+    def test_square_valid_registers_source_with_breakpoints(self):
+        """A well-formed square source registers a waveform carrying
+        ``_next_breakpoint`` so @cross events align to its edges."""
+        src = _make_square("Vclk", val0=0.0, val1=1.8, period=10e-9,
+                           delay=1e-9, rise=50e-12, fall=50e-12)
+        sim = self._sim()
+        warns = _add_spectre_source(sim, src, "0")
+        assert warns == []
+        assert any(s.node == "clk" for s in sim.sources)
+        waveform = sim.sources[-1].waveform
+        # Edge schedule present — this is what feeds the source-breakpoint scan
+        # and lets @cross fire on a square-driven signal.
+        assert hasattr(waveform, "_next_breakpoint")
+        meta = getattr(waveform, "_evas_waveform", {})
+        assert meta.get("kind") == "square"
+
+    def test_square_plateau_and_ramps_match_spectre_semantics(self):
+        """val0/val1 plateaus with linear rise/fall ramps, period repeats."""
+        src = _make_square(
+            "Vclk", val0=0.0, val1=0.9, period=1e-9,
+            delay=100e-12, rise=20e-12, fall=20e-12, width=500e-12,
+        )
+        sim = self._sim()
+        _add_spectre_source(sim, src, "0")
+        w = sim.sources[-1].waveform
+        # Pre-delay sits at val0.
+        assert w(50e-12) == pytest.approx(0.0)
+        # Mid-rise linear interpolation.
+        assert w(110e-12) == pytest.approx(0.45)
+        # High plateau (val1) after the rise.
+        assert w(120e-12) == pytest.approx(0.9)
+        assert w(620e-12) == pytest.approx(0.9)
+        # Mid-fall linear interpolation.
+        assert w(630e-12) == pytest.approx(0.45)
+        # Low plateau (val0) after the fall.
+        assert w(640e-12) == pytest.approx(0.0)
+        # Period wrap: second cycle high plateau lands back at val1.
+        assert w(1e-9 + 120e-12) == pytest.approx(0.9)
+
+    def test_square_default_width_is_about_half_duty(self):
+        """Omitting width defaults to ~50% duty (period/2 - rise/2 - fall/2)."""
+        src = _make_square("Vclk", val0=0.0, val1=1.0, period=1e-9,
+                           rise=0.0, fall=0.0)
+        sim = self._sim()
+        warns = _add_spectre_source(sim, src, "0")
+        assert warns == []
+        w = sim.sources[-1].waveform
+        # With zero rise/fall, default width = period/2: high for the first
+        # half, low for the second half.
+        assert w(0.25e-9) == pytest.approx(1.0)
+        assert w(0.75e-9) == pytest.approx(0.0)
+
+    def test_square_val0_eq_val1_warns_and_becomes_dc(self):
+        """val0==val1 regardless of period → DC + warning."""
+        src = _make_square("Vdd", val0=1.8, val1=1.8, period=10e-9)
+        sim = self._sim()
+        warns = _add_spectre_source(sim, src, "0")
+        assert len(warns) == 1
+        assert "val0 == val1" in warns[0]
+
+    def test_square_missing_period_warns_one_shot(self):
+        """val0!=val1 but period=0 → one-shot square pulse + warning."""
+        src = _make_square("Vclk", val0=0.0, val1=1.8, period=0.0,
+                           delay=2e-9, rise=50e-12)
+        sim = self._sim()
+        warns = _add_spectre_source(sim, src, "0")
+        assert len(warns) == 1
+        assert "period not set" in warns[0]
+        # One-shot: stays high after the rise.
+        w = sim.sources[-1].waveform
+        assert w(1.9e-9) == pytest.approx(0.0)
+        assert w(20e-9) == pytest.approx(1.8)
+
+    def test_unknown_source_type_warns_loudly(self):
+        """Unknown vsource types must be surfaced via a warning, not silently
+        dropped (the silent-drop class of bug behind defect D1)."""
+        src = SpectreSource(
+            name="Vexp",
+            node_pos="vin",
+            node_neg="0",
+            source_type="exp",
+            params={"type": "exp", "val0": 0.0, "val1": 1.0},
+        )
+        sim = self._sim()
+        warns = _add_spectre_source(sim, src, "0")
+        assert len(warns) == 1
+        assert "unsupported vsource type 'exp'" in warns[0]
+        # The source was NOT registered.
+        assert not any(s.node == "vin" for s in sim.sources)
 
 
 # ===========================================================================
