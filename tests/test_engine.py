@@ -6982,6 +6982,38 @@ endmodule
         y2 = self.model._idtmod("i1", time=1e-9, x=1.0, ic=0.0, mod=1.0)
         assert y2 == pytest.approx(y1)
 
+    def test_idtmod_exact_wrap_boundary_snaps_to_zero(self):
+        """Regression for EVAS defect D3: when the trapezoidal running sum
+        lands on an exact integer multiple of the modulus, IEEE-754 rounding
+        can leave the accumulated value at 0.999... instead of 1.0, so the
+        ``%`` reduction reports a phase just below the modulus instead of
+        snapping back to 0.  On a discontinuous voltage-coded metric
+        ``metric = k * phase`` this is a full-magnitude error.  The snap now
+        forces values within a relative epsilon of either wrap edge (0 or
+        ``mod``) back to 0, matching Spectre's wrap side.
+
+        Reproduces the original 496 symptom: constant x=2.0, mod=1.0, stepped
+        in 0.1 increments to t=0.5 — the analytic integral is exactly 1.0
+        (one full cycle), so the wrapped phase must be 0.0, not ~0.999.
+        """
+        # Initialize at t=0.
+        self.model._idtmod("wrap0", time=0.0, x=2.0, ic=0.0, mod=1.0)
+        # Step to t=0.5 in 0.1 increments; analytic integral = 2.0 * 0.5 = 1.0.
+        for t in (0.1, 0.2, 0.3, 0.4, 0.5):
+            y = self.model._idtmod("wrap0", time=t, x=2.0, ic=0.0, mod=1.0)
+        # Must snap to exactly 0.0 at the wrap boundary, not 0.999...
+        assert y == pytest.approx(0.0, abs=1e-9)
+
+    def test_idtmod_exact_wrap_boundary_init_snaps_to_zero(self):
+        """The init path (key not yet seen) must also snap when ic lands on
+        the modulus boundary."""
+        # ic exactly equal to mod -> wraps to the boundary -> snaps to 0.
+        y0 = self.model._idtmod("wrap_init", time=0.0, x=1.0, ic=1.0, mod=1.0)
+        assert y0 == pytest.approx(0.0, abs=1e-9)
+        # Same for a multiple of the modulus.
+        y0 = self.model._idtmod("wrap_init2", time=0.0, x=1.0, ic=3.0, mod=1.0)
+        assert y0 == pytest.approx(0.0, abs=1e-9)
+
     def test_temperature_default(self):
         assert self.model._temperature == pytest.approx(27.0)
 

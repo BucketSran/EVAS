@@ -5089,7 +5089,23 @@ class CompiledModel:
         Notes:
         - Accuracy depends on external timestep control ($bound_step / tran step).
         - Multiple evaluations at the same time do not re-integrate.
+        - At an exact integer multiple of the modulus the running sum can land
+          at 0.999... rather than 1.0 (standard IEEE-754 rounding); the Python
+          ``%`` reduction then leaves the phase just below the modulus instead
+          of snapping back to 0.  On a discontinuous voltage-coded metric
+          ``metric = k * phase`` this is a full-magnitude error.  We snap values
+          within a relative epsilon of either wrap edge (0 or ``mod``) down to
+          0 so EVAS matches Spectre's wrap side at exact integer multiples of
+          the modulus.  See EVAS defect D3.
         """
+        _WRAP_SNAP_EPS = 1e-9
+
+        def _snap_to_zero(y_val: float, m: float) -> float:
+            """Snap a wrapped value on the wrap boundary down to 0."""
+            if y_val > m * (1.0 - _WRAP_SNAP_EPS) or y_val < m * _WRAP_SNAP_EPS:
+                return 0.0
+            return y_val
+
         if self._idt_states is None:
             self._idt_states = {}
 
@@ -5104,6 +5120,7 @@ class CompiledModel:
             if mod is not None and float(mod) != 0.0:
                 m = abs(float(mod))
                 y0 = y0 % m
+                y0 = _snap_to_zero(y0, m)
                 self._idt_states[key]["y"] = y0
             return y0
 
@@ -5117,6 +5134,7 @@ class CompiledModel:
             if mod is not None and float(mod) != 0.0:
                 m = abs(float(mod))
                 st["y"] = st["y"] % m
+                st["y"] = _snap_to_zero(st["y"], m)
             st["last_t"] = float(time)
             st["last_x"] = float(x)
         elif dt < 0.0:
