@@ -7,7 +7,7 @@ Parses real Cadence Spectre netlist syntax:
   parameters k=expr ...        — Global parameters with expression evaluation
   include "file" [section=X]   — Skip (process models)
   ahdl_include "file.va"       — VA model include
-  Vname (n+ n-) vsource ...    — DC/pulse/pwl/sin source
+  Vname (n+ n-) vsource ...    — DC/pulse/pwl/sin/square source
   Iname (nodes) Model k=v      — VA model instance
   tran tran stop=val ...       — Transient analysis
   save node1 node2 ...         — Signals to record
@@ -36,7 +36,7 @@ class SpectreSource:
     name: str
     node_pos: str
     node_neg: str
-    source_type: str  # 'dc', 'pulse', 'pwl', 'sin'
+    source_type: str  # 'dc', 'pulse', 'pwl', 'sin', 'square'
     params: Dict[str, Any] = field(default_factory=dict)
     kind: str = "voltage"
 

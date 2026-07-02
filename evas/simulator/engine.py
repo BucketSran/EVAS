@@ -7622,3 +7622,99 @@ def ramp(v_start, v_end, t_start, t_end):
         frac = (t - t_start) / (t_end - t_start)
         return v_start + frac * (v_end - v_start)
     return wfn
+
+
+def square(v_lo, v_hi, period, delay=0.0, rise=1e-12, fall=1e-12, width=None):
+    """Create a square waveform.
+
+    Mirrors Spectre ``vsource type=square`` semantics: a periodic waveform
+    that sits at ``v_lo`` until ``delay``, ramps linearly to ``v_hi`` over
+    ``rise``, holds at ``v_hi`` for ``width`` (the high plateau after the rise
+    ramp), then ramps back to ``v_lo`` over ``fall``.  When ``width`` is
+    omitted it defaults to roughly 50% duty (``period/2 - rise/2 - fall/2``);
+    when ``period`` is non-positive the wave is a single one-shot pulse that
+    stays at ``v_hi`` after the rise.
+
+    The returned callable carries ``_next_breakpoint`` (the edge schedule) so
+    that source-driven ``@cross`` events on a ``type=square`` node are detected
+    at each edge, matching the behaviour already provided for ``pulse`` and
+    ``pwl`` sources.  Without it the source-breakpoint scan in
+    ``TransientSim.run`` would have no edges to align to and ``@cross`` would
+    appear never to fire.
+    """
+    period = float(period)
+    rise = float(rise)
+    fall = float(fall)
+    delay = float(delay)
+    one_shot = period <= 0.0
+    if width is not None:
+        width = float(width)
+    elif one_shot:
+        width = float("inf")
+    else:
+        # ~50% duty: split the period around the rise/fall ramps.
+        width = max(0.0, period / 2.0 - rise / 2.0 - fall / 2.0)
+    fall_start = rise + width
+    fall_end = fall_start + fall
+    # Include edge interior breakpoints so source-driven @cross events are
+    # scheduled in chronological order, same idiom as pulse().
+    knees = {0.0, rise}
+    if np.isfinite(fall_start):
+        knees.add(fall_start)
+    if np.isfinite(fall_end):
+        knees.add(fall_end)
+    if rise > 0:
+        knees.add(0.5 * rise)
+    if fall > 0 and np.isfinite(fall_start):
+        knees.add(fall_start + 0.5 * fall)
+    knees = sorted(knees)
+
+    def wfn(t):
+        t_eff = t - delay
+        if t_eff < 0:
+            return v_lo
+        t_mod = t_eff if one_shot else t_eff % period
+        if t_mod < rise:
+            frac = t_mod / rise if rise > 0 else 1.0
+            return v_lo + frac * (v_hi - v_lo)
+        elif t_mod < fall_start:
+            return v_hi
+        elif t_mod < fall_end:
+            frac = (t_mod - fall_start) / fall if fall > 0 else 1.0
+            return v_hi - frac * (v_hi - v_lo)
+        else:
+            return v_lo
+
+    def _bpfn(t):
+        if t < delay:
+            return delay
+        if one_shot:
+            for k in knees:
+                candidate = delay + k
+                if candidate > t + 1e-18:
+                    return candidate
+            return None
+        t_eff = t - delay
+        n = int(t_eff / period)
+        for _ in range(2):
+            for k in knees:
+                candidate = delay + n * period + k
+                if candidate > t + 1e-18:
+                    return candidate
+            n += 1
+        return None
+
+    wfn._next_breakpoint = _bpfn
+    wfn._evas_waveform = {
+        "kind": "square",
+        "v_lo": float(v_lo),
+        "v_hi": float(v_hi),
+        "period": float(period),
+        "delay": float(delay),
+        "rise": float(rise),
+        "fall": float(fall),
+        "width": float(width) if np.isfinite(width) else 0.0,
+        "has_width": width is not None,
+        "one_shot": bool(one_shot),
+    }
+    return wfn

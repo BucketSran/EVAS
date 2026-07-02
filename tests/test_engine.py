@@ -29,6 +29,7 @@ from evas.simulator.engine import (
     pwl,
     ramp,
     sine,
+    square,
 )
 from evas.simulator.rust_coverage import (
     audit_veriloga_paths,
@@ -491,6 +492,73 @@ class TestSine:
         fn = sine(offset=0.0, amplitude=1.0, freq=1e9, phase=math.pi / 2)
         # sin(π/2) at t=0 → 1.0
         assert fn(0.0) == pytest.approx(1.0, abs=1e-9)
+
+
+class TestSquare:
+    """square() waveform factory (EVAS defect D1: vsource type=square support).
+
+    Verifies the Spectre square semantics: val0/val1 plateaus with linear
+    rise/fall ramps, period wrap, and that the returned waveform carries an
+    edge schedule (_next_breakpoint) so source-driven @cross events align to
+    each edge.
+    """
+
+    def test_pre_delay_is_val_lo(self):
+        fn = square(v_lo=0.0, v_hi=1.8, period=10e-9, delay=1e-9)
+        assert fn(0.0) == pytest.approx(0.0)
+        assert fn(0.9e-9) == pytest.approx(0.0)
+
+    def test_high_plateau_after_rise(self):
+        fn = square(v_lo=0.0, v_hi=1.8, period=10e-9, delay=0.0, rise=50e-12)
+        # Just past the rise ramp, sits at v_hi.
+        assert fn(60e-12) == pytest.approx(1.8)
+        assert fn(1e-9) == pytest.approx(1.8)
+
+    def test_mid_rise_linear_interpolation(self):
+        fn = square(v_lo=0.0, v_hi=0.9, period=10e-9, delay=0.0, rise=20e-12)
+        # Halfway through the rise ramp -> 0.45.
+        assert fn(10e-12) == pytest.approx(0.45, abs=1e-9)
+
+    def test_mid_fall_linear_interpolation(self):
+        fn = square(v_lo=0.0, v_hi=0.9, period=1e-9, delay=0.0,
+                    rise=0.0, fall=20e-12, width=500e-12)
+        # fall_start = rise + width = 500e-12; halfway through fall -> 0.45.
+        assert fn(500e-12) == pytest.approx(0.9)
+        assert fn(510e-12) == pytest.approx(0.45, abs=1e-9)
+        assert fn(520e-12) == pytest.approx(0.0)
+
+    def test_period_wrap(self):
+        fn = square(v_lo=0.0, v_hi=1.0, period=1e-9, delay=0.0,
+                    rise=0.0, fall=0.0)
+        # Zero rise/fall, default width = period/2: high first half, low second.
+        assert fn(0.25e-9) == pytest.approx(1.0)
+        assert fn(0.75e-9) == pytest.approx(0.0)
+        # Wraps into the next cycle.
+        assert fn(1.25e-9) == pytest.approx(1.0)
+        assert fn(1.75e-9) == pytest.approx(0.0)
+
+    def test_one_shot_stays_high(self):
+        fn = square(v_lo=0.0, v_hi=1.8, period=0.0, delay=0.0, rise=50e-12)
+        assert fn(60e-12) == pytest.approx(1.8)
+        # No fall: stays high forever.
+        assert fn(1e-6) == pytest.approx(1.8)
+
+    def test_carries_edge_breakpoint_schedule(self):
+        """The _next_breakpoint is what makes @cross fire on square-driven
+        signals — without it the source-breakpoint scan has no edges."""
+        fn = square(v_lo=0.0, v_hi=1.8, period=10e-9, delay=1e-9,
+                    rise=50e-12, fall=50e-12, width=500e-12)
+        assert hasattr(fn, "_next_breakpoint")
+        # Before delay, first breakpoint is the delay itself.
+        assert fn._next_breakpoint(0.0) == pytest.approx(1e-9)
+        # At delay the edge schedule begins; knees include 0.5*rise (a mid-ramp
+        # knee, same idiom as pulse()), so the first edge after the delay is
+        # the mid-rise knee at delay + 0.5*rise.
+        assert fn._next_breakpoint(1e-9) == pytest.approx(1e-9 + 25e-12)
+        # ... then the top-of-rise edge.
+        assert fn._next_breakpoint(1e-9 + 25e-12) == pytest.approx(1e-9 + 50e-12)
+        meta = getattr(fn, "_evas_waveform", {})
+        assert meta.get("kind") == "square"
 
 
 # ===========================================================================

@@ -25,7 +25,7 @@ from evas.compiler.parser import (
 )
 from evas.compiler.preprocessor import preprocess
 from evas.simulator.backend import compile_module
-from evas.simulator.engine import SimResult, Simulator, dc, pulse, pwl, sine
+from evas.simulator.engine import SimResult, Simulator, dc, pulse, pwl, sine, square
 from evas.simulator.indexed import (
     build_indexed_run_plan,
     check_indexed_trace_round_trip,
@@ -689,6 +689,39 @@ def _add_spectre_source(sim: Simulator, src: SpectreSource,
             return warn
 
         sim.add_source(node, sine(offset=offset, amplitude=ampl, freq=freq, phase=phase))
+
+    elif stype == 'square':
+        # Spectre vsource type=square: val0/val1 low/high plateaus, period,
+        # delay, rise, fall ramps, and width (high plateau after the rise).
+        v0 = float(params.get('val0', 0.0))
+        v1 = float(params.get('val1', 1.0))
+        period = float(params.get('period', 0.0))
+
+        if v0 == v1:
+            warn.append(f"{src.name}: square val0 == val1 == {v0} "
+                        f"— treated as DC {v0} V")
+            sim.add_source(node, dc(v0))
+            return warn
+
+        delay = float(params.get('delay', 0.0))
+        rise = float(params.get('rise', 1e-12))
+        fall = float(params.get('fall', 1e-12))
+        width = params.get('width', None)
+        if period <= 0 and width is None:
+            warn.append(f"{src.name}: square period not set "
+                        "- treated as nonperiodic one-shot square pulse")
+
+        sim.add_source(node, square(
+            v_lo=v0, v_hi=v1, period=period, delay=delay,
+            rise=rise, fall=fall,
+            width=float(width) if width is not None else None,
+        ))
+
+    else:
+        # Fail loudly on unsupported source types instead of silently dropping
+        # the source (which would leave the driven node stuck at its initial
+        # value and make any @cross on it never fire).  See EVAS defect D1.
+        warn.append(f"{src.name}: unsupported vsource type {stype!r} — ignored")
 
     return warn
 
