@@ -72,6 +72,10 @@ classes of issues: `compat-error` for EVAS/Spectre subset problems that should
 block a candidate, and warning diagnostics for AHDL-style modeling risks such as
 discrete signals directly driving analog contributions or suspicious transition
 usage. Lint warnings do not change simulation pass/fail status.
+Compatibility diagnostics include Cadence/Spectre-aligned cases such as
+conditionally executed analog operators (`transition`, `slew`, `idt`) and
+discipline vector ranges that depend on runtime variables instead of numeric or
+parameter constant expressions.
 
 **Minimal testbench template** (`.scs`):
 

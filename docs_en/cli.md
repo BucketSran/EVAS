@@ -70,6 +70,12 @@ Diagnostics use `compat-error` for EVAS/Spectre subset issues and warning
 severities for AHDL-style modeling risks. The command exits with `1` only when
 at least one `compat-error` is reported.
 
+Compatibility diagnostics are intended to mirror concrete Cadence/Spectre
+front-end failures when possible. Current examples include conditionally
+executed analog operators such as `transition`, `slew`, and `idt`, plus
+discipline vector ranges that use runtime variables instead of numeric or
+parameter constant expressions.
+
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--format` | `text` | Diagnostic output: `text` or `json` |

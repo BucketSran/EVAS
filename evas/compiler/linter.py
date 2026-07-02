@@ -13,6 +13,7 @@ from typing import Iterable, List, Optional, Sequence, Set
 from evas.netlist.spectre_parser import parse_spectre
 
 from . import ast_nodes as va_ast
+from .lexer import Token, TokenType, tokenize
 from .parser import ParseError, SpectreReservedIdentifierError, parse_all
 from .preprocessor import PreprocessorError, preprocess
 
@@ -133,6 +134,7 @@ def lint_source(
     diagnostics: List[Diagnostic] = []
     try:
         pp_src, _defines, _default_transition = preprocess(source, source_dir=source_dir)
+        range_diagnostics = _lint_nonconstant_discipline_ranges(pp_src, filename)
         modules = parse_all(pp_src)
     except PreprocessorError as exc:
         return [
@@ -160,6 +162,13 @@ def lint_source(
         ]
     except ParseError as exc:
         token = getattr(exc, "token", None)
+        range_diagnostics = (
+            _lint_nonconstant_discipline_ranges(pp_src, filename)
+            if "pp_src" in locals()
+            else []
+        )
+        if any(d.code == "EVAS-COMP-E2446" for d in range_diagnostics):
+            return range_diagnostics
         return [
             Diagnostic(
                 code="EVAS-COMP-EPARSE",
@@ -172,6 +181,7 @@ def lint_source(
             )
         ]
 
+    diagnostics.extend(range_diagnostics)
     for module in modules:
         diagnostics.extend(_lint_module(module, filename, min_transition))
     return diagnostics
@@ -315,19 +325,12 @@ def _lint_statement(
                     spectre_ids=["VACOMP-2157"],
                 )
             )
-        if conditional_depth > 0 and _expr_has_call(stmt.expr, "transition"):
-            diagnostics.append(
-                Diagnostic(
-                    code="EVAS-COMP-E2143",
-                    severity=COMPAT_ERROR,
-                    message=(
-                        "transition() contribution is inside a runtime "
-                        "conditional/event/loop/case statement"
-                    ),
-                    file=filename,
-                    module=module,
-                    rule="conditional-transition",
-                    spectre_ids=["VACOMP-2143"],
+        if conditional_depth > 0:
+            diagnostics.extend(
+                _conditional_analog_operator_diagnostics(
+                    stmt.expr,
+                    filename,
+                    module,
                 )
             )
         if (
@@ -356,19 +359,12 @@ def _lint_statement(
         return
 
     if isinstance(stmt, va_ast.Assignment):
-        if conditional_depth > 0 and _expr_has_call(stmt.value, "transition"):
-            diagnostics.append(
-                Diagnostic(
-                    code="EVAS-COMP-E2143",
-                    severity=COMPAT_ERROR,
-                    message=(
-                        "transition() expression is inside a runtime "
-                        "conditional/event/loop/case statement"
-                    ),
-                    file=filename,
-                    module=module,
-                    rule="conditional-transition",
-                    spectre_ids=["VACOMP-2143"],
+        if conditional_depth > 0:
+            diagnostics.extend(
+                _conditional_analog_operator_diagnostics(
+                    stmt.value,
+                    filename,
+                    module,
                 )
             )
         _lint_expr(
@@ -839,6 +835,43 @@ def _event_has_timer(event: va_ast.EventExpr | va_ast.CombinedEvent) -> bool:
     return event.event_type == va_ast.EventType.TIMER
 
 
+def _conditional_analog_operator_diagnostics(
+    expr: Optional[va_ast.Expr],
+    filename: str,
+    module: str,
+) -> List[Diagnostic]:
+    diagnostics: List[Diagnostic] = []
+    for call in _iter_function_calls(expr):
+        spec = _CONDITIONAL_ANALOG_OPERATOR_CODES.get(call.name.lower())
+        if spec is None:
+            continue
+        code, spectre_id = spec
+        diagnostics.append(
+            Diagnostic(
+                code=code,
+                severity=COMPAT_ERROR,
+                message=(
+                    f"{call.name}() analog operator is inside a runtime "
+                    "conditional/event/loop/case statement"
+                ),
+                file=filename,
+                module=module,
+                rule="conditional-analog-operator",
+                spectre_ids=[spectre_id],
+            )
+        )
+    return diagnostics
+
+
+def _iter_function_calls(expr: Optional[va_ast.Expr]) -> Iterable[va_ast.FunctionCall]:
+    if expr is None:
+        return
+    if isinstance(expr, va_ast.FunctionCall):
+        yield expr
+    for child in _expr_children(expr):
+        yield from _iter_function_calls(child)
+
+
 def _expr_has_call(expr: Optional[va_ast.Expr], call_name: str) -> bool:
     if expr is None:
         return False
@@ -885,6 +918,162 @@ def _expr_has_discrete_behavior(expr: Optional[va_ast.Expr], discrete_vars: Set[
         _expr_has_discrete_behavior(child, discrete_vars)
         for child in _expr_children(expr)
     )
+
+
+_DISCIPLINE_RANGE_TOKENS = {
+    TokenType.ELECTRICAL,
+    TokenType.VOLTAGE,
+    TokenType.CURRENT,
+}
+
+_DIRECTION_TOKENS = {
+    TokenType.INPUT,
+    TokenType.OUTPUT,
+    TokenType.INOUT,
+}
+
+_CONSTANT_RANGE_OPERATORS = {
+    TokenType.NUMBER,
+    TokenType.IDENT,
+    TokenType.PLUS,
+    TokenType.MINUS,
+    TokenType.STAR,
+    TokenType.SLASH,
+    TokenType.PERCENT,
+    TokenType.LPAREN,
+    TokenType.RPAREN,
+    TokenType.COLON,
+}
+
+
+def _lint_nonconstant_discipline_ranges(
+    source: str,
+    filename: str,
+) -> List[Diagnostic]:
+    tokens = tokenize(source)
+    diagnostics: List[Diagnostic] = []
+    emitted: set[tuple[int, int]] = set()
+    for module_tokens in _iter_module_token_slices(tokens):
+        parameter_names = _module_parameter_names(module_tokens)
+        for statement in _iter_semicolon_statements(module_tokens):
+            if not _is_discipline_declaration_statement(statement):
+                continue
+            for lbracket, range_tokens in _iter_bracket_ranges(statement):
+                key = (lbracket.line, lbracket.col)
+                if key in emitted:
+                    continue
+                if _range_uses_nonconstant_identifier(range_tokens, parameter_names):
+                    emitted.add(key)
+                    diagnostics.append(
+                        Diagnostic(
+                            code="EVAS-COMP-E2446",
+                            severity=COMPAT_ERROR,
+                            message=(
+                                "discipline vector range uses a non-constant "
+                                "identifier; Spectre requires numeric or "
+                                "parameter constant expressions"
+                            ),
+                            file=filename,
+                            line=lbracket.line,
+                            column=lbracket.col,
+                            rule="nonconstant-discipline-range",
+                            spectre_ids=["VACOMP-2446"],
+                        )
+                    )
+    return diagnostics
+
+
+def _iter_module_token_slices(tokens: Sequence[Token]) -> Iterable[Sequence[Token]]:
+    idx = 0
+    while idx < len(tokens):
+        if tokens[idx].type not in {TokenType.MODULE, TokenType.CONNECTMODULE}:
+            idx += 1
+            continue
+        end_type = (
+            TokenType.ENDCONNECTMODULE
+            if tokens[idx].type == TokenType.CONNECTMODULE
+            else TokenType.ENDMODULE
+        )
+        start = idx
+        idx += 1
+        while idx < len(tokens) and tokens[idx].type != end_type:
+            idx += 1
+        if idx < len(tokens):
+            idx += 1
+        yield tokens[start:idx]
+
+
+def _module_parameter_names(tokens: Sequence[Token]) -> set[str]:
+    names: set[str] = set()
+    idx = 0
+    while idx < len(tokens):
+        if tokens[idx].type != TokenType.PARAMETER:
+            idx += 1
+            continue
+        idx += 1
+        if idx < len(tokens) and tokens[idx].type in {
+            TokenType.REAL,
+            TokenType.INTEGER,
+        }:
+            idx += 1
+        elif (
+            idx < len(tokens)
+            and tokens[idx].type == TokenType.IDENT
+            and tokens[idx].value == "string"
+        ):
+            idx += 1
+        if idx < len(tokens) and tokens[idx].type == TokenType.IDENT:
+            names.add(tokens[idx].value)
+        while idx < len(tokens) and tokens[idx].type != TokenType.SEMI:
+            idx += 1
+    return names
+
+
+def _iter_semicolon_statements(tokens: Sequence[Token]) -> Iterable[Sequence[Token]]:
+    start = 0
+    for idx, token in enumerate(tokens):
+        if token.type == TokenType.SEMI:
+            yield tokens[start:idx + 1]
+            start = idx + 1
+
+
+def _is_discipline_declaration_statement(tokens: Sequence[Token]) -> bool:
+    types = {token.type for token in tokens}
+    return bool(types & _DISCIPLINE_RANGE_TOKENS)
+
+
+def _iter_bracket_ranges(
+    tokens: Sequence[Token],
+) -> Iterable[tuple[Token, Sequence[Token]]]:
+    idx = 0
+    while idx < len(tokens):
+        if tokens[idx].type != TokenType.LBRACKET:
+            idx += 1
+            continue
+        start = idx
+        depth = 1
+        idx += 1
+        while idx < len(tokens) and depth:
+            if tokens[idx].type == TokenType.LBRACKET:
+                depth += 1
+            elif tokens[idx].type == TokenType.RBRACKET:
+                depth -= 1
+            idx += 1
+        end = idx - 1
+        if end > start:
+            yield tokens[start], tokens[start + 1:end]
+
+
+def _range_uses_nonconstant_identifier(
+    tokens: Sequence[Token],
+    parameter_names: set[str],
+) -> bool:
+    for token in tokens:
+        if token.type not in _CONSTANT_RANGE_OPERATORS:
+            return True
+        if token.type == TokenType.IDENT and token.value not in parameter_names:
+            return True
+    return False
 
 
 def _expr_children(expr: va_ast.Expr) -> Iterable[va_ast.Expr]:
@@ -964,3 +1153,10 @@ _SUPPORTED_FUNCTIONS = {
 
 def _is_supported_function(name: str, user_function_names: Set[str]) -> bool:
     return name in _SUPPORTED_FUNCTIONS or name in user_function_names
+
+
+_CONDITIONAL_ANALOG_OPERATOR_CODES = {
+    "transition": ("EVAS-COMP-E2143", "VACOMP-2143"),
+    "slew": ("EVAS-COMP-E2151", "VACOMP-2151"),
+    "idt": ("EVAS-COMP-E2154", "VACOMP-2154"),
+}

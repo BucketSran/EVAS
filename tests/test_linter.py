@@ -118,6 +118,71 @@ def test_conditional_transition_is_compat_error():
     assert has_compat_errors(diags)
 
 
+def test_conditional_idt_is_compat_error():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module conditional_idt(inp, en, out);
+            input inp, en;
+            output out;
+            electrical inp, en, out;
+            analog begin
+                if (V(en) > 0.5)
+                    V(out) <+ idt(V(inp));
+                else
+                    V(out) <+ 0.0;
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-COMP-E2154" in _codes(diags)
+    assert has_compat_errors(diags)
+
+
+def test_conditional_slew_is_compat_error():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module conditional_slew(inp, en, out);
+            input inp, en;
+            output out;
+            electrical inp, en, out;
+            analog begin
+                if (V(en) > 0.5)
+                    V(out) <+ slew(V(inp), 1e9, 1e9);
+                else
+                    V(out) <+ 0.0;
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-COMP-E2151" in _codes(diags)
+    assert has_compat_errors(diags)
+
+
+def test_conditional_direct_contribution_does_not_error():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module conditional_direct(en, out);
+            input en;
+            output out;
+            electrical en, out;
+            analog begin
+                if (V(en) > 0.5)
+                    V(out) <+ 1.0;
+                else
+                    V(out) <+ 0.0;
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert not has_compat_errors(diags)
+
+
 def test_transition_continuous_input_warns():
     source = textwrap.dedent("""\
         `include "disciplines.vams"
@@ -231,6 +296,71 @@ def test_conditional_timer_warns():
     diags = lint_source(source)
 
     assert "EVAS-AHDL-W8007" in _codes(diags)
+    assert not has_compat_errors(diags)
+
+
+def test_variable_electrical_range_is_compat_error():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module variable_range(inp, out);
+            input inp;
+            output out;
+            electrical inp, out;
+            integer n;
+            electrical [n-1:0] tmp;
+            analog begin
+                V(tmp[0]) <+ V(inp);
+                V(out) <+ V(tmp[0]);
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-COMP-E2446" in _codes(diags)
+    assert has_compat_errors(diags)
+
+
+def test_parameter_electrical_range_is_not_misclassified_as_vacomp_2446():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module parameter_range(inp, out);
+            input inp;
+            output out;
+            electrical inp, out;
+            parameter integer N = 4;
+            electrical [N-1:0] tmp;
+            analog begin
+                V(tmp[0]) <+ V(inp);
+                V(out) <+ V(tmp[0]);
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-COMP-E2446" not in _codes(diags)
+    assert "EVAS-COMP-EPARSE" in _codes(diags)
+
+
+def test_constant_electrical_range_is_allowed():
+    source = textwrap.dedent("""\
+        `include "disciplines.vams"
+        module constant_range(inp, out);
+            input inp;
+            output out;
+            electrical inp, out;
+            electrical [3:0] tmp;
+            analog begin
+                V(tmp[0]) <+ V(inp);
+                V(out) <+ V(tmp[0]);
+            end
+        endmodule
+    """)
+
+    diags = lint_source(source)
+
+    assert "EVAS-COMP-E2446" not in _codes(diags)
     assert not has_compat_errors(diags)
 
 
