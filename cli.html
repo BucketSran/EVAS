@@ -6,7 +6,7 @@
 <link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="Examples Catalog" href="examples/index.html"><link rel="prev" title="Quickstart" href="quickstart.html">
 
     <link rel="shortcut icon" href="_static/favicon.svg"><!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>CLI Reference - EVAS 0.5.2 documentation</title>
+        <title>CLI Reference - EVAS 0.6.1 documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
@@ -162,7 +162,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="index.html"><div class="brand">EVAS 0.5.2 documentation</div></a>
+      <a href="index.html"><div class="brand">EVAS 0.6.1 documentation</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -183,7 +183,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
   
-  <span class="sidebar-brand-text">EVAS 0.5.2 documentation</span>
+  <span class="sidebar-brand-text">EVAS 0.6.1 documentation</span>
   
 </a><form class="sidebar-search-container" method="get" action="search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -293,6 +293,7 @@ The legacy <code class="docutils literal notranslate"><span class="pre">evas2</s
 <p>Simulate an arbitrary Spectre netlist file directly.</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>evas<span class="w"> </span>simulate<span class="w"> </span>path/to/tb_mydesign.scs<span class="w"> </span>-o<span class="w"> </span>output/mydesign<span class="w"> </span>-log<span class="w"> </span>sim.log
 evas<span class="w"> </span>simulate<span class="w"> </span>path/to/tb_mydesign.scs<span class="w"> </span>--engine<span class="w"> </span>evas-rust
+evas<span class="w"> </span>simulate<span class="w"> </span>path/to/tb_mydesign.scs<span class="w"> </span>--ahdllint
 </pre></div>
 </div>
 <div class="table-wrapper colwidths-auto docutils container">
@@ -316,10 +317,22 @@ evas<span class="w"> </span>simulate<span class="w"> </span>path/to/tb_mydesign.
 <td><p><code class="docutils literal notranslate"><span class="pre">python</span></code></p></td>
 <td><p>Engine override: <code class="docutils literal notranslate"><span class="pre">python</span></code>, <code class="docutils literal notranslate"><span class="pre">evas-rust</span></code>, <code class="docutils literal notranslate"><span class="pre">evas2</span></code>, or <code class="docutils literal notranslate"><span class="pre">rust2</span></code></p></td>
 </tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--ahdllint</span></code></p></td>
+<td><p>off</p></td>
+<td><p>Run EVAS AHDL-style lint as a non-blocking simulation preflight</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--ahdllint-min-transition</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">1e-12</span></code></p></td>
+<td><p>Minimum transition rise/fall time used by <code class="docutils literal notranslate"><span class="pre">--ahdllint</span></code></p></td>
+</tr>
 </tbody>
 </table>
 </div>
-<p>Exit code is <code class="docutils literal notranslate"><span class="pre">0</span></code> on success, <code class="docutils literal notranslate"><span class="pre">1</span></code> on simulation error.</p>
+<p>Exit code is <code class="docutils literal notranslate"><span class="pre">0</span></code> on success, <code class="docutils literal notranslate"><span class="pre">1</span></code> on simulation error.
+The lint preflight reports diagnostics in the simulator log and increments the
+warning count, but it does not by itself change simulation pass/fail status.
+Netlists may also enable it with <code class="docutils literal notranslate"><span class="pre">simulatorOptions</span> <span class="pre">options</span> <span class="pre">ahdllint=true</span></code> or
+<code class="docutils literal notranslate"><span class="pre">evas_ahdllint=true</span></code>.</p>
 </section>
 <section id="evas-lint-file-va-file-scs">
 <h2><code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">lint</span> <span class="pre">&lt;file.va|file.scs&gt;</span></code><a class="headerlink" href="#evas-lint-file-va-file-scs" title="Link to this heading">¶</a></h2>
@@ -464,7 +477,7 @@ reports or generated certification output.</p>
       
     </aside>
   </div>
-</div><script src="_static/documentation_options.js?v=8e576371"></script>
+</div><script src="_static/documentation_options.js?v=2bd037f0"></script>
     <script src="_static/doctools.js?v=fd6eb6e6"></script>
     <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="_static/scripts/furo.js?v=46bd48cc"></script>

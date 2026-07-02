@@ -46,6 +46,7 @@ Simulate an arbitrary Spectre netlist file directly.
 ```bash
 evas simulate path/to/tb_mydesign.scs -o output/mydesign -log sim.log
 evas simulate path/to/tb_mydesign.scs --engine evas-rust
+evas simulate path/to/tb_mydesign.scs --ahdllint
 ```
 
 | Option | Default | Description |
@@ -53,8 +54,14 @@ evas simulate path/to/tb_mydesign.scs --engine evas-rust
 | `-o / --output` | `./output` | Output directory |
 | `-log` | *(none)* | Path for a log file |
 | `--engine` | `python` | Engine override: `python`, `evas-rust`, `evas2`, or `rust2` |
+| `--ahdllint` | off | Run EVAS AHDL-style lint as a non-blocking simulation preflight |
+| `--ahdllint-min-transition` | `1e-12` | Minimum transition rise/fall time used by `--ahdllint` |
 
 Exit code is `0` on success, `1` on simulation error.
+The lint preflight reports diagnostics in the simulator log and increments the
+warning count, but it does not by itself change simulation pass/fail status.
+Netlists may also enable it with `simulatorOptions options ahdllint=true` or
+`evas_ahdllint=true`.
 
 ## `evas lint <file.va|file.scs>`
 
