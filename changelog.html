@@ -6,7 +6,7 @@
 <link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="prev" title="Netlist" href="api/netlist.html">
 
     <link rel="shortcut icon" href="_static/favicon.svg"><!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>Changelog - EVAS 0.6.1 documentation</title>
+        <title>Changelog - EVAS 0.8.7 documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
@@ -162,7 +162,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="index.html"><div class="brand">EVAS 0.6.1 documentation</div></a>
+      <a href="index.html"><div class="brand">EVAS 0.8.7 documentation</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -183,7 +183,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
   
-  <span class="sidebar-brand-text">EVAS 0.6.1 documentation</span>
+  <span class="sidebar-brand-text">EVAS 0.8.7 documentation</span>
   
 </a><form class="sidebar-search-container" method="get" action="search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -195,6 +195,7 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="support_tiers.html">Support Tiers</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cli.html">CLI Reference</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">Examples</span></p>
@@ -262,7 +263,252 @@
 <h2>Unreleased<a class="headerlink" href="#unreleased" title="Link to this heading">¶</a></h2>
 </section>
 <section id="id1">
-<h2>[0.6.1] — 2026-07-02<a class="headerlink" href="#id1" title="Link to this heading">¶</a></h2>
+<h2>[0.8.7] — 2026-07-28<a class="headerlink" href="#id1" title="Link to this heading">¶</a></h2>
+<section id="fixed-spectre-event-publication">
+<h3>Fixed — Spectre Event Publication<a class="headerlink" href="#fixed-spectre-event-publication" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Align accepted cross events, transition targets, and timer publication with
+audited Spectre ordering.</p></li>
+<li><p>Preserve and republish state-owned timer schedules across combined and nested
+event bodies.</p></li>
+<li><p>Evaluate continuous-state aliases on the post-cross side while preserving
+the accepted event timestamp, including exact-touch falling transitions.</p></li>
+</ul>
+</section>
+<section id="changed-rust-only-production-boundary">
+<h3>Changed — Rust-Only Production Boundary<a class="headerlink" href="#changed-rust-only-production-boundary" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Keep every production simulation on <code class="docutils literal notranslate"><span class="pre">evas-rust</span></code>; no syntax feature can route
+execution to the private Python parity engine.</p></li>
+<li><p>Keep <code class="docutils literal notranslate"><span class="pre">absdelay()</span></code> explicitly unsupported and fail closed for runtime-indexed
+state arrays or time-dependent <code class="docutils literal notranslate"><span class="pre">cross($abstime/$realtime</span> <span class="pre">-</span> <span class="pre">...)</span></code> until Rust
+owns those semantics.</p></li>
+<li><p>Preserve explicit Rust engine identity without fallback metadata in run
+artifacts.</p></li>
+</ul>
+</section>
+<section id="added-spectre-frontend-coverage">
+<h3>Added — Spectre Frontend Coverage<a class="headerlink" href="#added-spectre-frontend-coverage" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Expand strict parser, linter, compile-gate, named-block, timer, event, and
+cross regression coverage for the supported standalone Spectre subset.</p></li>
+<li><p>Bump the Rust core to 0.2.4; the C ABI remains 20260718.</p></li>
+</ul>
+</section>
+</section>
+<section id="id2">
+<h2>[0.8.6] — 2026-07-27<a class="headerlink" href="#id2" title="Link to this heading">¶</a></h2>
+<section id="added-audited-spectre-acceptance">
+<h3>Added — Audited Spectre Acceptance<a class="headerlink" href="#added-audited-spectre-acceptance" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Accept the audited Spectre 21.1 Verilog-A frontend and netlist forms while
+retaining explicit rejection tests for unsupported neighboring syntax.</p></li>
+<li><p>Add deterministic compile-audit replay and CLI reporting for evaluator
+acceptance evidence.</p></li>
+<li><p>Add voltage/current-source topology and floating-island coverage.</p></li>
+</ul>
+</section>
+<section id="changed-fail-closed-netlist-elaboration">
+<h3>Changed — Fail-Closed Netlist Elaboration<a class="headerlink" href="#changed-fail-closed-netlist-elaboration" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Reject malformed, unsupported, or unresolved evaluator inputs at parser,
+compile, and runner boundaries instead of silently repairing or skipping
+them.</p></li>
+<li><p>Preserve Spectre-compatible source topology and require include paths to
+resolve exactly.</p></li>
+</ul>
+</section>
+<section id="fixed-event-runtime-parity">
+<h3>Fixed — Event Runtime Parity<a class="headerlink" href="#fixed-event-runtime-parity" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Align timer, cross, transition, numeric, state-binding, and <code class="docutils literal notranslate"><span class="pre">idtmod</span></code>
+behavior across Python lowering and the production Rust fastpath.</p></li>
+<li><p>Preserve one event body per physical crossing, accepted event ordering,
+integrator origins, and delayed-transition output refresh.</p></li>
+<li><p>Preserve exact-touch detector behavior when no known future driver exists
+while rejecting terminal touches whose source trajectory never crosses.</p></li>
+</ul>
+</section>
+<section id="ci-native-core-coverage">
+<h3>CI — Native Core Coverage<a class="headerlink" href="#ci-native-core-coverage" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Run the Rust release unit suite in CI in addition to the Python platform
+matrix and installed-wheel identity check.</p></li>
+<li><p>Bump the Rust core to 0.2.3; the C ABI remains 20260718.</p></li>
+</ul>
+</section>
+</section>
+<section id="id3">
+<h2>[0.8.5] — 2026-07-25<a class="headerlink" href="#id3" title="Link to this heading">¶</a></h2>
+<section id="fixed-dynamic-zero-period-timers">
+<h3>Fixed — Dynamic Zero-Period Timers<a class="headerlink" href="#fixed-dynamic-zero-period-timers" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Treat <code class="docutils literal notranslate"><span class="pre">timer(start,</span> <span class="pre">0)</span></code> as a Spectre-compatible absolute one-shot timer,
+including dynamic targets that read runtime state.</p></li>
+<li><p>Preserve dynamic target rearming across Python, Rust full-model lowering,
+shadow audit runtime, and combined events.</p></li>
+<li><p>Keep positive-period timer behavior and the Rust ABI unchanged.</p></li>
+</ul>
+</section>
+</section>
+<section id="id4">
+<h2>[0.8.4] — 2026-07-23<a class="headerlink" href="#id4" title="Link to this heading">¶</a></h2>
+<section id="fixed-seeded-random-streams">
+<h3>Fixed — Seeded Random Streams<a class="headerlink" href="#fixed-seeded-random-streams" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Preserve inout random seed state through EVAS2 event-expression lowering.</p></li>
+<li><p>Isolate seeded random streams by module instance so sibling instances with
+the same local seed reproduce the same deterministic sequence without
+sharing stream progress.</p></li>
+</ul>
+</section>
+</section>
+<section id="id5">
+<h2>[0.8.3] — 2026-07-18<a class="headerlink" href="#id5" title="Link to this heading">¶</a></h2>
+<section id="added-build-identity">
+<h3>Added — Build Identity<a class="headerlink" href="#added-build-identity" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Added <code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">--version</span></code> and <code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">--version</span> <span class="pre">--format</span> <span class="pre">json</span></code> with package,
+Rust core, ABI, build revision, presence, and loadability metadata.</p></li>
+<li><p>Write the same machine-readable provenance to <code class="docutils literal notranslate"><span class="pre">evas_identity.json</span></code> for every
+simulation run so benchmark artifacts can retain evaluator identity.</p></li>
+<li><p>Added installed-wheel checks for both human-readable and JSON version output.</p></li>
+</ul>
+</section>
+<section id="changed-fail-closed-production-engine">
+<h3>Changed — Fail-Closed Production Engine<a class="headerlink" href="#changed-fail-closed-production-engine" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Removed Python from the public CLI, environment, and netlist engine contract;
+<code class="docutils literal notranslate"><span class="pre">evas-rust</span></code> is now the only supported production simulation engine.</p></li>
+<li><p>Kept <code class="docutils literal notranslate"><span class="pre">evas2</span></code> and <code class="docutils literal notranslate"><span class="pre">rust2</span></code> as time-bounded input aliases while recording the
+canonical <code class="docutils literal notranslate"><span class="pre">evas-rust</span></code> identity in logs and run metadata.</p></li>
+<li><p>Fail with an explicit diagnostic when the Rust core is missing, unloadable,
+or ABI-incompatible instead of running the Python compatibility engine.</p></li>
+<li><p>Stopped publishing pure Python wheels; release wheels now always contain the
+production Rust core.</p></li>
+</ul>
+</section>
+<section id="fixed-spectre-netlist-validation">
+<h3>Fixed — Spectre Netlist Validation<a class="headerlink" href="#fixed-spectre-netlist-validation" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Reject source instances without a parenthesized terminal list instead of
+silently simulating an undriven circuit.</p></li>
+</ul>
+</section>
+</section>
+<section id="id6">
+<h2>[0.8.2] — 2026-07-14<a class="headerlink" href="#id6" title="Link to this heading">¶</a></h2>
+<section id="fixed-spectre-aligned-event-scheduling">
+<h3>Fixed — Spectre-Aligned Event Scheduling<a class="headerlink" href="#fixed-spectre-aligned-event-scheduling" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Aligned Rust event scheduling with Spectre-oriented cross-event semantics,
+including preserved cross event times while sampling post-side nodes.</p></li>
+<li><p>Preserved post-cross transition samples and scheduled post-cross refinement
+when transition events change downstream sampled values.</p></li>
+<li><p>Preserved nominal-step gating after event updates so transition/event traces
+remain stable across refined time points.</p></li>
+</ul>
+</section>
+<section id="fixed-evaluator-parity">
+<h3>Fixed — Evaluator Parity<a class="headerlink" href="#fixed-evaluator-parity" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Preserved Spectre-compatible trace semantics at evaluator boundaries.</p></li>
+<li><p>Kept hierarchical Verilog-A behavior aligned across evaluator backends.</p></li>
+<li><p>Made the v4 evaluator runtime reproducible and kept the legacy Python engine
+aligned with v3 behavioral checks.</p></li>
+<li><p>Tightened <code class="docutils literal notranslate"><span class="pre">zi_nd</span></code> unit coverage around anchored sampled-data points.</p></li>
+</ul>
+</section>
+</section>
+<section id="id7">
+<h2>[0.8.1] — 2026-07-06<a class="headerlink" href="#id7" title="Link to this heading">¶</a></h2>
+<section id="added-evas2-rust-coverage">
+<h3>Added — EVAS2/Rust Coverage<a class="headerlink" href="#added-evas2-rust-coverage" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Added RustSimProgram lowering for valid continuous models that assign a
+scaled <code class="docutils literal notranslate"><span class="pre">transition(...)</span></code> expression to a temporary real value before
+contributing it to a voltage branch.</p></li>
+</ul>
+</section>
+<section id="changed-ahdl-lint-calibration">
+<h3>Changed — AHDL Lint Calibration<a class="headerlink" href="#changed-ahdl-lint-calibration" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Removed the unsupported W5010 warning for direct runtime-switched potential
+contributions when Cadence oracle evidence treats the case as clean.</p></li>
+<li><p>Calibrated W5008/W5018 lint boundaries against Cadence oracle evidence,
+including supply-scaled discontinuous contributions and <code class="docutils literal notranslate"><span class="pre">slew()</span></code> integer
+argument diagnostics.</p></li>
+<li><p>Reclassified selected current contribution, current probe, and indirect
+branch helper diagnostics from hard compatibility errors to KCL boundary
+warnings.</p></li>
+</ul>
+</section>
+</section>
+<section id="id8">
+<h2>[0.8.0] — 2026-07-06<a class="headerlink" href="#id8" title="Link to this heading">¶</a></h2>
+<section id="added-spectre-parity">
+<h3>Added — Spectre Parity<a class="headerlink" href="#added-spectre-parity" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Added strict Spectre compatibility checks for known EVAS/Spectre divergence
+classes, including seeded <code class="docutils literal notranslate"><span class="pre">$rdist_*</span></code> behavior, integer select/concatenation
+semantics, and extension syntax that should not silently pass as
+Spectre-equivalent.</p></li>
+<li><p>Added Spectre-aligned support for indirect branch current integration and
+sampled-data <code class="docutils literal notranslate"><span class="pre">zi_nd</span></code> scheduling/lowering.</p></li>
+</ul>
+</section>
+<section id="id9">
+<h3>Added — EVAS2/Rust Coverage<a class="headerlink" href="#id9" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Added EVAS2/Rust lowering for seeded random distributions, <code class="docutils literal notranslate"><span class="pre">$dist_uniform</span></code>
+and <code class="docutils literal notranslate"><span class="pre">$rdist_uniform</span></code>, Cadence environment/helper calls, node/branch helper
+semantics, simple user functions, reduction unary operators, dynamic
+state-array reads, dynamic body operators, first-order transfer assignments,
+<code class="docutils literal notranslate"><span class="pre">laplace_nd</span></code>, and additional release-row body IR coverage.</p></li>
+<li><p>Added EVAS2/Rust execution support for dynamic text-file reads and file
+cursor operations during events, including <code class="docutils literal notranslate"><span class="pre">$fscanf</span></code>, <code class="docutils literal notranslate"><span class="pre">$fgets</span></code>, <code class="docutils literal notranslate"><span class="pre">$ftell</span></code>,
+<code class="docutils literal notranslate"><span class="pre">$fseek</span></code>, <code class="docutils literal notranslate"><span class="pre">$rewind</span></code>, and runtime close handling.</p></li>
+<li><p>Added Python-side replay for Rust-triggered Verilog-A string side effects,
+including <code class="docutils literal notranslate"><span class="pre">$swrite</span></code>, <code class="docutils literal notranslate"><span class="pre">$sformat</span></code>, and formatted file output.</p></li>
+</ul>
+</section>
+<section id="fixed-rust-backend">
+<h3>Fixed — Rust Backend<a class="headerlink" href="#fixed-rust-backend" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Aligned Rust transition microstep recording with Python/Spectre-oriented
+event behavior.</p></li>
+<li><p>Prevented stale Rust core ABI builds from being reported as ordinary runtime
+failures.</p></li>
+<li><p>Kept Rust lowering coverage aligned with system output tasks and Cadence
+semantic helper rows.</p></li>
+</ul>
+</section>
+</section>
+<section id="id10">
+<h2>[0.7.0] — 2026-07-03<a class="headerlink" href="#id10" title="Link to this heading">¶</a></h2>
+<section id="changed-default-engine">
+<h3>Changed — Default Engine<a class="headerlink" href="#changed-default-engine" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Changed the packaged default engine to EVAS2/Rust (<code class="docutils literal notranslate"><span class="pre">evas-rust</span></code>) for supported
+event-driven designs.</p></li>
+<li><p>Removed automatic fallback from <code class="docutils literal notranslate"><span class="pre">evas-rust</span></code>/<code class="docutils literal notranslate"><span class="pre">evas2</span></code> to the Python engine when
+the Rust backend is unavailable. Select the compatibility engine explicitly
+with <code class="docutils literal notranslate"><span class="pre">--engine</span> <span class="pre">python</span></code>, <code class="docutils literal notranslate"><span class="pre">EVAS_ENGINE=python</span></code>, or
+<code class="docutils literal notranslate"><span class="pre">simulatorOptions</span> <span class="pre">options</span> <span class="pre">evas_engine=python</span></code>.</p></li>
+</ul>
+</section>
+<section id="id11">
+<h3>Added — EVAS2/Rust Coverage<a class="headerlink" href="#id11" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p>Added EVAS2/Rust full-model support for Spectre <code class="docutils literal notranslate"><span class="pre">vsource</span> <span class="pre">type=square</span></code>,
+including one-shot square sources with omitted <code class="docutils literal notranslate"><span class="pre">period</span></code>/<code class="docutils literal notranslate"><span class="pre">width</span></code> handling.</p></li>
+<li><p>Added EVAS2/Rust support for dynamic state array writes in event bodies.</p></li>
+<li><p>Added EVAS2/Rust support for <code class="docutils literal notranslate"><span class="pre">idtmod</span></code> continuous VCO-style models.</p></li>
+</ul>
+</section>
+</section>
+<section id="id12">
+<h2>[0.6.1] — 2026-07-02<a class="headerlink" href="#id12" title="Link to this heading">¶</a></h2>
 <section id="added-simulation-lint-preflight">
 <h3>Added — Simulation Lint Preflight<a class="headerlink" href="#added-simulation-lint-preflight" title="Link to this heading">¶</a></h3>
 <ul class="simple">
@@ -276,8 +522,8 @@ without changing simulation pass/fail behavior.</p></li>
 </ul>
 </section>
 </section>
-<section id="id2">
-<h2>[0.6.0] — 2026-07-02<a class="headerlink" href="#id2" title="Link to this heading">¶</a></h2>
+<section id="id13">
+<h2>[0.6.0] — 2026-07-02<a class="headerlink" href="#id13" title="Link to this heading">¶</a></h2>
 <section id="added-lint-diagnostics">
 <h3>Added — Lint Diagnostics<a class="headerlink" href="#added-lint-diagnostics" title="Link to this heading">¶</a></h3>
 <ul class="simple">
@@ -306,8 +552,8 @@ required.</p></li>
 </ul>
 </section>
 </section>
-<section id="id3">
-<h2>[0.5.2] — 2026-07-01<a class="headerlink" href="#id3" title="Link to this heading">¶</a></h2>
+<section id="id14">
+<h2>[0.5.2] — 2026-07-01<a class="headerlink" href="#id14" title="Link to this heading">¶</a></h2>
 <section id="fixed-publishing">
 <h3>Fixed — Publishing<a class="headerlink" href="#fixed-publishing" title="Link to this heading">¶</a></h3>
 <ul class="simple">
@@ -318,8 +564,8 @@ partial release attempt.</p></li>
 </ul>
 </section>
 </section>
-<section id="id4">
-<h2>[0.5.1] — 2026-07-01<a class="headerlink" href="#id4" title="Link to this heading">¶</a></h2>
+<section id="id15">
+<h2>[0.5.1] — 2026-07-01<a class="headerlink" href="#id15" title="Link to this heading">¶</a></h2>
 <section id="fixed-packaging">
 <h3>Fixed — Packaging<a class="headerlink" href="#fixed-packaging" title="Link to this heading">¶</a></h3>
 <ul class="simple">
@@ -341,8 +587,8 @@ timestamps.</p></li>
 </ul>
 </section>
 </section>
-<section id="id5">
-<h2>[0.5.0] — 2026-07-01<a class="headerlink" href="#id5" title="Link to this heading">¶</a></h2>
+<section id="id16">
+<h2>[0.5.0] — 2026-07-01<a class="headerlink" href="#id16" title="Link to this heading">¶</a></h2>
 <section id="added-verilog-a-and-verilog-ams-compatibility">
 <h3>Added — Verilog-A and Verilog-AMS Compatibility<a class="headerlink" href="#added-verilog-a-and-verilog-ams-compatibility" title="Link to this heading">¶</a></h3>
 <ul class="simple">
@@ -386,8 +632,8 @@ branch balance statements, node attribute probes, generic
 </ul>
 </section>
 </section>
-<section id="id6">
-<h2>[0.4.6] — 2026-06-30<a class="headerlink" href="#id6" title="Link to this heading">¶</a></h2>
+<section id="id17">
+<h2>[0.4.6] — 2026-06-30<a class="headerlink" href="#id17" title="Link to this heading">¶</a></h2>
 <section id="fixed-verilog-a-compatibility">
 <h3>Fixed — Verilog-A Compatibility<a class="headerlink" href="#fixed-verilog-a-compatibility" title="Link to this heading">¶</a></h3>
 <ul class="simple">
@@ -422,8 +668,8 @@ law as an explicit opt-in mode.</p></li>
 </ul>
 </section>
 </section>
-<section id="id7">
-<h2>[0.4.5] — 2026-06-25<a class="headerlink" href="#id7" title="Link to this heading">¶</a></h2>
+<section id="id18">
+<h2>[0.4.5] — 2026-06-25<a class="headerlink" href="#id18" title="Link to this heading">¶</a></h2>
 <section id="fixed-spectre-compatibility">
 <h3>Fixed — Spectre Compatibility<a class="headerlink" href="#fixed-spectre-compatibility" title="Link to this heading">¶</a></h3>
 <ul class="simple">
@@ -444,10 +690,10 @@ event-driven transition scheduling with the measured Spectre behavior.</p></li>
 </ul>
 </section>
 </section>
-<section id="id8">
-<h2>[0.4.4] — 2026-06-08<a class="headerlink" href="#id8" title="Link to this heading">¶</a></h2>
-<section id="id9">
-<h3>Fixed — Engine Selection<a class="headerlink" href="#id9" title="Link to this heading">¶</a></h3>
+<section id="id19">
+<h2>[0.4.4] — 2026-06-08<a class="headerlink" href="#id19" title="Link to this heading">¶</a></h2>
+<section id="id20">
+<h3>Fixed — Engine Selection<a class="headerlink" href="#id20" title="Link to this heading">¶</a></h3>
 <ul class="simple">
 <li><p>Restored the packaged default to the Python compatibility engine so <code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">run</span></code>
 and <code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">simulate</span></code> work from PyPI or a fresh source checkout without a
@@ -465,8 +711,8 @@ to describe Rust backend build requirements.</p></li>
 </ul>
 </section>
 </section>
-<section id="id10">
-<h2>[0.3.0] — 2026-03-16<a class="headerlink" href="#id10" title="Link to this heading">¶</a></h2>
+<section id="id21">
+<h2>[0.3.0] — 2026-03-16<a class="headerlink" href="#id21" title="Link to this heading">¶</a></h2>
 <section id="added-language-features">
 <h3>Added — Language Features<a class="headerlink" href="#added-language-features" title="Link to this heading">¶</a></h3>
 <ul class="simple">
@@ -486,8 +732,8 @@ to describe Rust backend build requirements.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">test_cmp_offset_search</span></code> now passes without <code class="docutils literal notranslate"><span class="pre">xfail</span></code> — binary search converges to ≈10 mV (was stuck at 100 mV due to double-trigger)</p></li>
 </ul>
 </section>
-<section id="id11">
-<h3>Changed — Examples<a class="headerlink" href="#id11" title="Link to this heading">¶</a></h3>
+<section id="id22">
+<h3>Changed — Examples<a class="headerlink" href="#id22" title="Link to this heading">¶</a></h3>
 <ul class="simple">
 <li><p><code class="docutils literal notranslate"><span class="pre">dwa_ptr_gen_msb</span></code> renamed to <code class="docutils literal notranslate"><span class="pre">dwa_ptr_gen_no_overlap</span></code> across all files (<code class="docutils literal notranslate"><span class="pre">.va</span></code>, <code class="docutils literal notranslate"><span class="pre">.scs</span></code>, <code class="docutils literal notranslate"><span class="pre">analyze_*.py</span></code>, <code class="docutils literal notranslate"><span class="pre">validate_*.py</span></code>, tests)</p></li>
 <li><p>Both DWA testbenches migrated from 4-bit PWL buses to a single analog voltage source + new <code class="docutils literal notranslate"><span class="pre">v2b_4b</span></code> ideal ADC block</p></li>
@@ -505,8 +751,8 @@ to describe Rust backend build requirements.</p></li>
 </ul>
 </section>
 </section>
-<section id="id12">
-<h2>[0.2.0] — 2026-03-16<a class="headerlink" href="#id12" title="Link to this heading">¶</a></h2>
+<section id="id23">
+<h2>[0.2.0] — 2026-03-16<a class="headerlink" href="#id23" title="Link to this heading">¶</a></h2>
 <section id="added">
 <h3>Added<a class="headerlink" href="#added" title="Link to this heading">¶</a></h3>
 <ul class="simple">
@@ -514,10 +760,10 @@ to describe Rust backend build requirements.</p></li>
 </ul>
 </section>
 </section>
-<section id="id13">
-<h2>[0.1.2] — 2026-03-15<a class="headerlink" href="#id13" title="Link to this heading">¶</a></h2>
-<section id="id14">
-<h3>Fixed<a class="headerlink" href="#id14" title="Link to this heading">¶</a></h3>
+<section id="id24">
+<h2>[0.1.2] — 2026-03-15<a class="headerlink" href="#id24" title="Link to this heading">¶</a></h2>
+<section id="id25">
+<h3>Fixed<a class="headerlink" href="#id25" title="Link to this heading">¶</a></h3>
 <ul class="simple">
 <li><p><code class="docutils literal notranslate"><span class="pre">$strobe</span></code> / <code class="docutils literal notranslate"><span class="pre">$display</span></code> output now sorted strictly by simulation time across all module instances (previously grouped by instance instantiation order)</p></li>
 </ul>
@@ -529,18 +775,18 @@ to describe Rust backend build requirements.</p></li>
 </ul>
 </section>
 </section>
-<section id="id15">
-<h2>[0.1.1] — 2026-03-14<a class="headerlink" href="#id15" title="Link to this heading">¶</a></h2>
-<section id="id16">
-<h3>Added<a class="headerlink" href="#id16" title="Link to this heading">¶</a></h3>
+<section id="id26">
+<h2>[0.1.1] — 2026-03-14<a class="headerlink" href="#id26" title="Link to this heading">¶</a></h2>
+<section id="id27">
+<h3>Added<a class="headerlink" href="#id27" title="Link to this heading">¶</a></h3>
 <ul class="simple">
 <li><p>Sphinx documentation with Apple Developer Documentation aesthetic (SF Pro fonts, <code class="docutils literal notranslate"><span class="pre">#0071e3</span></code> blue)</p></li>
 <li><p>busuanzi visitor counter</p></li>
 <li><p>Streamlined project folder structure</p></li>
 </ul>
 </section>
-<section id="id17">
-<h3>Added<a class="headerlink" href="#id17" title="Link to this heading">¶</a></h3>
+<section id="id28">
+<h3>Added<a class="headerlink" href="#id28" title="Link to this heading">¶</a></h3>
 <ul class="simple">
 <li><p>Initial public release on PyPI</p></li>
 <li><p>Event-driven Verilog-A simulator engine</p></li>
@@ -622,66 +868,114 @@ to describe Rust backend build requirements.</p></li>
             <ul>
 <li><a class="reference internal" href="#">Changelog</a><ul>
 <li><a class="reference internal" href="#unreleased">Unreleased</a></li>
-<li><a class="reference internal" href="#id1">[0.6.1] — 2026-07-02</a><ul>
+<li><a class="reference internal" href="#id1">[0.8.7] — 2026-07-28</a><ul>
+<li><a class="reference internal" href="#fixed-spectre-event-publication">Fixed — Spectre Event Publication</a></li>
+<li><a class="reference internal" href="#changed-rust-only-production-boundary">Changed — Rust-Only Production Boundary</a></li>
+<li><a class="reference internal" href="#added-spectre-frontend-coverage">Added — Spectre Frontend Coverage</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#id2">[0.8.6] — 2026-07-27</a><ul>
+<li><a class="reference internal" href="#added-audited-spectre-acceptance">Added — Audited Spectre Acceptance</a></li>
+<li><a class="reference internal" href="#changed-fail-closed-netlist-elaboration">Changed — Fail-Closed Netlist Elaboration</a></li>
+<li><a class="reference internal" href="#fixed-event-runtime-parity">Fixed — Event Runtime Parity</a></li>
+<li><a class="reference internal" href="#ci-native-core-coverage">CI — Native Core Coverage</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#id3">[0.8.5] — 2026-07-25</a><ul>
+<li><a class="reference internal" href="#fixed-dynamic-zero-period-timers">Fixed — Dynamic Zero-Period Timers</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#id4">[0.8.4] — 2026-07-23</a><ul>
+<li><a class="reference internal" href="#fixed-seeded-random-streams">Fixed — Seeded Random Streams</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#id5">[0.8.3] — 2026-07-18</a><ul>
+<li><a class="reference internal" href="#added-build-identity">Added — Build Identity</a></li>
+<li><a class="reference internal" href="#changed-fail-closed-production-engine">Changed — Fail-Closed Production Engine</a></li>
+<li><a class="reference internal" href="#fixed-spectre-netlist-validation">Fixed — Spectre Netlist Validation</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#id6">[0.8.2] — 2026-07-14</a><ul>
+<li><a class="reference internal" href="#fixed-spectre-aligned-event-scheduling">Fixed — Spectre-Aligned Event Scheduling</a></li>
+<li><a class="reference internal" href="#fixed-evaluator-parity">Fixed — Evaluator Parity</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#id7">[0.8.1] — 2026-07-06</a><ul>
+<li><a class="reference internal" href="#added-evas2-rust-coverage">Added — EVAS2/Rust Coverage</a></li>
+<li><a class="reference internal" href="#changed-ahdl-lint-calibration">Changed — AHDL Lint Calibration</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#id8">[0.8.0] — 2026-07-06</a><ul>
+<li><a class="reference internal" href="#added-spectre-parity">Added — Spectre Parity</a></li>
+<li><a class="reference internal" href="#id9">Added — EVAS2/Rust Coverage</a></li>
+<li><a class="reference internal" href="#fixed-rust-backend">Fixed — Rust Backend</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#id10">[0.7.0] — 2026-07-03</a><ul>
+<li><a class="reference internal" href="#changed-default-engine">Changed — Default Engine</a></li>
+<li><a class="reference internal" href="#id11">Added — EVAS2/Rust Coverage</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#id12">[0.6.1] — 2026-07-02</a><ul>
 <li><a class="reference internal" href="#added-simulation-lint-preflight">Added — Simulation Lint Preflight</a></li>
 </ul>
 </li>
-<li><a class="reference internal" href="#id2">[0.6.0] — 2026-07-02</a><ul>
+<li><a class="reference internal" href="#id13">[0.6.0] — 2026-07-02</a><ul>
 <li><a class="reference internal" href="#added-lint-diagnostics">Added — Lint Diagnostics</a></li>
 <li><a class="reference internal" href="#added-verilog-a-compatibility">Added — Verilog-A Compatibility</a></li>
 <li><a class="reference internal" href="#fixed-engine-selection">Fixed — Engine Selection</a></li>
 </ul>
 </li>
-<li><a class="reference internal" href="#id3">[0.5.2] — 2026-07-01</a><ul>
+<li><a class="reference internal" href="#id14">[0.5.2] — 2026-07-01</a><ul>
 <li><a class="reference internal" href="#fixed-publishing">Fixed — Publishing</a></li>
 </ul>
 </li>
-<li><a class="reference internal" href="#id4">[0.5.1] — 2026-07-01</a><ul>
+<li><a class="reference internal" href="#id15">[0.5.1] — 2026-07-01</a><ul>
 <li><a class="reference internal" href="#fixed-packaging">Fixed — Packaging</a></li>
 <li><a class="reference internal" href="#fixed-rust-backend-semantics">Fixed — Rust Backend Semantics</a></li>
 </ul>
 </li>
-<li><a class="reference internal" href="#id5">[0.5.0] — 2026-07-01</a><ul>
+<li><a class="reference internal" href="#id16">[0.5.0] — 2026-07-01</a><ul>
 <li><a class="reference internal" href="#added-verilog-a-and-verilog-ams-compatibility">Added — Verilog-A and Verilog-AMS Compatibility</a></li>
 <li><a class="reference internal" href="#added-analysis-and-behavioral-modeling">Added — Analysis and Behavioral Modeling</a></li>
 <li><a class="reference internal" href="#added-cadence-lrm-gap-fill-compatibility">Added — Cadence/LRM Gap-Fill Compatibility</a></li>
 </ul>
 </li>
-<li><a class="reference internal" href="#id6">[0.4.6] — 2026-06-30</a><ul>
+<li><a class="reference internal" href="#id17">[0.4.6] — 2026-06-30</a><ul>
 <li><a class="reference internal" href="#fixed-verilog-a-compatibility">Fixed — Verilog-A Compatibility</a></li>
 <li><a class="reference internal" href="#fixed-rust-backend-coverage">Fixed — Rust Backend Coverage</a></li>
 <li><a class="reference internal" href="#fixed-stochastic-and-event-timing">Fixed — Stochastic and Event Timing</a></li>
 </ul>
 </li>
-<li><a class="reference internal" href="#id7">[0.4.5] — 2026-06-25</a><ul>
+<li><a class="reference internal" href="#id18">[0.4.5] — 2026-06-25</a><ul>
 <li><a class="reference internal" href="#fixed-spectre-compatibility">Fixed — Spectre Compatibility</a></li>
 <li><a class="reference internal" href="#fixed-transition-timing">Fixed — Transition Timing</a></li>
 </ul>
 </li>
-<li><a class="reference internal" href="#id8">[0.4.4] — 2026-06-08</a><ul>
-<li><a class="reference internal" href="#id9">Fixed — Engine Selection</a></li>
+<li><a class="reference internal" href="#id19">[0.4.4] — 2026-06-08</a><ul>
+<li><a class="reference internal" href="#id20">Fixed — Engine Selection</a></li>
 <li><a class="reference internal" href="#changed-examples">Changed — Examples</a></li>
 </ul>
 </li>
-<li><a class="reference internal" href="#id10">[0.3.0] — 2026-03-16</a><ul>
+<li><a class="reference internal" href="#id21">[0.3.0] — 2026-03-16</a><ul>
 <li><a class="reference internal" href="#added-language-features">Added — Language Features</a></li>
 <li><a class="reference internal" href="#fixed">Fixed</a></li>
-<li><a class="reference internal" href="#id11">Changed — Examples</a></li>
+<li><a class="reference internal" href="#id22">Changed — Examples</a></li>
 <li><a class="reference internal" href="#added-new-module">Added — New Module</a></li>
 </ul>
 </li>
-<li><a class="reference internal" href="#id12">[0.2.0] — 2026-03-16</a><ul>
+<li><a class="reference internal" href="#id23">[0.2.0] — 2026-03-16</a><ul>
 <li><a class="reference internal" href="#added">Added</a></li>
 </ul>
 </li>
-<li><a class="reference internal" href="#id13">[0.1.2] — 2026-03-15</a><ul>
-<li><a class="reference internal" href="#id14">Fixed</a></li>
+<li><a class="reference internal" href="#id24">[0.1.2] — 2026-03-15</a><ul>
+<li><a class="reference internal" href="#id25">Fixed</a></li>
 <li><a class="reference internal" href="#changed">Changed</a></li>
 </ul>
 </li>
-<li><a class="reference internal" href="#id15">[0.1.1] — 2026-03-14</a><ul>
-<li><a class="reference internal" href="#id16">Added</a></li>
-<li><a class="reference internal" href="#id17">Added</a></li>
+<li><a class="reference internal" href="#id26">[0.1.1] — 2026-03-14</a><ul>
+<li><a class="reference internal" href="#id27">Added</a></li>
+<li><a class="reference internal" href="#id28">Added</a></li>
 </ul>
 </li>
 </ul>
@@ -695,7 +989,7 @@ to describe Rust backend build requirements.</p></li>
       
     </aside>
   </div>
-</div><script src="_static/documentation_options.js?v=2bd037f0"></script>
+</div><script src="_static/documentation_options.js?v=83e7c6f9"></script>
     <script src="_static/doctools.js?v=fd6eb6e6"></script>
     <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="_static/scripts/furo.js?v=46bd48cc"></script>

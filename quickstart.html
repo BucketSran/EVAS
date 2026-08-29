@@ -3,10 +3,10 @@
   <head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
-<link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="CLI Reference" href="cli.html"><link rel="prev" title="Installation" href="installation.html">
+<link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="Support Tiers" href="support_tiers.html"><link rel="prev" title="Installation" href="installation.html">
 
     <link rel="shortcut icon" href="_static/favicon.svg"><!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>Quickstart - EVAS 0.6.1 documentation</title>
+        <title>Quickstart - EVAS 0.8.7 documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
@@ -162,7 +162,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="index.html"><div class="brand">EVAS 0.6.1 documentation</div></a>
+      <a href="index.html"><div class="brand">EVAS 0.8.7 documentation</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -183,7 +183,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
   
-  <span class="sidebar-brand-text">EVAS 0.6.1 documentation</span>
+  <span class="sidebar-brand-text">EVAS 0.8.7 documentation</span>
   
 </a><form class="sidebar-search-container" method="get" action="search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -195,6 +195,7 @@
 <ul class="current">
 <li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
 <li class="toctree-l1 current current-page"><a class="current reference internal" href="#">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="support_tiers.html">Support Tiers</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cli.html">CLI Reference</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">Examples</span></p>
@@ -261,7 +262,6 @@
 <h2>Run a Bundled Example<a class="headerlink" href="#run-a-bundled-example" title="Link to this heading">¶</a></h2>
 <p>The fastest way to try EVAS is to run one of the included examples:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>evas<span class="w"> </span>run<span class="w"> </span>clk_div
-evas<span class="w"> </span>run<span class="w"> </span>clk_div<span class="w"> </span>--engine<span class="w"> </span>evas-rust<span class="w">   </span><span class="c1"># requires a built Rust backend</span>
 </pre></div>
 </div>
 <p>This will:</p>
@@ -274,7 +274,6 @@ evas<span class="w"> </span>run<span class="w"> </span>clk_div<span class="w"> <
 <section id="simulate-your-own-netlist">
 <h2>Simulate Your Own Netlist<a class="headerlink" href="#simulate-your-own-netlist" title="Link to this heading">¶</a></h2>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>evas<span class="w"> </span>simulate<span class="w"> </span>path/to/tb.scs<span class="w"> </span>-o<span class="w"> </span>output/mydesign
-evas<span class="w"> </span>simulate<span class="w"> </span>path/to/tb.scs<span class="w"> </span>-o<span class="w"> </span>output/mydesign<span class="w"> </span>--engine<span class="w"> </span>evas-rust
 </pre></div>
 </div>
 <p>Each simulation run produces:</p>
@@ -294,6 +293,9 @@ evas<span class="w"> </span>simulate<span class="w"> </span>path/to/tb.scs<span 
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">strobe.txt</span></code></p></td>
 <td><p>All <code class="docutils literal notranslate"><span class="pre">$strobe</span></code> log lines in time order</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">evas_identity.json</span></code></p></td>
+<td><p>Package, Rust core, ABI, and build provenance</p></td>
 </tr>
 </tbody>
 </table>
@@ -361,12 +363,12 @@ The <code class="docutils literal notranslate"><span class="pre">save</span></co
         
 
         <div class="related-pages">
-          <a class="next-page" href="cli.html">
+          <a class="next-page" href="support_tiers.html">
               <div class="page-info">
                 <div class="context">
                   <span>Next</span>
                 </div>
-                <div class="title">CLI Reference</div>
+                <div class="title">Support Tiers</div>
               </div>
               <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
             </a>
@@ -444,7 +446,7 @@ The <code class="docutils literal notranslate"><span class="pre">save</span></co
       
     </aside>
   </div>
-</div><script src="_static/documentation_options.js?v=2bd037f0"></script>
+</div><script src="_static/documentation_options.js?v=83e7c6f9"></script>
     <script src="_static/doctools.js?v=fd6eb6e6"></script>
     <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="_static/scripts/furo.js?v=46bd48cc"></script>

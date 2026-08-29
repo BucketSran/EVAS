@@ -6,7 +6,7 @@
 <link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="Quickstart" href="quickstart.html"><link rel="prev" title="EVAS — Event-driven Verilog-A Simulator" href="index.html">
 
     <link rel="shortcut icon" href="_static/favicon.svg"><!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>Installation - EVAS 0.6.1 documentation</title>
+        <title>Installation - EVAS 0.8.7 documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
@@ -162,7 +162,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="index.html"><div class="brand">EVAS 0.6.1 documentation</div></a>
+      <a href="index.html"><div class="brand">EVAS 0.8.7 documentation</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -183,7 +183,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
   
-  <span class="sidebar-brand-text">EVAS 0.6.1 documentation</span>
+  <span class="sidebar-brand-text">EVAS 0.8.7 documentation</span>
   
 </a><form class="sidebar-search-container" method="get" action="search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -195,6 +195,7 @@
 <ul class="current">
 <li class="toctree-l1 current current-page"><a class="current reference internal" href="#">Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="support_tiers.html">Support Tiers</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cli.html">CLI Reference</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">Examples</span></p>
@@ -274,32 +275,35 @@
 <h2>From Source<a class="headerlink" href="#from-source" title="Link to this heading">¶</a></h2>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/Arcadia-1/EVAS.git
 <span class="nb">cd</span><span class="w"> </span>EVAS
-pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span><span class="s2">&quot;.[dev]&quot;</span>
+pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span><span class="s2">".[dev]"</span>
 </pre></div>
 </div>
 </section>
 <section id="verify">
 <h2>Verify<a class="headerlink" href="#verify" title="Link to this heading">¶</a></h2>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>evas<span class="w"> </span>list
+evas<span class="w"> </span>--version
+evas<span class="w"> </span>--version<span class="w"> </span>--format<span class="w"> </span>json
 </pre></div>
 </div>
 <p>You should see the 5 bundled example groups printed.</p>
 </section>
 <section id="engine-selection">
 <h2>Engine Selection<a class="headerlink" href="#engine-selection" title="Link to this heading">¶</a></h2>
-<p>The packaged default is the Python compatibility engine. It works from PyPI or
-a fresh source checkout without compiling native code. Compatible Linux wheels
-also include the evas-rust shared library for explicit Rust-engine runs.</p>
-<p>evas-rust is the optional Rust-backed execution path for supported event-driven
-designs. If your platform installed the pure Python wheel, build the Rust core
-from source before selecting evas-rust:</p>
+<p>The production engine is EVAS2/Rust. Compatible Linux wheels include the
+evas-rust shared library, and source installs build it with cargo.</p>
+<p>If the Rust core is missing, unloadable, or ABI-incompatible, EVAS exits with a
+specific error and does not fall back to Python. Build the core from source:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cargo<span class="w"> </span>build<span class="w"> </span>--manifest-path<span class="w"> </span>evas/rust_core/Cargo.toml<span class="w"> </span>--release
-evas<span class="w"> </span>simulate<span class="w"> </span>path/to/tb.scs<span class="w"> </span>--engine<span class="w"> </span>evas-rust
+evas<span class="w"> </span>simulate<span class="w"> </span>path/to/tb.scs
 </pre></div>
 </div>
-<p>You can also select the engine with <code class="docutils literal notranslate"><span class="pre">EVAS_ENGINE=evas-rust</span></code> or
-<code class="docutils literal notranslate"><span class="pre">simulatorOptions</span> <span class="pre">options</span> <span class="pre">evas_engine=evas-rust</span></code>. The legacy <code class="docutils literal notranslate"><span class="pre">evas2</span></code> and
-<code class="docutils literal notranslate"><span class="pre">rust2</span></code> selectors remain accepted as compatibility aliases.</p>
+<p>The legacy <code class="docutils literal notranslate"><span class="pre">evas2</span></code> and <code class="docutils literal notranslate"><span class="pre">rust2</span></code> selectors remain accepted as time-bounded input
+aliases for <code class="docutils literal notranslate"><span class="pre">evas-rust</span></code>; logs and metadata always use the canonical identity.</p>
+<p>For benchmark provenance, capture <code class="docutils literal notranslate"><span class="pre">evas</span> <span class="pre">--version</span> <span class="pre">--format</span> <span class="pre">json</span></code> in image
+metadata alongside the image digest. Simulation output directories also contain
+<code class="docutils literal notranslate"><span class="pre">evas_identity.json</span></code> with the same package, Rust core, ABI, revision, and core
+loadability fields.</p>
 </section>
 </section>
 
@@ -393,7 +397,7 @@ evas<span class="w"> </span>simulate<span class="w"> </span>path/to/tb.scs<span 
       
     </aside>
   </div>
-</div><script src="_static/documentation_options.js?v=2bd037f0"></script>
+</div><script src="_static/documentation_options.js?v=83e7c6f9"></script>
     <script src="_static/doctools.js?v=fd6eb6e6"></script>
     <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="_static/scripts/furo.js?v=46bd48cc"></script>
